@@ -11,11 +11,15 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+.ruff_cache/
+.import_linter_cache/
 .coverage
 
 # 前端
 node_modules/
 dist/
+*.tsbuildinfo
+.playwright-cli/
 
 # 系统与崩溃文件
 bash.exe.stackdump

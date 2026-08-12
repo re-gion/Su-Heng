@@ -1,0 +1,29 @@
+default_tier: 4
+default_role: unknown
+groups:
+  - tier: 1
+    role: authority
+    domains:
+      - gov.cn
+      - court.gov.cn
+      - samr.gov.cn
+  - tier: 2
+    role: independent
+    domains:
+      - xinhuanet.com
+      - people.com.cn
+      - caixin.com
+      - thepaper.cn
+      - yicai.com
+  - tier: 3
+    role: syndicated
+    domains:
+      - sina.com.cn
+      - 163.com
+      - ifeng.com
+      - qq.com
+  - tier: 5
+    role: unknown
+    domains:
+      - wikipedia.org
+      - baike.baidu.com

@@ -1,0 +1,12 @@
+[importlinter]
+root_package = yuqing
+
+[importlinter:contract:layers]
+name = 单向分层
+type = layers
+layers =
+    yuqing.app
+    yuqing.services
+    yuqing.agents | yuqing.render
+    yuqing.core
+    yuqing.storage
