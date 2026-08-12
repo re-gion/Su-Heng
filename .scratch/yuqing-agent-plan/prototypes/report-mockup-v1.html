@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>可核验舆情专报 · 海天酱油“添加剂双标”风波（2022）| 产品形态样张 v1</title>
+<style>
+/* ============================================================
+   可核验舆情专报 — 样张 v1
+   配色：新闻编辑室（墨色 + 深蓝 + 纸白），语义色仅用于核验与情感
+   ============================================================ */
+:root{
+  --paper:#f5f4f1;
+  --surface:#ffffff;
+  --surface-2:#fbfaf8;
+  --ink:#14191f;
+  --ink-2:#3b4552;
+  --ink-3:#6e7885;
+  --ink-4:#98a0aa;
+  --line:#e3e1db;
+  --line-2:#d0ccc3;
+  --navy:#1c3f63;
+  --navy-d:#122b45;
+  --navy-l:#eaeff4;
+  --navy-l2:#dae3ec;
+
+  --ok:#2c7a51;      --ok-bg:#e9f2ec;  --ok-bd:#b6d4c2;
+  --warn:#9a6b12;    --warn-bg:#f8f0dd; --warn-bd:#e0c893;
+  --dis:#b0402a;     --dis-bg:#fbeae6;  --dis-bd:#e5bcb1;
+  --illus:#7d6a45;   --illus-bg:#f4efe4;
+
+  --neg:#b0402a; --neu:#8a929c; --pos:#2c7a51;
+
+  --font-sans:"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei","Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  --font-serif:"Source Han Serif SC","Noto Serif SC","Songti SC",STSong,"SimSun",Georgia,serif;
+  --font-mono:"SF Mono",Consolas,"Roboto Mono","Courier New",monospace;
+
+  --w-content:940px;
+  --h-banner:44px;
+}
+*{box-sizing:border-box;}
+html{scroll-behavior:smooth;scroll-padding-top:120px;}
+body{
+  margin:0;background:var(--paper);color:var(--ink);
+  font-family:var(--font-sans);font-size:15px;line-height:1.85;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+p{margin:0 0 14px;}
+a{color:var(--navy);text-decoration:none;}
+a:hover{text-decoration:underline;}
+h1,h2,h3,h4{margin:0;font-weight:600;line-height:1.4;letter-spacing:-.01em;}
+
+/* ---------- 顶部样张说明横幅 ---------- */
+.banner{
+  position:fixed;top:0;left:0;right:0;height:var(--h-banner);z-index:200;
+  background:var(--navy-d);color:#dbe4ee;
+  display:flex;align-items:center;gap:14px;
+  padding:0 22px;font-size:12.5px;letter-spacing:.02em;
+  border-bottom:1px solid #0b1d2e;
+}
+.banner .tag{
+  flex:none;background:#e8c46a;color:#3b2b06;font-weight:700;
+  padding:2px 8px;border-radius:2px;font-size:11px;letter-spacing:.06em;
+}
+.banner .txt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.banner .txt b{color:#fff;font-weight:600;}
+@media(max-width:900px){.banner .txt{white-space:normal;font-size:11.5px;line-height:1.35;}
+  .banner{height:auto;min-height:var(--h-banner);padding:6px 14px;}}
+
+/* ---------- 布局 ---------- */
+.shell{max-width:1280px;margin:0 auto;padding:calc(var(--h-banner) + 0px) 0 0;}
+.cols{display:flex;gap:34px;align-items:flex-start;padding:0 28px 90px;}
+.toc{
+  position:sticky;top:calc(var(--h-banner) + 22px);
+  flex:0 0 212px;width:212px;
+  max-height:calc(100vh - var(--h-banner) - 44px);overflow:auto;
+  padding-top:26px;
+}
+.main{flex:1;min-width:0;max-width:var(--w-content);}
+@media(max-width:1080px){.toc{display:none;}.cols{padding:0 18px 60px;}}
+
+/* ---------- 目录 ---------- */
+.toc-title{
+  font-size:11px;letter-spacing:.16em;color:var(--ink-4);
+  text-transform:uppercase;margin-bottom:12px;padding-left:11px;font-weight:600;
+}
+.toc a{
+  display:block;padding:6px 11px;border-left:2px solid var(--line);
+  color:var(--ink-3);font-size:13px;line-height:1.5;
+}
+.toc a .n{font-family:var(--font-mono);font-size:11px;color:var(--ink-4);margin-right:7px;}
+.toc a:hover{color:var(--navy);background:var(--navy-l);text-decoration:none;}
+.toc a.active{color:var(--navy);border-left-color:var(--navy);font-weight:600;background:var(--navy-l);}
+.toc a.active .n{color:var(--navy);}
+.toc-foot{margin-top:16px;padding:11px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-4);line-height:1.6;}
+
+/* ---------- 报告头 ---------- */
+.rpt-head{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--navy);margin:26px 0 30px;}
+.rh-body{padding:28px 32px 24px;}
+.rh-kicker{display:flex;align-items:center;gap:10px;font-size:11.5px;letter-spacing:.14em;color:var(--navy);font-weight:600;margin-bottom:14px;}
+.rh-kicker .dot{width:5px;height:5px;background:var(--navy);border-radius:50%;}
+.rh-kicker .sep{flex:1;height:1px;background:var(--line);}
+.rh-kicker .ver{letter-spacing:.04em;color:var(--ink-4);font-weight:500;font-family:var(--font-mono);}
+.rpt-title{font-family:var(--font-serif);font-size:32px;line-height:1.32;font-weight:700;letter-spacing:0;margin-bottom:6px;}
+.rpt-sub{font-size:15px;color:var(--ink-2);margin-bottom:20px;line-height:1.7;}
+.rh-meta{display:flex;flex-wrap:wrap;gap:0;border-top:1px solid var(--line);padding-top:16px;}
+.rh-meta div{padding-right:30px;margin-right:30px;border-right:1px solid var(--line);}
+.rh-meta div:last-child{border-right:none;}
+.rh-meta .k{font-size:11px;color:var(--ink-4);letter-spacing:.08em;margin-bottom:2px;}
+.rh-meta .v{font-size:13.5px;color:var(--ink);font-family:var(--font-mono);}
+
+/* KPI */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line);}
+.kpi{padding:18px 22px 16px;border-right:1px solid var(--line);background:var(--surface-2);position:relative;}
+.kpi:last-child{border-right:none;}
+.kpi .lab{font-size:11.5px;color:var(--ink-3);letter-spacing:.04em;margin-bottom:7px;display:flex;align-items:center;gap:6px;}
+.kpi .num{font-family:var(--font-mono);font-size:27px;line-height:1.1;color:var(--navy-d);font-weight:600;letter-spacing:-.02em;}
+.kpi .num small{font-size:13px;color:var(--ink-3);font-weight:400;margin-left:3px;letter-spacing:0;}
+.kpi .sub{font-size:11.5px;color:var(--ink-4);margin-top:6px;line-height:1.5;}
+.kpi .bar{display:flex;height:4px;margin-top:9px;background:var(--line);overflow:hidden;}
+.kpi .bar i{display:block;height:100%;}
+@media(max-width:820px){.kpis{grid-template-columns:repeat(2,1fr);} .kpi{border-bottom:1px solid var(--line);}}
+
+/* 示意标记 */
+.illus{
+  display:inline-flex;align-items:center;gap:3px;
+  font-size:10px;letter-spacing:.06em;color:var(--illus);background:var(--illus-bg);
+  border:1px solid #e0d5bc;padding:0 5px;border-radius:2px;font-weight:600;
+  vertical-align:middle;line-height:16px;white-space:nowrap;
+}
+.real{
+  display:inline-flex;align-items:center;font-size:10px;letter-spacing:.06em;
+  color:var(--navy);background:var(--navy-l);border:1px solid var(--navy-l2);
+  padding:0 5px;border-radius:2px;font-weight:600;line-height:16px;white-space:nowrap;
+}
+
+/* ---------- 章节 ---------- */
+section{margin-bottom:44px;scroll-margin-top:110px;}
+.sec-head{display:flex;align-items:baseline;gap:12px;border-bottom:2px solid var(--ink);padding-bottom:9px;margin-bottom:20px;}
+.sec-head .no{font-family:var(--font-mono);font-size:12px;color:var(--navy);font-weight:600;letter-spacing:.06em;}
+.sec-head h2{font-size:20px;letter-spacing:.01em;}
+.sec-head .hint{margin-left:auto;font-size:11.5px;color:var(--ink-4);font-weight:400;letter-spacing:.02em;}
+.card{background:var(--surface);border:1px solid var(--line);padding:24px 26px;}
+.card + .card{margin-top:14px;}
+
+/* ---------- 执行摘要 ---------- */
+.sum-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+@media(max-width:860px){.sum-grid{grid-template-columns:1fr;}}
+.sum{background:var(--surface);border:1px solid var(--line);padding:20px 22px;position:relative;}
+.sum::before{content:"";position:absolute;left:0;top:0;width:3px;height:34px;background:var(--navy);}
+.sum h3{font-size:14.5px;margin-bottom:4px;}
+.sum .q{font-size:11px;color:var(--ink-4);letter-spacing:.1em;margin-bottom:11px;font-family:var(--font-mono);}
+.sum p{font-size:13.8px;color:var(--ink-2);line-height:1.82;margin-bottom:0;}
+.sum + .sum{margin-top:0;}
+.lede{
+  font-family:var(--font-serif);font-size:17px;line-height:1.9;color:var(--ink);
+  border-left:3px solid var(--navy);padding:2px 0 2px 20px;margin:0 0 20px;
+}
+
+/* ---------- 引用标 ---------- */
+.ref{
+  display:inline-block;font-family:var(--font-mono);font-size:10.5px;
+  color:var(--navy);background:var(--navy-l);border:1px solid var(--navy-l2);
+  border-radius:2px;padding:0 4px;margin:0 1px;cursor:pointer;line-height:15px;
+  vertical-align:2px;user-select:none;font-weight:600;
+}
+.ref:hover{background:var(--navy);color:#fff;border-color:var(--navy);}
+.ref-tip{
+  position:fixed;z-index:300;max-width:330px;background:var(--ink);color:#e8ecf1;
+  font-size:12px;line-height:1.65;padding:10px 13px;border-radius:3px;
+  box-shadow:0 8px 26px rgba(0,0,0,.28);pointer-events:none;opacity:0;transform:translateY(4px);
+  transition:opacity .12s,transform .12s;
+}
+.ref-tip.on{opacity:1;transform:translateY(0);}
+.ref-tip .t{color:#fff;font-weight:600;display:block;margin-bottom:3px;}
+.ref-tip .m{color:#9fb0c2;font-size:11px;font-family:var(--font-mono);}
+
+/* ---------- 时间线 ---------- */
+.tl{position:relative;padding-left:26px;}
+.tl::before{content:"";position:absolute;left:5px;top:6px;bottom:6px;width:1px;background:var(--line-2);}
+.tl-item{position:relative;padding:0 0 22px 0;}
+.tl-item::before{
+  content:"";position:absolute;left:-24px;top:7px;width:9px;height:9px;border-radius:50%;
+  background:var(--surface);border:2px solid var(--navy);
+}
+.tl-item.key::before{background:var(--navy);width:11px;height:11px;left:-25px;top:6px;}
+.tl-item.turn::before{background:var(--dis);border-color:var(--dis);width:11px;height:11px;left:-25px;top:6px;}
+.tl-date{font-family:var(--font-mono);font-size:12px;color:var(--navy);font-weight:600;letter-spacing:.02em;}
+.tl-date .badge{
+  display:inline-block;margin-left:8px;font-family:var(--font-sans);font-size:10px;font-weight:600;
+  letter-spacing:.06em;padding:0 5px;border-radius:2px;vertical-align:1px;line-height:16px;
+}
+.tl-date .badge.turn{background:var(--dis-bg);color:var(--dis);border:1px solid var(--dis-bd);}
+.tl-date .badge.key{background:var(--navy-l);color:var(--navy);border:1px solid var(--navy-l2);}
+.tl-title{font-size:14.5px;font-weight:600;margin:2px 0 3px;}
+.tl-desc{font-size:13.5px;color:var(--ink-2);line-height:1.78;}
+.tl-quote{
+  margin-top:7px;padding:8px 12px;background:var(--surface-2);border-left:2px solid var(--line-2);
+  font-size:13px;color:var(--ink-2);font-family:var(--font-serif);line-height:1.7;
+}
+
+/* ---------- 核验表 ---------- */
+.verify-rule{
+  background:var(--surface-2);border:1px solid var(--line);border-left:3px solid var(--navy);
+  padding:14px 18px;font-size:12.8px;color:var(--ink-2);line-height:1.8;margin-bottom:16px;
+}
+.verify-rule b{color:var(--ink);}
+.filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
+.filters .fl{font-size:11.5px;color:var(--ink-4);letter-spacing:.06em;margin-right:2px;}
+.fbtn{
+  font-family:inherit;font-size:12.5px;padding:4px 12px;cursor:pointer;
+  border:1px solid var(--line-2);background:var(--surface);color:var(--ink-2);border-radius:2px;
+  display:inline-flex;align-items:center;gap:6px;transition:.12s;
+}
+.fbtn:hover{border-color:var(--ink-3);}
+.fbtn .c{font-family:var(--font-mono);font-size:11px;color:var(--ink-4);}
+.fbtn[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff;}
+.fbtn[aria-pressed="true"] .c{color:#b6bec8;}
+.fbtn.v-ok[aria-pressed="true"]{background:var(--ok);border-color:var(--ok);}
+.fbtn.v-warn[aria-pressed="true"]{background:var(--warn);border-color:var(--warn);}
+.fbtn.v-dis[aria-pressed="true"]{background:var(--dis);border-color:var(--dis);}
+.dist{display:flex;height:6px;margin-bottom:16px;border:1px solid var(--line);background:var(--surface);}
+.dist i{display:block;height:100%;}
+
+.claims{border:1px solid var(--line);background:var(--surface);}
+.claim{border-bottom:1px solid var(--line);}
+.claim:last-child{border-bottom:none;}
+.claim.hide{display:none;}
+.claim-hd{
+  display:flex;gap:14px;align-items:flex-start;padding:15px 20px;cursor:pointer;
+  transition:background .12s;
+}
+.claim-hd:hover{background:var(--surface-2);}
+.claim.open .claim-hd{background:var(--surface-2);}
+.claim-id{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-4);flex:none;padding-top:2px;width:30px;}
+.claim-tx{flex:1;min-width:0;font-size:14px;line-height:1.72;color:var(--ink);}
+.claim-tx .rumor{display:block;font-size:12.2px;color:var(--ink-3);margin-top:5px;line-height:1.6;}
+.claim-tx .rumor b{color:var(--ink-2);font-weight:600;}
+.badge{
+  flex:none;font-size:11.5px;font-weight:600;padding:1px 9px;border-radius:2px;
+  letter-spacing:.04em;line-height:20px;white-space:nowrap;border:1px solid;
+}
+.badge.ok{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-bd);}
+.badge.warn{color:var(--warn);background:var(--warn-bg);border-color:var(--warn-bd);}
+.badge.dis{color:var(--dis);background:var(--dis-bg);border-color:var(--dis-bd);}
+.chev{flex:none;color:var(--ink-4);font-size:11px;padding-top:3px;transition:transform .18s;width:12px;}
+.claim.open .chev{transform:rotate(90deg);}
+.claim-bd{display:none;padding:0 20px 18px 64px;}
+.claim.open .claim-bd{display:block;}
+.verdict-line{
+  display:flex;flex-wrap:wrap;gap:10px 22px;padding:11px 14px;background:var(--surface-2);
+  border:1px solid var(--line);margin-bottom:12px;font-size:12.5px;
+}
+.verdict-line span{color:var(--ink-3);}
+.verdict-line span b{color:var(--ink);font-weight:600;}
+.claim-note{font-size:13px;color:var(--ink-2);line-height:1.78;margin-bottom:12px;}
+.claim-note strong{color:var(--ink);}
+.cites{display:grid;gap:10px;}
+.cite{border:1px solid var(--line);border-left:3px solid var(--navy);background:var(--surface);padding:12px 15px;}
+.cite-hd{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:7px;}
+.cite-hd .name{font-size:13px;font-weight:600;color:var(--ink);}
+.cite-hd .date{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-4);}
+.tier{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:2px;line-height:17px;letter-spacing:.04em;border:1px solid;}
+.tier.t1{color:#1c3f63;background:#e5edf5;border-color:#c3d3e2;}
+.tier.t2{color:#2c5e4a;background:#e8f1ec;border-color:#c2d9cd;}
+.tier.t3{color:#5c5346;background:#f2efe9;border-color:#dcd5c8;}
+.tier.t4{color:#6b5a5a;background:#f3ecec;border-color:#ddd0d0;}
+.tier.t5{color:#5f6470;background:#eef0f3;border-color:#d5d9de;}
+.cite-q{
+  font-family:var(--font-serif);font-size:13.2px;line-height:1.78;color:var(--ink-2);
+  padding-left:11px;border-left:2px solid var(--line-2);margin-bottom:8px;
+}
+.qk{font-size:10px;font-weight:600;padding:0 5px;border-radius:2px;line-height:16px;letter-spacing:.04em;border:1px solid;}
+.qk.raw{color:#2c5e4a;background:#e8f1ec;border-color:#c2d9cd;}
+.qk.para{color:#5c5346;background:#f2efe9;border-color:#dcd5c8;}
+.cite-ft{display:flex;align-items:center;gap:12px;font-size:11.5px;}
+.cite-ft a{font-family:var(--font-mono);font-size:11px;color:var(--navy);word-break:break-all;}
+.cite-ft .eid{font-family:var(--font-mono);color:var(--ink-4);font-size:11px;}
+
+/* ---------- 图表 ---------- */
+.chart-wrap{background:var(--surface);border:1px solid var(--line);padding:18px 20px 14px;}
+.chart-hd{display:flex;align-items:baseline;gap:10px;margin-bottom:4px;}
+.chart-hd h3{font-size:14.5px;}
+.chart-hd .src{margin-left:auto;font-size:11px;color:var(--ink-4);}
+.chart{width:100%;height:300px;}
+.chart-fallback{
+  display:none;padding:26px;text-align:center;color:var(--ink-3);font-size:13px;
+  background:var(--surface-2);border:1px dashed var(--line-2);
+}
+.chart-fallback.on{display:block;}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;}
+@media(max-width:860px){.two{grid-template-columns:1fr;}}
+.chart-note{font-size:11.8px;color:var(--ink-4);line-height:1.65;margin-top:8px;padding-top:8px;border-top:1px solid var(--line);}
+
+/* 关键词 */
+.kw{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.kw span{
+  border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink-2);
+  padding:3px 11px;border-radius:2px;line-height:1.5;
+}
+.kw span.w1{font-size:18px;color:var(--navy-d);border-color:var(--navy-l2);background:var(--navy-l);font-weight:600;}
+.kw span.w2{font-size:15.5px;color:var(--ink);font-weight:600;}
+.kw span.w3{font-size:13.5px;}
+.kw span.w4{font-size:12.5px;color:var(--ink-3);}
+
+/* ---------- 观点摘录 ---------- */
+.voices{display:grid;gap:12px;}
+.voice{background:var(--surface);border:1px solid var(--line);padding:16px 18px;display:flex;gap:16px;}
+.voice .side{flex:0 0 132px;border-right:1px solid var(--line);padding-right:14px;}
+.voice .who{font-size:13px;font-weight:600;line-height:1.5;}
+.voice .role{font-size:11.5px;color:var(--ink-3);line-height:1.5;margin-top:2px;}
+.voice .stance{
+  display:inline-block;margin-top:7px;font-size:10.5px;font-weight:600;padding:0 6px;
+  border-radius:2px;line-height:17px;border:1px solid;letter-spacing:.04em;
+}
+.stance.s-neg{color:var(--neg);background:var(--dis-bg);border-color:var(--dis-bd);}
+.stance.s-neu{color:#4d5560;background:#eef0f3;border-color:#d5d9de;}
+.stance.s-pos{color:var(--pos);background:var(--ok-bg);border-color:var(--ok-bd);}
+.voice .body{flex:1;min-width:0;}
+.voice .body q{font-family:var(--font-serif);font-size:13.8px;line-height:1.8;color:var(--ink);quotes:“「” “」”;}
+.voice .body .m{margin-top:8px;font-size:11.5px;color:var(--ink-4);}
+@media(max-width:700px){.voice{flex-direction:column;gap:10px;}.voice .side{flex:none;border-right:none;border-bottom:1px solid var(--line);padding:0 0 10px;}}
+
+/* 低声量板块 */
+.quiet{background:#fdfcf9;border:1px solid var(--line);border-top:3px solid var(--illus);padding:22px 24px;}
+.quiet h3{font-size:15px;margin-bottom:4px;}
+.quiet .sub{font-size:12.5px;color:var(--ink-3);margin-bottom:16px;}
+.qitem{border-top:1px solid var(--line);padding:14px 0 0;margin-top:14px;}
+.qitem:first-of-type{border-top:none;margin-top:0;padding-top:0;}
+.qitem h4{font-size:13.8px;margin-bottom:5px;display:flex;align-items:center;gap:8px;}
+.qitem h4 .vol{
+  font-family:var(--font-mono);font-size:10.5px;color:var(--illus);background:var(--illus-bg);
+  border:1px solid #e0d5bc;padding:0 5px;border-radius:2px;font-weight:600;line-height:16px;
+}
+.qitem p{font-size:13.2px;color:var(--ink-2);line-height:1.8;margin:0;}
+
+/* ---------- 历史对照 ---------- */
+.hist{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+@media(max-width:920px){.hist{grid-template-columns:1fr;}}
+.hcard{background:var(--surface);border:1px solid var(--line);display:flex;flex-direction:column;}
+.hcard .top{padding:15px 17px 13px;border-bottom:1px solid var(--line);background:var(--surface-2);}
+.hcard .yr{font-family:var(--font-mono);font-size:11.5px;color:var(--navy);font-weight:600;letter-spacing:.06em;}
+.hcard .nm{font-size:14.5px;font-weight:600;margin-top:3px;line-height:1.45;}
+.hcard .ty{font-size:11.5px;color:var(--ink-3);margin-top:5px;}
+.hcard .bd{padding:14px 17px;font-size:12.8px;color:var(--ink-2);line-height:1.78;flex:1;}
+.hcard dl{margin:0;}
+.hcard dt{font-size:10.5px;color:var(--ink-4);letter-spacing:.08em;margin-bottom:2px;}
+.hcard dd{margin:0 0 11px;}
+.hcard dd:last-child{margin-bottom:0;}
+.cmp{width:100%;border-collapse:collapse;margin-top:16px;background:var(--surface);border:1px solid var(--line);font-size:12.8px;}
+.cmp th,.cmp td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top;line-height:1.7;}
+.cmp thead th{background:var(--navy-l);color:var(--navy-d);font-size:12px;font-weight:600;letter-spacing:.02em;}
+.cmp tbody th{background:var(--surface-2);color:var(--ink-2);font-weight:600;width:120px;font-size:12.2px;}
+.cmp td.hl{background:#fbfaf6;}
+
+/* ---------- 研判 ---------- */
+.read{display:grid;gap:12px;}
+.ritem{background:var(--surface);border:1px solid var(--line);padding:18px 20px;display:flex;gap:16px;}
+.ritem .idx{
+  flex:none;width:26px;height:26px;border-radius:50%;background:var(--navy);color:#fff;
+  font-family:var(--font-mono);font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:600;
+}
+.ritem h4{font-size:14.2px;margin-bottom:6px;}
+.ritem p{font-size:13.3px;color:var(--ink-2);line-height:1.82;margin-bottom:0;}
+.ritem p + p{margin-top:8px;}
+.checklist{margin:10px 0 0;padding:0;list-style:none;}
+.checklist li{font-size:13px;color:var(--ink-2);line-height:1.75;padding-left:20px;position:relative;margin-bottom:5px;}
+.checklist li::before{content:"□";position:absolute;left:0;color:var(--navy);font-size:13px;}
+
+/* ---------- 局限性 ---------- */
+.limit{background:var(--surface);border:1px solid var(--line-2);border-left:3px solid var(--warn);padding:22px 24px;}
+.limit ol{margin:0;padding-left:20px;}
+.limit li{font-size:13.3px;color:var(--ink-2);line-height:1.82;margin-bottom:10px;}
+.limit li:last-child{margin-bottom:0;}
+.limit li b{color:var(--ink);font-weight:600;}
+.limit .cat{
+  display:inline-block;font-size:10.5px;font-weight:600;padding:0 6px;border-radius:2px;
+  line-height:17px;border:1px solid var(--warn-bd);background:var(--warn-bg);color:var(--warn);
+  margin-right:7px;letter-spacing:.04em;
+}
+
+/* ---------- 证据清单 ---------- */
+.ev-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;font-size:12px;color:var(--ink-3);}
+.ev-tools .stat{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-4);}
+.evlist{background:var(--surface);border:1px solid var(--line);}
+.ev{display:flex;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);font-size:13px;align-items:flex-start;}
+.ev:last-child{border-bottom:none;}
+.ev:target,.ev.flash{background:#fdf5e0;box-shadow:inset 3px 0 0 #b8912f;}
+.ev .eid{font-family:var(--font-mono);font-size:11.5px;color:var(--navy);font-weight:600;flex:none;width:34px;padding-top:2px;}
+.ev .body{flex:1;min-width:0;}
+.ev .t{color:var(--ink);line-height:1.6;}
+.ev .m{margin-top:3px;font-size:11.5px;color:var(--ink-4);display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.ev .m a{font-family:var(--font-mono);font-size:10.8px;word-break:break-all;color:var(--ink-3);}
+.ev .m a:hover{color:var(--navy);}
+
+/* ---------- 页脚 ---------- */
+.foot{border-top:1px solid var(--line-2);margin-top:40px;padding:22px 0 0;font-size:12px;color:var(--ink-4);line-height:1.8;}
+.foot b{color:var(--ink-3);}
+
+@media print{
+  .banner,.toc{display:none;}
+  body{background:#fff;}
+  .claim-bd{display:block !important;}
+  .cols{padding:0;}
+}
+</style>
+</head>
+<body>
+
+<!-- ========== 样张说明横幅 ========== -->
+<div class="banner">
+  <span class="tag">样张</span>
+  <span class="txt">本页为<b>产品形态样张</b>，用于评审专报的内容规格与视觉标准。事实内容基于<b>公开报道人工整理并标注来源</b>；传播量、平台占比、情感占比等监测指标<b>为示意数据，非真实监测结果</b>，凡示意处均已标记。</span>
+</div>
+
+<div class="shell">
+<div class="cols">
+
+  <!-- ========== 目录 ========== -->
+  <nav class="toc" id="toc">
+    <div class="toc-title">目录</div>
+    <a href="#s0"><span class="n">00</span>报告概览</a>
+    <a href="#s1"><span class="n">01</span>执行摘要</a>
+    <a href="#s2"><span class="n">02</span>事件时间线</a>
+    <a href="#s3"><span class="n">03</span>关键事实核查</a>
+    <a href="#s4"><span class="n">04</span>传播分析</a>
+    <a href="#s5"><span class="n">05</span>情感与观点</a>
+    <a href="#s6"><span class="n">06</span>历史对照</a>
+    <a href="#s7"><span class="n">07</span>研判与建议</a>
+    <a href="#s8"><span class="n">08</span>局限性声明</a>
+    <a href="#s9"><span class="n">09</span>证据清单</a>
+    <div class="toc-foot">
+      核验图例<br>
+      <span class="badge ok" style="font-size:10.5px;line-height:18px;">已证实</span>
+      <span class="badge warn" style="font-size:10.5px;line-height:18px;">待核验</span>
+      <span class="badge dis" style="font-size:10.5px;line-height:18px;">争议</span>
+    </div>
+  </nav>
+
+  <!-- ========== 正文 ========== -->
+  <main class="main">
+
+    <!-- ===== 报告头 ===== -->
+    <div class="rpt-head" id="s0">
+      <div class="rh-body">
+        <div class="rh-kicker">
+          <span class="dot"></span><span>可核验舆情专报 · 消费与食品安全</span>
+          <span class="sep"></span><span class="ver">SPECIMEN v1</span>
+        </div>
+        <h1 class="rpt-title">海天酱油“添加剂双标”风波</h1>
+        <div class="rpt-sub">
+          一场由短视频“海克斯科技”引燃、被两纸声明推向高潮的食品信任危机：<br>
+          争议的起点是配料表，终点却是“企业怎么说话”与“标准由谁解释”。
+        </div>
+        <div class="rh-meta">
+          <div><div class="k">事件时间范围</div><div class="v">2022-08 → 2022-10（主周期）</div></div>
+          <div><div class="k">追踪至</div><div class="v">2025-03（制度回响）</div></div>
+          <div><div class="k">报告生成时间</div><div class="v">2026-08-12 14:20 CST</div></div>
+          <div><div class="k">报告编号</div><div class="v">YQ-2022-HT-001</div></div>
+        </div>
+      </div>
+      <div class="kpis">
+        <div class="kpi">
+          <div class="lab">热度峰值日 <span class="illus">示意</span></div>
+          <div class="num">10-05<small>／指数 92</small></div>
+          <div class="sub">第二份声明 + 协会声明同日发酵</div>
+          <div class="bar"><i style="width:92%;background:var(--navy)"></i></div>
+        </div>
+        <div class="kpi">
+          <div class="lab">涉及平台 <span class="illus">示意</span></div>
+          <div class="num">6<small>类渠道</small></div>
+          <div class="sub">短视频 / 微博 / 微信 / 财经门户 / 知乎论坛 / 证券资讯</div>
+          <div class="bar"><i style="width:41%;background:var(--navy)"></i><i style="width:26%;background:#4a708f"></i><i style="width:13%;background:#7e9bb2"></i><i style="width:20%;background:#b5c4d1"></i></div>
+        </div>
+        <div class="kpi">
+          <div class="lab">引用信源 <span class="real">实计</span></div>
+          <div class="num">32<small>条</small></div>
+          <div class="sub">官方/标准 3 · 主流媒体 19 · 门户 7 · 行业自媒体 2 · 百科 1</div>
+          <div class="bar"><i style="width:9.4%;background:var(--navy)"></i><i style="width:59.4%;background:#4a708f"></i><i style="width:21.8%;background:#93aabd"></i><i style="width:9.4%;background:#c7d1da"></i></div>
+        </div>
+        <div class="kpi">
+          <div class="lab">核验通过率 <span class="real">实计</span></div>
+          <div class="num">50<small>%</small></div>
+          <div class="sub">12 条关键事实：已证实 6 · 待核验 3 · 争议 3</div>
+          <div class="bar"><i style="width:50%;background:var(--ok)"></i><i style="width:25%;background:var(--warn)"></i><i style="width:25%;background:var(--dis)"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 01 执行摘要 ===== -->
+    <section id="s1">
+      <div class="sec-head"><span class="no">01</span><h2>执行摘要</h2><span class="hint">是什么 / 为什么 / 怎么看</span></div>
+      <p class="lede">
+        2022年国庆前后，海天味业因“国内酱油含添加剂、出口版配料表干净”被质疑内外双标。
+        真正让事件失控的不是配料表本身——而是企业连发的两纸声明把“添加剂安不安全”的科普问题，
+        变成了“你是不是在教训消费者”的态度问题。节后首个交易日，公司市值单日蒸发约 358 亿元。<span class="ref" data-ref="E15">E15</span><span class="ref" data-ref="E16">E16</span>
+      </p>
+      <div class="sum-grid">
+        <div class="sum">
+          <div class="q">WHAT</div>
+          <h3>发生了什么</h3>
+          <p>2022年8月起，博主辛吉飞的“科技与狠活”系列让“海克斯科技”成为热词。9月底，多条短视频对比国内外海天酱油配料表——国内版含谷氨酸钠、5'-呈味核苷酸二钠、苯甲酸钠、三氯蔗糖等，网友晒出的日本、加拿大版本只有水、大豆、小麦、食盐。<span class="ref" data-ref="E01">E01</span><span class="ref" data-ref="E02">E02</span>
+          海天于 9/30、10/4、10/9 三度回应，中国调味品协会、中国食品工业协会相继发声。<span class="ref" data-ref="E03">E03</span><span class="ref" data-ref="E06">E06</span></p>
+        </div>
+        <div class="sum">
+          <div class="q">WHY</div>
+          <h3>为什么会烧起来</h3>
+          <p>三个助燃条件同时具备：其一，短视频已用两个月把"添加剂=有害“的框架植入公众；其二，首份声明避开”添加剂是否必要"的核心问题，直接定性造谣并宣布追责，把科普争议升级为对立；<span class="ref" data-ref="E02">E02</span>
+          其三，行业协会声明落点在“支持企业维权”，而非向消费者解释疑问，被读作利益共同体表态。<span class="ref" data-ref="E03">E03</span>
+          叠加国庆假期——舆论有闲，企业无人。</p>
+        </div>
+        <div class="sum">
+          <div class="q">SO WHAT</div>
+          <h3>该怎么看</h3>
+          <p>就“食品安全”而言，没有证据显示海天产品违规：合规使用的添加剂在限量内被评估为安全，日本同样允许酱油使用防腐剂并有含添加剂产品在售。<span class="ref" data-ref="E01">E01</span><span class="ref" data-ref="E03">E03</span>
+          但就“消费者知情”而言，质疑并非全无道理：企业始终未公布同款SKU的国内外配方对照。这场风波的真正遗产，是把“标签怎么写”推上了议程——2025年新版标签国标直接禁用了“零添加”。<span class="ref" data-ref="E23">E23</span><span class="ref" data-ref="E24">E24</span></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 02 时间线 ===== -->
+    <section id="s2">
+      <div class="sec-head"><span class="no">02</span><h2>事件时间线</h2><span class="hint">每个节点均标注来源编号，可点击回溯</span></div>
+      <div class="card">
+        <div class="tl">
+
+          <div class="tl-item">
+            <div class="tl-date">2022-08 起</div>
+            <div class="tl-title">“海克斯科技”成为网络热词</div>
+            <div class="tl-desc">博主辛吉飞在抖音发布合成蜂蜜、无肉淀粉肠、明胶燕窝等“科技视频”，口头禅“那必是科技与狠活”迅速传播，为后续事件预置了认知框架。<span class="ref" data-ref="E19">E19</span><span class="ref" data-ref="E20">E20</span></div>
+          </div>
+
+          <div class="tl-item">
+            <div class="tl-date">2022-09-21 <span class="badge key">前情</span></div>
+            <div class="tl-title">辛吉飞在直播中申请注销抖音账号</div>
+            <div class="tl-desc">据报道，其在直播中接到平台电话建议调整创作方向后申请注销账号。该细节的时间点与粉丝数计量在不同报道中存在出入，本报告标记为待核验（见 <a href="#C11">C11</a>）。<span class="ref" data-ref="E19">E19</span></div>
+          </div>
+
+          <div class="tl-item key">
+            <div class="tl-date">2022-09 下旬 <span class="badge key">起点</span></div>
+            <div class="tl-title">配料表对比视频引爆，评论区点名海天</div>
+            <div class="tl-desc">一则关于“添加剂勾兑酱油”的短视频广泛传播，视频本身未点名品牌，但评论区大量网友直接点名海天；随后出现国内外配料表对比图。<span class="ref" data-ref="E02">E02</span><span class="ref" data-ref="E01">E01</span></div>
+          </div>
+
+          <div class="tl-item turn">
+            <div class="tl-date">2022-09-30 晚 <span class="badge turn">第一次转折</span></div>
+            <div class="tl-title">海天发布首份《严正声明》：定性造谣、宣布追责</div>
+            <div class="tl-desc">声明称所有产品添加剂的使用及标识均符合国家标准法规，指部分短视频账号制造焦虑、散播谣言，已委派专业律师团队调查取证，“必将恶意造谣者、传播者的法律责任追查到底”。<span class="ref" data-ref="E02">E02</span><span class="ref" data-ref="E08">E08</span></div>
+            <div class="tl-quote">舆论焦点由此从“为何海外版没有添加剂”转向“添加剂到底安不安全”，并进一步转向“企业的态度是否傲慢”。<span class="ref" data-ref="E02">E02</span></div>
+          </div>
+
+          <div class="tl-item">
+            <div class="tl-date">2022-10-03</div>
+            <div class="tl-title">主流媒体密集刊发专家解读</div>
+            <div class="tl-desc">中新网等报道多位食品科学与科普领域专家观点：按标准使用的食品添加剂不等于不健康，“长期大量摄入”的假设在限量评估中已被覆盖。<span class="ref" data-ref="E01">E01</span><span class="ref" data-ref="E09">E09</span></div>
+          </div>
+
+          <div class="tl-item turn">
+            <div class="tl-date">2022-10-04 23:54 <span class="badge turn">第二次转折</span></div>
+            <div class="tl-title">第二份声明《中国品牌企业的责任、担当与呼吁》</div>
+            <div class="tl-desc">深夜发布，强调各国对食品添加剂均有明确法规标准、“标准本身没有高低优劣之分”，称同品质产品国内外内控标准一致，并将争议描述为“以海天为靶子的攻击已烧向中国食品行业”。<span class="ref" data-ref="E04">E04</span><span class="ref" data-ref="E05">E05</span><span class="ref" data-ref="E08">E08</span></div>
+          </div>
+
+          <div class="tl-item turn">
+            <div class="tl-date">2022-10-05 <span class="badge turn">舆情峰值</span></div>
+            <div class="tl-title">中国调味品协会发声：支持企业依法维权</div>
+            <div class="tl-desc">协会发布《关于净化市场环境，引导调味品企业高质量发展的声明》，称各国标准因饮食习惯不同而有差异、“标准本身并不存在高低之分”，并支持因舆情受影响的企业依法维权、追究网络造谣者责任。该表态被大量网友解读为行业与企业的利益绑定。<span class="ref" data-ref="E03">E03</span><span class="ref" data-ref="E07">E07</span></div>
+          </div>
+
+          <div class="tl-item">
+            <div class="tl-date">2022-10-06</div>
+            <div class="tl-title">中国食品工业协会相关工作委员会跟进</div>
+            <div class="tl-desc">指出将国内外正常销售的不同等级、不同口味产品进行简单对比有失片面，国内同样有执行相应标准的“零添加”酱油在售。<span class="ref" data-ref="E07">E07</span></div>
+          </div>
+
+          <div class="tl-item">
+            <div class="tl-date">2022-10-09 / 10</div>
+            <div class="tl-title">第三次回应：上市公司澄清公告</div>
+            <div class="tl-desc">公告称产品销往全球80多个国家和地区，国内外市场均有高中低不同档次产品，均销售含添加剂与不含添加剂的产品；生产经营未发生重大变化，请投资者理性投资。<span class="ref" data-ref="E06">E06</span><span class="ref" data-ref="E12">E12</span></div>
+          </div>
+
+          <div class="tl-item turn">
+            <div class="tl-date">2022-10-10 <span class="badge turn">代价兑现</span></div>
+            <div class="tl-title">节后首个交易日：市值单日蒸发约 358 亿元</div>
+            <div class="tl-desc">海天味业开盘大跌约 8%，收盘跌约 9%（当日为大跌，非跌停）；同日竞品千禾味业涨停。<span class="ref" data-ref="E15">E15</span><span class="ref" data-ref="E16">E16</span></div>
+          </div>
+
+          <div class="tl-item">
+            <div class="tl-date">2023-04</div>
+            <div class="tl-title">2022年报：营收增速失速，净利上市后首降</div>
+            <div class="tl-desc">全年营收 256.10 亿元（同比 +2.42%），归母净利润 61.98 亿元（同比 −7.09%）。年报中称“2022年我们遭遇前所未有的'舆情'冲击，给我们造成了较大影响”。<span class="ref" data-ref="E17">E17</span></div>
+          </div>
+
+          <div class="tl-item">
+            <div class="tl-date">2023-05-16</div>
+            <div class="tl-title">风波后首个年度股东大会：未正面回应添加剂争议</div>
+            <div class="tl-desc">管理层将话题落在行业竞争加剧与渠道迭代上，未就添加剂风波作正面回应。<span class="ref" data-ref="E18">E18</span></div>
+          </div>
+
+          <div class="tl-item key">
+            <div class="tl-date">2025-03-16 / 27 <span class="badge key">制度回响</span></div>
+            <div class="tl-title">新版标签国标发布：禁止标注“零添加”</div>
+            <div class="tl-desc">GB 7718-2025《预包装食品标签通则》发布（2027-03-16 实施），明确预包装食品不得使用“不添加”“零添加”等用语强调配料；同期千禾味业因“千禾0”实为注册商标引发争议并致歉。三年之后，争议的落点从“企业是否双标”变成了“标签怎么写才不误导”。<span class="ref" data-ref="E23">E23</span><span class="ref" data-ref="E24">E24</span><span class="ref" data-ref="E25">E25</span></div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 03 关键事实核查 ===== -->
+    <section id="s3">
+      <div class="sec-head"><span class="no">03</span><h2>关键事实核查</h2><span class="hint">点击任意条目展开引用卡片</span></div>
+
+      <div class="verify-rule">
+        <b>核验规则：</b>本表条目为“经核验后的中性事实陈述”，而非网络原话；网络流传版本单独标注于条目下方。
+        <b>已证实</b> = 2 个及以上相互独立的信源支持；<b>待核验</b> = 仅单一信源、或信源仅部分支持；<b>争议</b> = 信源之间相互矛盾，或核验结论为“不支持”但该说法传播广泛、保留展示。
+        信源分级：官方/标准文本 &gt; 主流媒体 &gt; 门户聚合 &gt; 行业/自媒体 &gt; 百科等待交叉验证来源。
+      </div>
+
+      <div class="filters">
+        <span class="fl">按核验结论筛选</span>
+        <button class="fbtn" data-f="all" aria-pressed="true">全部 <span class="c">12</span></button>
+        <button class="fbtn v-ok" data-f="ok" aria-pressed="false">已证实 <span class="c">6</span></button>
+        <button class="fbtn v-warn" data-f="warn" aria-pressed="false">待核验 <span class="c">3</span></button>
+        <button class="fbtn v-dis" data-f="dis" aria-pressed="false">争议 <span class="c">3</span></button>
+        <button class="fbtn" id="expandAll" data-f="none" aria-pressed="false" style="margin-left:auto;">展开全部引用</button>
+      </div>
+      <div class="dist" title="核验结论分布">
+        <i style="width:50%;background:var(--ok)"></i><i style="width:25%;background:var(--warn)"></i><i style="width:25%;background:var(--dis)"></i>
+      </div>
+
+      <div class="claims" id="claims"><!-- JS 渲染 --></div>
+    </section>
+
+    <!-- ===== 04 传播分析 ===== -->
+    <section id="s4">
+      <div class="sec-head"><span class="no">04</span><h2>传播分析</h2><span class="hint">本节所有量化指标均为示意数据</span></div>
+
+      <div class="chart-wrap">
+        <div class="chart-hd">
+          <h3>声量走势与关键节点</h3><span class="illus">示意数据</span>
+          <span class="src">曲线形态依据真实事件节点构造，非监测结果</span>
+        </div>
+        <div class="chart" id="chartTrend"></div>
+        <div class="chart-fallback" id="fbTrend">
+          图表库未能加载（本页依赖 CDN 引入 ECharts）。声量峰值出现在 10-05（第二份声明 + 协会声明），次峰出现在 10-10（节后首个交易日股价大跌）。
+        </div>
+        <div class="chart-note">
+          读法：两个峰值都不是由“新事实”推动的——10-05 的峰来自企业与协会的表态方式，10-10 的峰来自资本市场对舆情的定价。
+          这类“表态驱动型”曲线是消费品牌危机的典型形状。<br>
+          <b>正式版数据来源规划：</b>热榜快照本地积累 + 新闻聚合 API + 搜索结果时间分布拟合；无法获取真实全平台声量时，专报将以“节点密度”替代“声量指数”，并明确标注口径。
+        </div>
+      </div>
+
+      <div class="two">
+        <div class="chart-wrap">
+          <div class="chart-hd"><h3>平台分布</h3><span class="illus">示意数据</span></div>
+          <div class="chart" id="chartPlat" style="height:266px"></div>
+          <div class="chart-fallback" id="fbPlat">短视频 41% · 微博 26% · 微信生态 13% · 财经门户 11% · 知乎论坛 6% · 其他 3%（示意）</div>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-hd"><h3>情感倾向占比</h3><span class="illus">示意数据</span></div>
+          <div class="chart" id="chartSenti" style="height:266px"></div>
+          <div class="chart-fallback" id="fbSenti">负面 68% · 中性 24% · 正面 8%（示意）</div>
+        </div>
+      </div>
+
+      <div class="chart-wrap" style="margin-top:14px;">
+        <div class="chart-hd"><h3>热点关键词</h3><span class="illus">示意权重</span><span class="src">词条本身取自真实报道，权重为示意</span></div>
+        <div class="kw" style="margin-top:12px;">
+          <span class="w1">海克斯科技</span><span class="w1">科技与狠活</span><span class="w2">双标</span><span class="w2">食品添加剂</span>
+          <span class="w2">苯甲酸钠</span><span class="w3">配料表</span><span class="w3">零添加</span><span class="w3">严正声明</span>
+          <span class="w3">辛吉飞</span><span class="w3">内控标准</span><span class="w3">酱油茅</span><span class="w4">谷氨酸钠</span>
+          <span class="w4">呈味核苷酸二钠</span><span class="w4">三氯蔗糖</span><span class="w4">GB 2760</span><span class="w4">调味品协会</span>
+          <span class="w4">律师函</span><span class="w4">千禾味业</span><span class="w4">正本清源</span><span class="w4">市值蒸发</span>
+        </div>
+        <div class="chart-note">关键词均出自本报告引用的公开报道；权重（字号）为示意，正式版将由证据库词频与热榜快照计算。</div>
+      </div>
+    </section>
+
+    <!-- ===== 05 情感与观点 ===== -->
+    <section id="s5">
+      <div class="sec-head"><span class="no">05</span><h2>情感与观点</h2><span class="hint">代表性观点均标注来源</span></div>
+
+      <div class="voices">
+        <div class="voice">
+          <div class="side">
+            <div class="who">海天味业</div>
+            <div class="role">涉事企业 · 第二份声明</div>
+            <span class="stance s-neu">当事方陈述</span>
+          </div>
+          <div class="body">
+            <q>各国对食品添加剂均有明确的法规标准，这些标准本身并没有高低优劣之分。</q>
+            <div class="m">2022-10-04 深夜发布《中国品牌企业的责任、担当与呼吁》 <span class="ref" data-ref="E04">E04</span><span class="ref" data-ref="E05">E05</span></div>
+          </div>
+        </div>
+
+        <div class="voice">
+          <div class="side">
+            <div class="who">中国调味品协会</div>
+            <div class="role">行业协会 · 官方声明</div>
+            <span class="stance s-neu">行业方陈述</span>
+          </div>
+          <div class="body">
+            <q>标准本身并不存在高低之分……支持因舆情受到影响的调味品企业依法维权，追究网络造谣者的法律责任。</q>
+            <div class="m">2022-10-05《关于净化市场环境，引导调味品企业高质量发展的声明》 <span class="ref" data-ref="E03">E03</span></div>
+          </div>
+        </div>
+
+        <div class="voice">
+          <div class="side">
+            <div class="who">阮光锋</div>
+            <div class="role">科信食品与健康信息交流中心 科技传播部主任</div>
+            <span class="stance s-pos">专业释疑</span>
+          </div>
+          <div class="body">
+            <q>食品添加剂的安全性评价已经考虑了终生、每天、大量摄入的情况，按标准规定使用的食品添加剂，所谓“长期大量”的情况是不存在的。</q>
+            <div class="m">经中新网、澎湃新闻报道 · 2022-10-03 前后 <span class="ref" data-ref="E01">E01</span><span class="ref" data-ref="E09">E09</span></div>
+          </div>
+        </div>
+
+        <div class="voice">
+          <div class="side">
+            <div class="who">范志红</div>
+            <div class="role">中国农业大学 食品科学与营养工程学院</div>
+            <span class="stance s-pos">专业释疑</span>
+          </div>
+          <div class="body">
+            <q>谷氨酸钠就是一百多年前日本学者在海带中提取发现的味精；5'-呈味核苷酸二钠是鸡汤、肉汤里本来就存在的鲜味物质。</q>
+            <div class="m">经中新网报道 · 2022-10-03 <span class="ref" data-ref="E01">E01</span></div>
+          </div>
+        </div>
+
+        <div class="voice">
+          <div class="side">
+            <div class="who">云无心</div>
+            <div class="role">科普作家 · 食品工程博士</div>
+            <span class="stance s-pos">专业释疑</span>
+          </div>
+          <div class="body">
+            <q>随便搜了几款“国外销售的酱油”，添加酒、糖浆、甜味剂、防腐剂、焦糖色素、酵母提取物等，不同厂家添加的东西不同，无所谓高下。</q>
+            <div class="m">经中新网报道 · 2022-10 <span class="ref" data-ref="E01">E01</span></div>
+          </div>
+        </div>
+
+        <div class="voice">
+          <div class="side">
+            <div class="who">舆论与评论界</div>
+            <div class="role">媒体评论综合</div>
+            <span class="stance s-neg">批评意见</span>
+          </div>
+          <div class="body">
+            <q>两纸声明本身成了二次危机：第一次对食品添加剂避而不谈，第二次态度强硬，把讨论从产品推向了态度。</q>
+            <div class="m">综合界面新闻、财联社等评论报道 · 2022-10 <span class="ref" data-ref="E14">E14</span><span class="ref" data-ref="E12">E12</span>（本条为多篇评论的归纳，非单一原文）</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="quiet" style="margin-top:16px;">
+        <h3>声量低但值得注意的问题</h3>
+        <div class="sub">以下议题在事件中讨论度远低于“添加剂有没有毒”，但对读者的实际决策更重要。标注“编辑判断”者为本报告的分析结论，非报道原文。</div>
+
+        <div class="qitem">
+          <h4><span class="vol">低声量</span>酱油最主要的健康风险是钠，不是防腐剂</h4>
+          <p>整场讨论几乎全部围绕苯甲酸钠、谷氨酸钠展开，而酱油对多数人真正的健康影响来自钠摄入量。限量内的防腐剂经过安全评估，超量吃盐则是明确的慢病风险。<span class="illus">编辑判断</span></p>
+        </div>
+
+        <div class="qitem">
+          <h4><span class="vol">低声量</span>消费者真正的诉求是“看得懂标签”，不是“禁掉添加剂”</h4>
+          <p>网友最初的疑问是“为什么两版不一样、你不告诉我”。这是知情权问题，企业却按“科普问题”和“名誉权问题”来应对。三年后新版标签国标修订配料表标示、新增数字标签与致敏物质强制标示，恰恰回应的是这条被忽略的诉求。<span class="ref" data-ref="E23">E23</span></p>
+        </div>
+
+        <div class="qitem">
+          <h4><span class="vol">低声量</span>行业协会该对谁说话</h4>
+          <p>协会声明的科学部分是站得住的，但落点是“支持企业维权、追究造谣者”，全程没有面向消费者的解释路径。当行业组织在争议中只呈现“护企”姿态，其科学结论的可信度会被一并折价。<span class="ref" data-ref="E03">E03</span><span class="illus">编辑判断</span></p>
+        </div>
+
+        <div class="qitem">
+          <h4><span class="vol">低声量</span>“零添加”是解药还是下一个陷阱</h4>
+          <p>事件后“零添加”成为行业救命稻草，海天2022年报中“零添加”首次出现。<span class="ref" data-ref="E17">E17</span>
+          但2025年千禾味业“千禾0”实为注册商标的争议说明：用标签叙事回应信任问题，只会把问题推迟到下一轮。<span class="ref" data-ref="E25">E25</span><span class="ref" data-ref="E32">E32</span></p>
+        </div>
+
+        <div class="qitem">
+          <h4><span class="vol">低声量</span>平台机制在这场事件里几乎没被讨论</h4>
+          <p>“科技与狠活”内容的爆发、创作者账号注销、以及后续的内容治理，都与平台推荐与举报机制直接相关，但公共讨论集中在企业与专家两端，平台侧几乎缺席。<span class="illus">编辑判断</span></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 06 历史对照 ===== -->
+    <section id="s6">
+      <div class="sec-head"><span class="no">06</span><h2>历史对照</h2><span class="hint">三个真实的可比事件</span></div>
+
+      <div class="hist">
+        <div class="hcard">
+          <div class="top">
+            <div class="yr">2013</div>
+            <div class="nm">农夫山泉“标准门”</div>
+            <div class="ty">企业 vs 媒体 · 标准之争</div>
+          </div>
+          <div class="bd">
+            <dl>
+              <dt>争议点</dt>
+              <dd>《京华时报》质疑其瓶装水执行的浙江地方标准“不如自来水”；28天内以67个版面刊发76篇报道。<span class="ref" data-ref="E29">E29</span><span class="ref" data-ref="E31">E31</span></dd>
+              <dt>企业应对</dt>
+              <dd>多轮强硬回应、称对方“不仅无知，而且强词夺理”，索赔6000万元并宣布桶装水退出北京市场。<span class="ref" data-ref="E30">E30</span><span class="ref" data-ref="E31">E31</span></dd>
+              <dt>与本事件的相似</dt>
+              <dd>核心都是“标准由谁解释”；企业都选择了对抗性回应，都因此把技术争议转为立场争议。</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="hcard">
+          <div class="top">
+            <div class="yr">2017</div>
+            <div class="nm">“塑料紫菜”谣言</div>
+            <div class="ty">短视频谣言 · 行业级损失</div>
+          </div>
+          <div class="bd">
+            <dl>
+              <dt>争议点</dt>
+              <dd>一段“紫菜撕不断、点燃有异味即为塑料”的自拍视频引发裂变，一周内出现20多个版本，波及福建、天津等多省市。<span class="ref" data-ref="E27">E27</span></dd>
+              <dt>结局</dt>
+              <dd>行业估算损失近1亿元；18人被抓获，一名以视频要挟企业索财者以敲诈勒索罪一审获刑一年十个月。<span class="ref" data-ref="E27">E27</span><span class="ref" data-ref="E28">E28</span></dd>
+              <dt>与本事件的差别</dt>
+              <dd>“塑料紫菜”是可被实验直接证伪的纯事实谣言；海天事件的核心陈述（国内外配料表不同）本身是真的，争的是解释权——所以无法靠一次辟谣收场。</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="hcard">
+          <div class="top">
+            <div class="yr">2025</div>
+            <div class="nm">千禾味业“零添加”争议</div>
+            <div class="ty">同行业 · 三年后的回响</div>
+          </div>
+          <div class="bd">
+            <dl>
+              <dt>争议点</dt>
+              <dd>媒体送检报道后，“千禾0”被指并非“零添加”承诺而是注册商标，涉嫌误导消费者；公司深夜致歉，董事长其后回应称“千禾0”即零添加产品。<span class="ref" data-ref="E32">E32</span><span class="ref" data-ref="E25">E25</span><span class="ref" data-ref="E26">E26</span></dd>
+              <dt>监管与制度</dt>
+              <dd>属地监管部门抽检23批次均符合国标；同月新版标签国标发布，明确禁止“零添加”等用语。<span class="ref" data-ref="E26">E26</span><span class="ref" data-ref="E24">E24</span></dd>
+              <dt>与本事件的关系</dt>
+              <dd>千禾是2022年海天风波最大的受益者（10月10日涨停）；三年后同样倒在“标签叙事”上——这是同一个信任问题的下半场。</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+
+      <table class="cmp">
+        <thead>
+          <tr><th style="width:120px;">对比维度</th><th>海天 2022</th><th>农夫山泉 2013</th><th>塑料紫菜 2017</th><th>千禾 2025</th></tr>
+        </thead>
+        <tbody>
+          <tr><th>核心陈述真假</th><td class="hl">基本属实（配料表确有差异），推论存疑</td><td>部分属实，解释有争议</td><td>完全不实</td><td>属实（商标确为“千禾0”）</td></tr>
+          <tr><th>引爆媒介</th><td class="hl">短视频 + 微博</td><td>纸媒连续报道</td><td>微信/短视频裂变</td><td>杂志送检报道 + 社交媒体</td></tr>
+          <tr><th>企业首选动作</th><td class="hl">定性造谣、宣布追责</td><td>对抗媒体、诉讼索赔</td><td>行业联合声明 + 报案</td><td>致歉 + 高管出面解释</td></tr>
+          <tr><th>是否有官方结论</th><td class="hl">未见监管部门对本事件的直接结论</td><td>地方质监介入调查</td><td>公安立案、法院判决</td><td>属地市监抽检公示</td></tr>
+          <tr><th>制度层面结果</th><td class="hl">推动“零添加”标注议题</td><td>推动饮用水标准整合讨论</td><td>食品谣言入刑示范案例</td><td>新版标签国标落地</td></tr>
+        </tbody>
+      </table>
+      <div class="chart-note" style="border:0;">对比表中的判断为本报告基于所引用报道作出的归纳，非各方原文表述。</div>
+    </section>
+
+    <!-- ===== 07 研判与建议 ===== -->
+    <section id="s7">
+      <div class="sec-head"><span class="no">07</span><h2>研判与建议</h2><span class="hint">写给想弄清真相的普通读者，不是给企业的公关建议</span></div>
+
+      <div class="read">
+        <div class="ritem">
+          <div class="idx">1</div>
+          <div>
+            <h4>这件事最可靠的结论是什么</h4>
+            <p>可以确定的：国内外版本的配料表确实不同；合规使用的添加剂在限量内已通过安全评估；日本并非“禁止酱油使用添加剂”，当地也有含添加剂的酱油在售。<span class="ref" data-ref="E01">E01</span><span class="ref" data-ref="E03">E03</span></p>
+            <p>不能确定的：企业是否针对同一款产品对国内外采用了不同配方——因为没有任何一方公布过同款SKU的逐项对照。<b>“没被证实”和“已被证伪”是两回事，本报告不替任何一方补上这一步。</b></p>
+          </div>
+        </div>
+
+        <div class="ritem">
+          <div class="idx">2</div>
+          <div>
+            <h4>下次遇到“内外双标”类爆料，先问三个问题</h4>
+            <ul class="checklist">
+              <li>对比的是不是<b>同一款、同一等级</b>的产品？（本事件中，被对比的产品档次与品类并不一致）<span class="ref" data-ref="E07">E07</span></li>
+              <li>对方国家是<b>禁止使用</b>，还是<b>标签不必标出</b>？（两者在配料表上看起来一模一样）</li>
+              <li>差异是否可由<b>货架期、运输条件、当地口味</b>解释？出口产品的保质期与流通链路通常与内销不同。</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="ritem">
+          <div class="idx">3</div>
+          <div>
+            <h4>怎么读一份企业声明</h4>
+            <p>看它有没有回答被问的那个问题。海天首份声明的全部力气用在“我们合规”与“你们造谣”上，而公众问的是“为什么两版不一样”。合规是底线证明，不是疑问的答案——这正是声明发出后热度不降反升的原因。<span class="ref" data-ref="E02">E02</span></p>
+          </div>
+        </div>
+
+        <div class="ritem">
+          <div class="idx">4</div>
+          <div>
+            <h4>买酱油时真正值得看的几行字</h4>
+            <ul class="checklist">
+              <li><b>钠含量</b>（营养成分表，每15ml/每100ml口径不同，注意换算）——比添加剂更影响你的健康</li>
+              <li><b>氨基酸态氮</b>（≥0.8g/100ml 为特级）——决定鲜味与品质等级</li>
+              <li><b>是否酿造</b>——执行标准与产品类型栏可以看出</li>
+              <li><b>“零添加”字样</b>——2027年3月起新生产的产品将不得再这样标注，届时不必再以此作为选择依据<span class="ref" data-ref="E23">E23</span></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="ritem">
+          <div class="idx">5</div>
+          <div>
+            <h4>什么时候应该“再等等”</h4>
+            <p>当争议只有企业声明和网友爆料两端、缺少第三方检测或监管抽检结论时，判断应当悬置。本事件到今天为止，仍未检索到监管部门对“双标”指控的直接结论性表态——这一点比任何一方的措辞都更值得注意。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 08 局限性声明 ===== -->
+    <section id="s8">
+      <div class="sec-head"><span class="no">08</span><h2>局限性声明</h2><span class="hint">本报告没查清、查不到、以及不确定的部分</span></div>
+      <div class="limit">
+        <ol>
+          <li><span class="cat">一手材料</span><b>未取得三份企业声明的原始发布页存档。</b>海天 9/30、10/4 微博声明与 10/9 公告的内容，均通过多家主流媒体的转载与引述交叉核对，未直接调取微博原帖与交易所公告 PDF。</li>
+          <li><span class="cat">核心缺口</span><b>无法核验同款SKU的国内外配方对照。</b>公开报道中的对比均为不同产品、不同等级之间的比较，双方均未公布可逐项对照的材料，因此“是否双标”无法给出结论。</li>
+          <li><span class="cat">数值二手</span><b>日本苯甲酸限量数值未回到原始法规。</b>“日本限量 0.6 g/kg、严于中国 GB 2760 的 1.0 g/kg”来自科普整理与协会说明，本报告未调取日本厚生劳动省告示原文，故标记为待核验（C04）。</li>
+          <li><span class="cat">示意数据</span><b>传播量、平台占比、情感占比均为示意。</b>本报告未接入商业舆情监测数据库，第 04 节全部图表与 KPI 中“热度峰值”“涉及平台”为构造数据，仅用于展示产品形态。<b>正式版若无法获取真实监测数据，将改为“节点密度 + 报道计数”口径并明确标注。</b></li>
+          <li><span class="cat">后续未知</span><b>企业维权的实际进展不明。</b>公开报道止于“发律师函、委托律师团队取证”，未检索到立案、起诉或判决的公开记录（C12）。</li>
+          <li><span class="cat">官方缺位</span><b>未检索到监管部门对本事件的直接结论。</b>仅有行业协会声明与标准层面的通行规定，无市场监管部门针对海天“双标”指控的公开调查结论。</li>
+          <li><span class="cat">时效风险</span><b>部分早期页面可能已删改。</b>事件距今近四年，社交平台原始内容（含短视频、话题页、注销账号数据）已大量不可访问，相关细节只能依赖当时的媒体记录。</li>
+          <li><span class="cat">主观成分</span><b>第 05 节“低声量问题”、第 06 节对比表、第 07 节研判包含本报告的分析判断</b>，已在文内标注“编辑判断”；这部分不属于可核验事实，读者可自行取舍。</li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- ===== 09 证据清单 ===== -->
+    <section id="s9">
+      <div class="sec-head"><span class="no">09</span><h2>证据清单</h2><span class="hint">全部引用编号，正文中的 [E##] 可点击回溯至此</span></div>
+      <div class="ev-tools">
+        <span class="stat">共 32 条 · 官方与标准文本 3 · 主流媒体 19 · 门户聚合 7 · 行业/自媒体 2 · 百科 1</span>
+        <span style="margin-left:auto;font-size:11.5px;">正式版中每条证据将附抓取时间与本地快照，支持离线核查</span>
+      </div>
+      <div class="evlist" id="evlist"><!-- JS 渲染 --></div>
+
+      <div class="foot">
+        <b>关于本页：</b>可核验舆情专报 · 产品形态样张 v1 ·
+        事实内容由公开报道人工整理并逐条标注来源，量化监测指标为示意数据；
+        本页不构成投资建议、法律意见或对任何企业与个人的评价结论。<br>
+        <b>样张用途：</b>确定专报的内容规格与视觉标准，并作为竞赛演示候选。所有涉及的企业与个人信息均来自公开报道。
+      </div>
+    </section>
+
+  </main>
+</div>
+</div>
+
+<div class="ref-tip" id="reftip"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<script>
+/* ============ 数据层：证据库 ============ */
+const EVIDENCE = [
+ {id:"E01",name:"中国新闻网",title:"海天味业遭遇食品添加剂“双标”风波，专家：添加剂≠不健康",date:"2022-10-03",tier:2,url:"https://www.chinanews.com.cn/cj/2022/10-03/9866040.shtml"},
+ {id:"E02",name:"界面新闻",title:"海天味业两次回应出口和内销酱油“双标”质疑，添加剂到底是不是个问题？",date:"2022-10-05",tier:2,url:"https://www.jiemian.com/article/8169648.html"},
+ {id:"E03",name:"中国新闻网",title:"中国调味品协会就海天酱油“双标”传言发声：支持企业维权",date:"2022-10-05",tier:2,url:"http://www.chinanews.com.cn/cj/2022/10-05/9867061.shtml",note:"行业协会声明经媒体转载"},
+ {id:"E04",name:"观察者网",title:"海天味业再发声明否认“双标”：国内外酱油内控标准一致",date:"2022-10-05",tier:3,url:"https://www.guancha.cn/politics/2022_10_05_660781.shtml"},
+ {id:"E05",name:"每日经济新闻",title:"海天味业再回应“双标”风波 中国人食用三千年的酱油到底能否有添加剂?",date:"2022-10-05",tier:2,url:"https://www.nbd.com.cn/articles/2022-10-05/2489380.html"},
+ {id:"E06",name:"上海证券报",title:"海天味业澄清食品添加剂“双标”问题",date:"2022-10-10",tier:2,url:"https://paper.cnstock.com/html/2022-10/10/content_1674020.htm",note:"上市公司澄清公告转述"},
+ {id:"E07",name:"中国经济网",title:"被指“双标”，海天味业二度回应！中国调味品协会发声",date:"2022-10-06",tier:2,url:"http://www.ce.cn/cysc/newmain/yc/jsxw/202210/06/t20221006_38145797.shtml"},
+ {id:"E08",name:"证券时报网",title:"深夜发声！近4000亿海天味业再回应“双标”：国内外酱油内控标准一致！这一协会也发声：支持企业依法维权",date:"2022-10-05",tier:2,url:"https://www.stcn.com/article/detail/695732.html"},
+ {id:"E09",name:"澎湃新闻",title:"海天味业遭遇添加剂“双标”风波，专家：理性看待食品添加剂",date:"2022-10",tier:2,url:"https://www.thepaper.cn/newsDetail_forward_20159078"},
+ {id:"E10",name:"北京日报客户端",title:"被指“双标”，海天味业再回应！中国调味品协会发声",date:"2022-10-05",tier:2,url:"https://news.bjd.com.cn/2022/10/05/10177214.shtml"},
+ {id:"E11",name:"新浪新闻",title:"海天味业回应添加剂“双标”风波，专家：适当加入添加剂可保质",date:"2022-10-05",tier:3,url:"https://news.sina.com.cn/c/2022-10-05/doc-imqqsmrp1575093.shtml"},
+ {id:"E12",name:"财联社",title:"添加剂引舆论危机 海天酱油几度回应 争议仍未平息",date:"2022-10",tier:2,url:"https://www.cls.cn/detail/1148608"},
+ {id:"E13",name:"新浪财经",title:"海天酱油的50个秘密",date:"2022-10-12",tier:3,url:"https://finance.sina.com.cn/chanjing/gsnews/2022-10-12/doc-imqqsmrp2349820.shtml"},
+ {id:"E14",name:"界面新闻",title:"“海克斯科技酱油”掀起的信任风暴",date:"2022-10",tier:2,url:"https://www.jiemian.com/article/8191999.html",note:"评论类报道"},
+ {id:"E15",name:"东方财富·财富号",title:"海天暴跌8%，千禾一字涨停，可别乱“打”酱油",date:"2022-10-10",tier:4,url:"https://caifuhao.eastmoney.com/news/20221010144221506194560",note:"财经自媒体，已与 E16 交叉验证"},
+ {id:"E16",name:"Investing.com",title:"海天大跌358亿，烦恼不只是“双标风波”",date:"2022-10",tier:3,url:"https://cn.investing.com/analysis/article-200474215"},
+ {id:"E17",name:"虎嗅网",title:"海天味业“失速”（引用2022年年报原文）",date:"2023",tier:4,url:"https://m.huxiu.com/article/1337993.html",note:"行业媒体，引用年报表述"},
+ {id:"E18",name:"每日经济新闻",title:"直击海天味业添加剂风波后首个年度股东大会",date:"2023-05-16",tier:2,url:"https://www.nbd.com.cn/articles/2023-05-16/2827742.html"},
+ {id:"E19",name:"网易（转蓝鲸财经）",title:"海克斯科技博主辛吉飞 八百万抖音账号注销转战微博",date:"2022-10",tier:3,url:"https://c.m.163.com/news/a/HM9UBOVT051986PN.html"},
+ {id:"E20",name:"维基百科",title:"辛吉飞（词条）",date:"持续更新",tier:5,url:"https://zh.wikipedia.org/zh-hans/辛吉飞",note:"百科来源，需交叉验证"},
+ {id:"E21",name:"全国标准信息公共服务平台",title:"GB/T 18186《酱油质量通则》标准详情（起草单位含佛山市海天调味食品股份有限公司）",date:"标准数据库",tier:1,url:"https://std.samr.gov.cn/gb/search/gbDetailed?id=36DE96AA3F5FCD71E06397BE0A0A23D9"},
+ {id:"E22",name:"国家食品安全风险评估中心",title:"GB 2760-2024《食品安全国家标准 食品添加剂使用标准》在线查询平台",date:"2024-02发布 / 2025-02-08实施",tier:1,url:"https://gb2760.cfsa.net.cn/"},
+ {id:"E23",name:"GB 7718-2025 标准文本",title:"《食品安全国家标准 预包装食品标签通则》2025-03-16 发布，2027-03-16 实施",date:"2025-03-16",tier:1,url:"https://gain.fas.usda.gov/Download.aspx?p=2994&q=61a8a8fa-2aa3-473c-a67a-34c6f9d67305",note:"标准文本经第三方平台转载"},
+ {id:"E24",name:"南方都市报",title:"食品安全新国标禁用“零添加”！千禾0酱油等曾强调此概念",date:"2025-03-27",tier:2,url:"https://m.mp.oeeee.com/a/BAAFRD0000202503271063413.html"},
+ {id:"E25",name:"杭州网",title:"“千禾0”竟然只是商标，不是零添加？品牌深夜发文致歉",date:"2025-03-21",tier:2,url:"https://news.hangzhou.com.cn/shxw/content/2025-03/21/content_8937145.htm"},
+ {id:"E26",name:"证券时报",title:"抽查均符合国标！千禾味业董事长独家回应：“千禾0”就是零添加！",date:"2025-03",tier:2,url:"https://stcn.com/article/detail/1602853.html"},
+ {id:"E27",name:"中国食品药品网",title:"谣言治理大事件 治理“塑料紫菜”谣言情况介绍",date:"2018-02-26",tier:2,url:"https://cs.cnpharm.com/c/2018-02-26/532520.shtml"},
+ {id:"E28",name:"澎湃新闻",title:"“塑料紫菜”视频造谣者犯敲诈勒索罪，一审被判一年十个月",date:"2017-11-30",tier:2,url:"https://m.thepaper.cn/newsDetail_forward_1886853"},
+ {id:"E29",name:"人民日报",title:"农夫山泉的“标准门”事件",date:"2013-06-01",tier:2,url:"http://paper.people.com.cn/rmwz/html/2013-06/01/content_1264462.htm"},
+ {id:"E30",name:"凤凰网财经",title:"农夫山泉发声明：派人上京举报京华时报76篇虚假报道",date:"2013-11-04",tier:3,url:"https://finance.ifeng.com/a/20131104/11002138_0.shtml"},
+ {id:"E31",name:"环球网（转京华时报）",title:"农夫山泉“标准门”事件始末",date:"2013",tier:2,url:"https://health.huanqiu.com/article/9CaKrnJAnCD"},
+ {id:"E32",name:"新浪财经",title:"“千禾0”是真的零添加还是噱头？千禾味业回应：符合国家标准",date:"2025-03-21",tier:3,url:"https://finance.sina.com.cn/roll/2025-03-21/doc-ineqmwnc9329906.shtml"}
+];
+const TIER_NAME={1:"官方 / 标准文本",2:"主流媒体",3:"门户聚合",4:"行业 / 自媒体",5:"百科（待交叉）"};
+const EV = Object.fromEntries(EVIDENCE.map(e=>[e.id,e]));
+/* 标准类条目标题自带书名号，避免嵌套 */
+const evTitle = e => e.title.indexOf('《')>=0 ? e.title : '《'+e.title+'》';
+
+/* ============ 数据层：核验条目 ============ */
+const CLAIMS = [
+{
+ id:"C01", verdict:"ok", sources:3, support:"支持",
+ text:"海天在国内销售的多款酱油，配料表中含有谷氨酸钠、5'-呈味核苷酸二钠、5'-肌苷酸二钠、苯甲酸钠、三氯蔗糖等食品添加剂。",
+ rumor:null,
+ note:"这是整个事件中唯一没有争议的事实基础。其中前三种为增味剂，苯甲酸钠为防腐剂，三氯蔗糖为甜味剂，均在 GB 2760 允许范围内。",
+ cites:[
+  {eid:"E01",kind:"raw",q:"海天酱油多款产品中主要的添加剂为谷氨酸钠、5'-呈味核苷酸二钠、5'-肌苷酸二钠、苯甲酸钠、三氯蔗糖，其中前3种为增味剂，苯甲酸钠为常用的食品防腐剂，三氯蔗糖则为甜味剂。"},
+  {eid:"E02",kind:"para",q:"报道对国内在售海天酱油配料表逐项核对，确认含多种食品添加剂，并讨论其是否构成问题。"},
+  {eid:"E22",kind:"para",q:"上述添加剂在《食品安全国家标准 食品添加剂使用标准》中均有酱油类别的使用范围与限量规定。"}
+ ]
+},
+{
+ id:"C02", verdict:"ok", sources:2, support:"支持",
+ text:"网友晒出的在日本、加拿大等地购买的海天酱油，其配料表仅见水、大豆、小麦、食盐等基础原料。",
+ rumor:null,
+ note:"证据成立，但适用范围有限：所涉为个别SKU的图片与媒体核实，不能推及海天全部海外产品线，也不能反推同款产品的国内外差异。",
+ cites:[
+  {eid:"E01",kind:"raw",q:"有网友晒出在日本、加拿大等国家购买的海天酱油，配料表中只有水、大豆、小麦、食盐等原料。"},
+  {eid:"E02",kind:"para",q:"报道确认存在国内外配料表差异，并指出这是质疑“双标”的直接来源。"}
+ ]
+},
+{
+ id:"C03", verdict:"dis", sources:2, support:"不支持",
+ text:"「国外（含日本）销售的酱油普遍不含食品添加剂」——该说法不成立。",
+ rumor:"网络流传版本：日本卖的酱油都是零添加，说明人家标准高。",
+ note:"核验结论为<strong>不支持</strong>：日本本土企业既生产不含添加剂的酱油，也生产添加谷氨酸钠、呈味核苷酸、甜菊糖苷、黄原胶、焦糖色、苯甲酸等的酱油，这类产品在日本、中国以及亚马逊、eBay 等国际电商均有销售。此外，两国对添加剂的<strong>标签披露规则不同</strong>，未列出不等于未使用。<br>按本产品当前的三级规则，“核验不支持但传播广泛”的条目归入“争议”级——该级别的语义是否需要拆分出“已证伪”，是本样张提请评审的问题之一。",
+ cites:[
+  {eid:"E03",kind:"raw",q:"日本酱油企业生产的产品，同样既有不含食品添加剂的，也有添加谷氨酸钠、呈味核苷酸、甜菊糖苷、黄原胶、焦糖色、苯甲酸等添加剂的酱油……此类产品在日本、中国市场以及亚马逊、eBay 等国际电商平台均有销售。"},
+  {eid:"E01",kind:"raw",q:"（云无心）随便搜了几款“国外销售的酱油”，添加酒、糖浆、甜味剂、防腐剂、焦糖色素、酵母提取物等，不同厂家添加的东西不同，“无所谓高下”。"}
+ ]
+},
+{
+ id:"C04", verdict:"warn", sources:1, support:"部分支持",
+ text:"日本对酱油中苯甲酸（以苯甲酸计）的限量为 0.6 g/kg，严于中国 GB 2760 的 1.0 g/kg。",
+ rumor:"网络流传版本：日本禁止在酱油里加苯甲酸钠。",
+ note:"数值方向可信但<strong>未回到一手法规</strong>：日本《食品卫生法》将苯甲酸及其钠盐列为指定添加物，酱油属允许使用范围——这一点与“日本禁用”的传言直接矛盾；但 0.6 与 1.0 两个具体限量值目前仅见于二手科普整理与协会说明，本报告未调取日本厚生劳动省告示原文与 GB 2760 对应条目原文，故标记待核验。",
+ cites:[
+  {eid:"E03",kind:"para",q:"协会声明指出日本酱油同样有使用苯甲酸等添加剂的产品，符合日本相关法规标准。"},
+  {eid:"E22",kind:"para",q:"中国方面的限量需以 GB 2760-2024 对应食品类别条目为准（本报告未逐条截取原文）。"}
+ ]
+},
+{
+ id:"C05", verdict:"dis", sources:3, support:"信源矛盾",
+ text:"海天对国内与国外消费者执行了不同的产品安全标准（即“双标”）。",
+ rumor:"网络流传版本：海天欺负中国人，给国外的是好货。",
+ note:"<strong>这是全事件唯一真正悬而未决的问题。</strong>企业与两家协会均否认，理由是“标准无高低之分”“对比对象不对等”；批评方的核心质疑始终未被正面回应——没有任何一方公布过同款SKU的国内外配方逐项对照。在缺少可比材料的前提下，本报告不作结论，标记为争议并写入局限性声明。",
+ cites:[
+  {eid:"E04",kind:"raw",q:"（海天第二份声明）各国对食品添加剂均有明确的法规标准，这些标准本身并没有高低优劣之分……同一品质的产品国内国际的内控标准一致。"},
+  {eid:"E07",kind:"para",q:"（中国食品工业协会相关委员会）将国内外市场正常销售的不同等级、不同口味产品进行简单对比有失片面。"},
+  {eid:"E06",kind:"para",q:"（澄清公告）国内外市场均有高中低不同档次产品，均销售含添加剂与不含添加剂的产品；国内产品线种类更为丰富。"}
+ ]
+},
+{
+ id:"C06", verdict:"ok", sources:4, support:"支持",
+ text:"海天味业于 2022-09-30、10-04、10-09（10-10 见报）三次公开回应，首份声明将争议定性为造谣并宣布委托律师团队追责。",
+ rumor:null,
+ note:"三次回应的时间点与要旨在多家财经与综合媒体的报道中一致。首份声明的措辞是舆情走向的关键变量：它没有回答“为何两版不同”，而是把讨论推向“造谣与追责”。",
+ cites:[
+  {eid:"E02",kind:"raw",q:"（首份声明）部分短视频账号利用大众对食品安全的关注制造焦虑和恐慌，在网络上制造并散播谣言……已委派专业律师团队对恶意造谣的短视频账号调查取证。"},
+  {eid:"E08",kind:"para",q:"10月4日深夜，海天再度发布声明否认双标，称国内外内控标准一致。"},
+  {eid:"E06",kind:"para",q:"10月9日（10日见报）以上市公司澄清公告形式作第三次回应。"},
+  {eid:"E12",kind:"para",q:"报道梳理三次回应的时间线与内容差异，指争议仍未平息。"}
+ ]
+},
+{
+ id:"C07", verdict:"ok", sources:3, support:"支持",
+ text:"中国调味品协会于 2022-10-05 发布声明，称“标准本身并不存在高低之分”，并支持因舆情受到影响的企业依法维权、追究网络造谣者的法律责任。",
+ rumor:null,
+ note:"声明的科学论述与监管事实一致；引发次生舆情的是其<strong>落点</strong>——面向企业维权而非面向消费者释疑，被广泛解读为行业与企业的立场绑定。",
+ cites:[
+  {eid:"E03",kind:"raw",q:"因各国饮食和消费习惯不同，同一类产品的标准会有所不同，但标准本身并不存在高低之分……支持因舆情受到影响的调味品企业依法维权，追究网络造谣者的法律责任。"},
+  {eid:"E07",kind:"para",q:"协会声明与企业第二份声明同期发布，媒体并列报道。"},
+  {eid:"E08",kind:"para",q:"证券时报同步报道协会表态。"}
+ ]
+},
+{
+ id:"C08", verdict:"ok", sources:2, support:"支持",
+ text:"2022-10-10（国庆节后首个交易日），海天味业股价大跌约 9%，当日市值蒸发约 358 亿元；同日千禾味业涨停。",
+ rumor:"网络流传版本：海天当天直接跌停了。",
+ note:"数值方向一致，但需修正一处常见误传：<strong>当日为大跌而非跌停</strong>（A股主板跌停为 10%，当日开盘跌约 8%、收盘跌约 9%）。此外，“市值蒸发3000亿”等更大数字指的是更长周期的累计跌幅，不应与单日数据混用。",
+ cites:[
+  {eid:"E15",kind:"para",q:"10月10日海天味业开盘大跌，竞品千禾味业一字涨停，两者走势自此分化。"},
+  {eid:"E16",kind:"raw",q:"海天大跌358亿（标题）——单日市值蒸发约358亿元。"}
+ ]
+},
+{
+ id:"C09", verdict:"ok", sources:1, support:"支持（官方一手源）",
+ text:"佛山市海天调味食品股份有限公司是酱油国家标准 GB/T 18186《酱油质量通则》修订项目的第一起草单位。",
+ rumor:null,
+ note:"来自全国标准信息公共服务平台的标准详情页，属官方一手数据，故虽为单一信源仍判定为已证实。<br><strong>规格提示：</strong>“已证实需≥2独立信源”与“官方一手源单源可直接采信”之间的优先级，需要在正式版核验规则中写死，本条即为该冲突的示例。",
+ cites:[
+  {eid:"E21",kind:"raw",q:"起草单位：佛山市海天调味食品股份有限公司、天津科技大学食品科学与工程学院、中国食品发酵工业研究院有限公司、华东理工大学……参与单位还包括李锦记（新会）食品有限公司、千禾味业食品股份有限公司等。"}
+ ]
+},
+{
+ id:"C10", verdict:"dis", sources:1, support:"不支持推论",
+ text:"「酱油国标由海天定制，企业既当运动员又当裁判员」——该推论证据不足。",
+ rumor:"网络流传版本：标准是海天自己写的，当然说自己合规。",
+ note:"事实基础成立（见 C09），但推论不成立：同一起草与参与单位名单中还包括李锦记、千禾、恒顺、美味鲜等竞品企业，以及高校与科研院所；国家标准由标准化技术委员会归口、经审查发布，未见公开证据显示条款由单一企业决定。<br>不过，公众对“龙头企业深度参与标准制定”的疑虑本身有其合理性，属于制度透明度议题，本报告保留展示而非直接判为谣言。",
+ cites:[
+  {eid:"E21",kind:"raw",q:"（起草与参与单位名单）……李锦记（新会）食品有限公司、千禾味业食品股份有限公司、烟台欣和企业食品有限公司、江苏恒顺醋业股份有限公司、广东美味鲜调味食品有限公司等。"}
+ ]
+},
+{
+ id:"C11", verdict:"warn", sources:2, support:"部分支持",
+ text:"“海克斯科技”内容的核心创作者辛吉飞于 2022-09-21 在直播中申请注销其抖音账号，账号粉丝量约 889 万。",
+ rumor:null,
+ note:"两个来源均支持“注销账号”这一事实，但<strong>细节存在时间冲突</strong>：一处称 9 月 21 日直播中即申请注销，另一处称截至 9 月 28 日 16 时其账号粉丝量仍为 889 万、10 月 3 日已搜索不到。这可能源于平台注销存在冷静期，也可能是报道口径不一。在未取得平台侧记录前，本条标记为待核验。",
+ cites:[
+  {eid:"E19",kind:"para",q:"报道称其在直播中接到平台电话后申请注销拥有数百万粉丝的抖音账号，转战微博。"},
+  {eid:"E20",kind:"para",q:"词条记载：2022年9月21日直播时申请注销；截至9月28日16时粉丝量889万；2022年10月3日该账号已搜索不到。"}
+ ]
+},
+{
+ id:"C12", verdict:"warn", sources:1, support:"无后续证据",
+ text:"海天在声明中表态追责后，是否已正式起诉造谣者并取得司法结果，目前无公开证据。",
+ rumor:null,
+ note:"公开报道止于“已向多个抖音账号发去律师函”“委派专业律师团队调查取证”阶段。本报告未检索到立案、起诉或判决的公开记录。<br><strong>这是典型的“承诺无下文”型线索：</strong>企业的强硬表态在舆论场上兑现了姿态，却没有在司法层面留下可核查的结果——对读者判断该表态的性质有参考价值。",
+ cites:[
+  {eid:"E02",kind:"raw",q:"（首份声明）必将恶意造谣者、传播者的法律责任追查到底。"}
+ ]
+},
+];
+
+/* ============ 渲染：核验表 ============ */
+const BADGE={ok:{t:"已证实",c:"ok"},warn:{t:"待核验",c:"warn"},dis:{t:"争议",c:"dis"}};
+function refChip(id){return '<span class="ref" data-ref="'+id+'">'+id+'</span>';}
+function renderClaims(){
+  const box=document.getElementById('claims');
+  box.innerHTML=CLAIMS.map(c=>{
+    const b=BADGE[c.verdict];
+    const cites=c.cites.map(ct=>{
+      const e=EV[ct.eid];
+      return '<div class="cite">'
+        +'<div class="cite-hd"><span class="name">'+e.name+'</span>'
+        +'<span class="tier t'+e.tier+'">'+TIER_NAME[e.tier]+'</span>'
+        +'<span class="date">'+e.date+'</span></div>'
+        +'<div class="cite-q">'+ct.q+'</div>'
+        +'<div class="cite-ft"><span class="qk '+(ct.kind==='raw'?'raw">原文引述':'para">要点转述')+'</span>'
+        +'<span class="eid">'+e.id+'</span>'
+        +'<a href="'+e.url+'" target="_blank" rel="noopener">'+e.url+'</a></div>'
+        +'</div>';
+    }).join('');
+    return '<article class="claim" data-v="'+c.verdict+'" id="'+c.id+'">'
+      +'<div class="claim-hd" tabindex="0" role="button" aria-expanded="false">'
+      +'<span class="claim-id">'+c.id+'</span>'
+      +'<div class="claim-tx">'+c.text+(c.rumor?'<span class="rumor"><b>网络流传版本：</b>'+c.rumor.replace('网络流传版本：','')+'</span>':'')+'</div>'
+      +'<span class="badge '+b.c+'">'+b.t+'</span>'
+      +'<span class="chev">▶</span>'
+      +'</div>'
+      +'<div class="claim-bd">'
+      +'<div class="verdict-line">'
+        +'<span>核验结论：<b>'+c.support+'</b></span>'
+        +'<span>独立信源数：<b>'+c.sources+'</b></span>'
+        +'<span>最高信源等级：<b>'+TIER_NAME[Math.min.apply(null,c.cites.map(x=>EV[x.eid].tier))]+'</b></span>'
+      +'</div>'
+      +'<div class="claim-note">'+c.note+'</div>'
+      +'<div class="cites">'+cites+'</div>'
+      +'</div></article>';
+  }).join('');
+}
+renderClaims();
+
+/* 展开/收起 */
+document.getElementById('claims').addEventListener('click',e=>{
+  const hd=e.target.closest('.claim-hd'); if(!hd) return;
+  if(e.target.closest('.ref')) return;
+  const art=hd.parentElement; art.classList.toggle('open');
+  hd.setAttribute('aria-expanded',art.classList.contains('open'));
+});
+document.getElementById('claims').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ') return;
+  const hd=e.target.closest('.claim-hd'); if(!hd) return;
+  e.preventDefault(); hd.click();
+});
+
+/* 筛选 */
+const fbtns=[...document.querySelectorAll('.fbtn[data-f]')].filter(b=>b.dataset.f!=='none');
+fbtns.forEach(btn=>btn.addEventListener('click',()=>{
+  fbtns.forEach(b=>b.setAttribute('aria-pressed',b===btn));
+  const f=btn.dataset.f;
+  document.querySelectorAll('.claim').forEach(c=>{
+    c.classList.toggle('hide', f!=='all' && c.dataset.v!==f);
+  });
+}));
+const expBtn=document.getElementById('expandAll');
+expBtn.addEventListener('click',()=>{
+  const on=expBtn.getAttribute('aria-pressed')!=='true';
+  expBtn.setAttribute('aria-pressed',on);
+  expBtn.textContent=on?'收起全部引用':'展开全部引用';
+  document.querySelectorAll('.claim').forEach(c=>c.classList.toggle('open',on));
+});
+
+/* ============ 渲染：证据清单 ============ */
+document.getElementById('evlist').innerHTML=EVIDENCE.map(e=>
+  '<div class="ev" id="ev-'+e.id+'">'
+  +'<span class="eid">'+e.id+'</span>'
+  +'<div class="body"><div class="t"><b>'+e.name+'</b>'+evTitle(e)+'</div>'
+  +'<div class="m"><span class="tier t'+e.tier+'">'+TIER_NAME[e.tier]+'</span><span>'+e.date+'</span>'
+  +(e.note?'<span>'+e.note+'</span>':'')
+  +'<a href="'+e.url+'" target="_blank" rel="noopener">'+e.url+'</a></div></div></div>'
+).join('');
+
+/* ============ 引用标交互 ============ */
+const tip=document.getElementById('reftip');
+function showTip(el){
+  const e=EV[el.dataset.ref]; if(!e) return;
+  tip.innerHTML='<span class="t">'+e.name+evTitle(e)+'</span>'
+    +'<span class="m">'+TIER_NAME[e.tier]+' · '+e.date+' · '+e.id+'　点击跳转证据清单</span>';
+  const r=el.getBoundingClientRect();
+  tip.classList.add('on');
+  const w=tip.offsetWidth,h=tip.offsetHeight;
+  let left=r.left+r.width/2-w/2; left=Math.max(10,Math.min(left,innerWidth-w-10));
+  let top=r.top-h-9; if(top<56) top=r.bottom+9;
+  tip.style.left=left+'px'; tip.style.top=top+'px';
+}
+document.addEventListener('mouseover',e=>{const el=e.target.closest('.ref'); if(el) showTip(el);});
+document.addEventListener('mouseout',e=>{if(e.target.closest('.ref')) tip.classList.remove('on');});
+document.addEventListener('click',e=>{
+  const el=e.target.closest('.ref'); if(!el) return;
+  const t=document.getElementById('ev-'+el.dataset.ref); if(!t) return;
+  tip.classList.remove('on');
+  t.scrollIntoView({behavior:'smooth',block:'center'});
+  document.querySelectorAll('.ev.flash').forEach(x=>x.classList.remove('flash'));
+  t.classList.add('flash'); setTimeout(()=>t.classList.remove('flash'),2600);
+});
+
+/* ============ 目录滚动高亮 ============ */
+const links=[...document.querySelectorAll('.toc a')];
+const secs=links.map(a=>document.querySelector(a.getAttribute('href'))).filter(Boolean);
+const io=new IntersectionObserver(entries=>{
+  entries.forEach(en=>{
+    if(!en.isIntersecting) return;
+    links.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+en.target.id));
+  });
+},{rootMargin:'-110px 0px -68% 0px',threshold:0});
+secs.forEach(s=>io.observe(s));
+
+/* ============ 图表 ============ */
+function loadFallbackScript(srcs,cb){
+  if(!srcs.length){cb(false);return;}
+  const s=document.createElement('script'); s.src=srcs[0];
+  s.onload=()=>cb(true); s.onerror=()=>loadFallbackScript(srcs.slice(1),cb);
+  document.head.appendChild(s);
+}
+function showFallbacks(){
+  ['fbTrend','fbPlat','fbSenti'].forEach(id=>document.getElementById(id).classList.add('on'));
+  ['chartTrend','chartPlat','chartSenti'].forEach(id=>document.getElementById(id).style.display='none');
+}
+const AXIS_STYLE={
+  axisLine:{lineStyle:{color:'#d0ccc3'}},
+  axisTick:{show:false},
+  axisLabel:{color:'#6e7885',fontSize:11,fontFamily:'inherit'},
+  splitLine:{lineStyle:{color:'#eeece7',type:'dashed'}}
+};
+function initCharts(){
+  const days=['09-25','09-26','09-27','09-28','09-29','09-30','10-01','10-02','10-03','10-04','10-05','10-06','10-07','10-08','10-09','10-10','10-11','10-12','10-13','10-14','10-15','10-16'];
+  const vals=[3,4,6,9,14,31,38,35,44,52,92,78,60,52,58,88,64,47,35,27,21,16];
+  const c1=echarts.init(document.getElementById('chartTrend'));
+  c1.setOption({
+    grid:{left:38,right:22,top:46,bottom:34},
+    tooltip:{trigger:'axis',backgroundColor:'#14191f',borderWidth:0,textStyle:{color:'#e8ecf1',fontSize:12},
+      formatter:p=>{const d=p[0];return '2022-'+d.name+'<br/>声量指数 <b>'+d.value+'</b>　<span style="color:#a89b7c">示意数据</span>';}},
+    xAxis:Object.assign({type:'category',data:days,boundaryGap:false},AXIS_STYLE,{splitLine:{show:false}}),
+    yAxis:Object.assign({type:'value',max:100,name:'声量指数（示意）',nameTextStyle:{color:'#98a0aa',fontSize:10.5,align:'left'}},AXIS_STYLE),
+    series:[{
+      type:'line',data:vals,smooth:.28,symbol:'circle',symbolSize:5,
+      lineStyle:{width:2,color:'#1c3f63'},itemStyle:{color:'#1c3f63'},
+      areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:'rgba(28,63,99,.20)'},{offset:1,color:'rgba(28,63,99,.02)'}])},
+      markArea:{silent:true,itemStyle:{color:'rgba(125,106,69,.07)'},data:[[{xAxis:'10-01',name:'国庆假期'},{xAxis:'10-07'}]],
+        label:{color:'#9c8d6d',fontSize:10.5,position:'insideTop'}},
+      markPoint:{symbol:'pin',symbolSize:0,data:[]},
+      markLine:{symbol:'none',lineStyle:{color:'#b0402a',type:'dashed',width:1},
+        label:{formatter:p=>p.name,color:'#b0402a',fontSize:10.5,position:'insideEndTop',rotate:0,
+          backgroundColor:'rgba(255,255,255,.88)',padding:[2,4],borderRadius:2,fontWeight:600,distance:2},
+        data:[{xAxis:'09-30',name:'首份声明'},{xAxis:'10-05',name:'第二份声明＋协会声明'},{xAxis:'10-10',name:'节后开盘 −9%'}]}
+    }]
+  });
+  const c2=echarts.init(document.getElementById('chartPlat'));
+  const pd=[['短视频（抖音/快手）',41],['微博',26],['微信生态',13],['财经门户',11],['知乎/论坛',6],['其他',3]];
+  c2.setOption({
+    grid:{left:122,right:44,top:14,bottom:18},
+    tooltip:{trigger:'item',backgroundColor:'#14191f',borderWidth:0,textStyle:{color:'#e8ecf1',fontSize:12},
+      formatter:p=>p.name+' <b>'+p.value+'%</b><br/><span style="color:#a89b7c">示意数据</span>'},
+    xAxis:Object.assign({type:'value',max:50},AXIS_STYLE,{axisLabel:{show:false},splitLine:{lineStyle:{color:'#f0eee9'}}}),
+    yAxis:Object.assign({type:'category',data:pd.map(d=>d[0]).reverse()},AXIS_STYLE,{splitLine:{show:false},axisLabel:{color:'#3b4552',fontSize:11.5}}),
+    series:[{type:'bar',data:pd.map(d=>d[1]).reverse(),barWidth:14,
+      itemStyle:{color:p=>['#c7d1da','#b5c4d1','#93aabd','#6b8ba6','#4a708f','#1c3f63'][p.dataIndex]},
+      label:{show:true,position:'right',formatter:'{c}%',color:'#3b4552',fontSize:11.5,fontFamily:'Consolas,monospace'}}]
+  });
+  const c3=echarts.init(document.getElementById('chartSenti'));
+  c3.setOption({
+    tooltip:{trigger:'item',backgroundColor:'#14191f',borderWidth:0,textStyle:{color:'#e8ecf1',fontSize:12},
+      formatter:p=>p.name+' <b>'+p.value+'%</b><br/><span style="color:#a89b7c">示意数据</span>'},
+    legend:{bottom:2,itemWidth:9,itemHeight:9,textStyle:{color:'#3b4552',fontSize:11.5}},
+    series:[{type:'pie',radius:['52%','76%'],center:['50%','44%'],avoidLabelOverlap:true,
+      itemStyle:{borderColor:'#fff',borderWidth:2},
+      label:{show:true,formatter:'{d}%',color:'#3b4552',fontSize:11.5},
+      labelLine:{length:8,length2:8,lineStyle:{color:'#cfccc4'}},
+      data:[
+        {value:68,name:'负面 / 质疑',itemStyle:{color:'#b0402a'}},
+        {value:24,name:'中性 / 陈述',itemStyle:{color:'#8a929c'}},
+        {value:8,name:'正面 / 支持',itemStyle:{color:'#2c7a51'}}
+      ]}]
+  });
+  addEventListener('resize',()=>{c1.resize();c2.resize();c3.resize();});
+}
+(function(){
+  if(window.echarts){initCharts();return;}
+  loadFallbackScript([
+    'https://unpkg.com/echarts@5.5.1/dist/echarts.min.js',
+    'https://cdn.bootcdn.net/ajax/libs/echarts/5.5.1/echarts.min.js'
+  ],ok=>{ ok&&window.echarts ? initCharts() : showFallbacks(); });
+})();
+</script>
+</body>
+</html>

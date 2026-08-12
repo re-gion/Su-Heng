@@ -1,0 +1,24 @@
+# 本地环境与密钥
+.env
+.env.*
+!.env.example
+
+# 运行时数据（架构 §6/§9：数据库、快照、报告、数据集不入库）
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+
+# 前端
+node_modules/
+dist/
+
+# 系统与崩溃文件
+bash.exe.stackdump
+*.stackdump
+.DS_Store
+Thumbs.db
