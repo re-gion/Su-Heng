@@ -1,0 +1,393 @@
+{
+  "_comment": "报告 IR v0.1 参考实例。严格 JSON（无注释、无尾逗号），引用闭包完整，可通过 05-核心契约 §2.4 的 R1-R18。校验用同目录 validate_fixture.py，配套数据库种子为 report-ir-v0.1.db-seed.json。这里的 fact_check_table 是【渲染层回填后】的形态；报告 Agent 的原始输出见 report-ir-v0.1.agent-output.json。",
+  "schema_version": "0.1",
+  "min_reader_minor": 1,
+  "report_id": "01JZ8K5RPT0000000000RPT1",
+
+  "task": {
+    "task_id": "t_20260812_ab12",
+    "event_query": "海天酱油添加剂双标风波",
+    "user_note": null,
+    "depth": "standard",
+    "time_range": {"from": "2022-09-30", "to": "2022-10-15"},
+    "tracked_until": "2026-08-12T18:00:00+08:00",
+    "generated_at": "2026-08-12T18:03:21+08:00",
+    "models_used": {
+      "analyst_a": "deepseek-chat",
+      "analyst_b": "kimi-k2",
+      "analyst_c": "deepseek-chat",
+      "moderator": "glm-4-flash",
+      "verifier": "glm-4-flash",
+      "reporter": "kimi-k2",
+      "utility": "deepseek-chat"
+    },
+    "search_providers_used": ["langsearch", "qianfan"],
+    "outer_rounds": 2,
+    "forced_release": false
+  },
+
+  "metrics": {
+    "key_claims_candidate": 8,
+    "key_claims_rendered": 7,
+    "key_claims_rejected": 1,
+    "rejection_reasons": {"no_evidence_ref": 1},
+    "key_claims_verification_skipped": 0,
+    "citation_coverage": 1.0,
+    "verified_rate": 0.429,
+    "weighted_verified_rate": 0.452,
+    "weight_scheme": "tier:1.0/0.8/0.6/0.4/0.2",
+    "disputed_rate": 0.143,
+    "refuted_rate": 0.143,
+    "evidence_total": 10,
+    "evidence_fetched": 7,
+    "evidence_snippet_only": 3,
+    "independent_publishers": 9,
+    "time_span_days": 16
+  },
+
+  "blocks": [
+    {
+      "block_id": "b_00_header",
+      "type": "report_header",
+      "section": "00",
+      "in_brief": true,
+      "event_title": "海天酱油添加剂双标风波",
+      "subtitle": "一场由短视频引爆、以国标解释权为核心的食品安全争议",
+      "event_period": "2022-09-30 至 2022-10-15",
+      "report_no": "YQ-20260812-AB12"
+    },
+    {
+      "block_id": "b_00_kpi",
+      "type": "kpi_grid",
+      "section": "00",
+      "in_brief": true,
+      "data_basis": "computed",
+      "cards": [
+        {"key": "independent_publishers", "label": "独立信源数", "value": 9, "unit": "家"},
+        {"key": "verified_rate", "label": "核验通过率", "value": 0.429, "unit": "ratio", "note": "含 2 条官方单源判定；加权口径 0.452"},
+        {"key": "evidence_total", "label": "证据总条数", "value": 10, "unit": "条", "note": "官方级 4 条，原文未取得 3 条"},
+        {"key": "time_span_days", "label": "覆盖时间跨度", "value": 16, "unit": "天"}
+      ]
+    },
+    {
+      "block_id": "b_01_summary",
+      "type": "executive_summary",
+      "section": "01",
+      "in_brief": true,
+      "is_editorial": false,
+      "lede": "2022 年 9 月底至 10 月中旬，一场围绕酱油配料表的讨论在多个平台持续发酵。",
+      "what": [
+        {"text": "该公司同一品牌在中日两地销售的部分产品配料表存在差异。", "claim_ref": "C001"}
+      ],
+      "why": [
+        {"text": "涉事产品所依据的国家标准由多家单位共同起草。", "claim_ref": "C003"}
+      ],
+      "so_what": [
+        {"text": "监管部门于 10 月 5 日就食品添加剂使用作出公开说明。", "claim_ref": "C005"}
+      ]
+    },
+    {
+      "block_id": "b_02_timeline",
+      "type": "timeline",
+      "section": "02",
+      "in_brief": false,
+      "nodes": [
+        {
+          "date": "2022-09-30",
+          "text": "对比中日配料表的短视频在短视频平台传播，引发大规模讨论。",
+          "claim_ref": "C001",
+          "evidence_refs": ["E002"],
+          "is_turning_point": true,
+          "turning_type": "第一次转折",
+          "quote_ref": "E002"
+        },
+        {
+          "date": "2022-10-05",
+          "text": "监管部门就食品添加剂使用规定作出公开说明。",
+          "claim_ref": "C005",
+          "evidence_refs": ["E005"],
+          "is_turning_point": true,
+          "turning_type": "制度回响"
+        },
+        {
+          "date": "2022-10-10",
+          "text": "关于涉事产品出口版本配方的说法在不同报道间出现分歧。",
+          "claim_ref": "C006",
+          "evidence_refs": ["E008"],
+          "is_turning_point": false
+        }
+      ]
+    },
+    {
+      "block_id": "b_03_factcheck",
+      "type": "fact_check_table",
+      "section": "03",
+      "in_brief": true,
+      "is_editorial": false,
+      "items": [
+        {
+          "claim_ref": "C001",
+          "statement_kind": "fact",
+          "text": "该公司同一品牌在中日两地销售的部分产品配料表存在差异。",
+          "rumor_text": "海天在国外卖零添加、在国内卖科技与狠活",
+          "badge": "verified",
+          "verdict": "support",
+          "independent_sources": 2,
+          "max_source_tier": 2,
+          "evidence_grade": "mixed",
+          "verification_state": "complete",
+          "citations": [
+            {
+              "evidence_ref": "E002",
+              "quote_type": "verbatim",
+              "quote": "国内版含谷氨酸钠等添加剂，日本版未标注该成分",
+              "quote_start": 1204,
+              "quote_end": 1229,
+              "relation": "support"
+            },
+            {
+              "evidence_ref": "E003",
+              "quote_type": "snippet",
+              "quote": "多家媒体走访核实两地在售产品配料标注情况，确认存在成分标注差异。",
+              "relation": "support",
+              "note": "原文未取得"
+            }
+          ]
+        },
+        {
+          "claim_ref": "C002",
+          "statement_kind": "rumor",
+          "text": "海天在日本销售的酱油产品普遍不含任何食品添加剂。",
+          "correction_text": "日本在售同类产品同样普遍使用食品添加剂，种类与用量受当地法规约束。",
+          "badge": "refuted",
+          "verdict": "contradict",
+          "independent_sources": 1,
+          "max_source_tier": 1,
+          "evidence_grade": "fulltext",
+          "verification_state": "complete",
+          "citations": [
+            {
+              "evidence_ref": "E006",
+              "quote_type": "verbatim",
+              "quote": "所调查的多款在日销售酱油中，标注含有食品添加剂的占多数",
+              "quote_start": 880,
+              "quote_end": 913,
+              "relation": "contradict"
+            }
+          ]
+        },
+        {
+          "claim_ref": "C003",
+          "statement_kind": "fact",
+          "text": "涉事产品所依据的国家标准由多家单位共同起草。",
+          "rumor_text": "国标是海天自己一家定的",
+          "badge": "verified",
+          "verdict": "support",
+          "independent_sources": 1,
+          "max_source_tier": 1,
+          "evidence_grade": "fulltext",
+          "verification_state": "complete",
+          "citations": [
+            {
+              "evidence_ref": "E001",
+              "quote_type": "verbatim",
+              "quote": "起草单位：中国调味品协会等多家单位",
+              "quote_start": 320,
+              "quote_end": 340,
+              "relation": "support",
+              "note": "单源·官方"
+            }
+          ]
+        },
+        {
+          "claim_ref": "C004",
+          "statement_kind": "fact",
+          "text": "涉事企业于 2022 年 10 月 4 日发布声明，称其产品全部符合国家标准且不存在双标。",
+          "badge": "unverified",
+          "verdict": "partial",
+          "independent_sources": 0,
+          "max_source_tier": 1,
+          "evidence_grade": "fulltext",
+          "verification_state": "complete",
+          "citations": [
+            {
+              "evidence_ref": "E004",
+              "quote_type": "verbatim",
+              "quote": "本公司所有产品均严格按照国家标准生产",
+              "quote_start": 96,
+              "quote_end": 114,
+              "relation": "partial",
+              "note": "当事方声明，仅能证明该方作出过此表述"
+            }
+          ]
+        },
+        {
+          "claim_ref": "C005",
+          "statement_kind": "fact",
+          "text": "监管部门于 2022 年 10 月 5 日就食品添加剂使用规定作出公开说明。",
+          "badge": "verified",
+          "verdict": "support",
+          "independent_sources": 1,
+          "max_source_tier": 1,
+          "evidence_grade": "fulltext",
+          "verification_state": "complete",
+          "citations": [
+            {
+              "evidence_ref": "E005",
+              "quote_type": "verbatim",
+              "quote": "食品添加剂的使用须符合相关国家标准的规定",
+              "quote_start": 210,
+              "quote_end": 231,
+              "relation": "support",
+              "note": "单源·官方"
+            }
+          ]
+        },
+        {
+          "claim_ref": "C006",
+          "statement_kind": "fact",
+          "text": "涉事产品出口版本与国内版本使用同一套配方。",
+          "badge": "disputed",
+          "verdict": "conflict",
+          "independent_sources": 1,
+          "max_source_tier": 2,
+          "evidence_grade": "mixed",
+          "verification_state": "complete",
+          "citations": [
+            {
+              "evidence_ref": "E008",
+              "quote_type": "verbatim",
+              "quote": "出口版本与国内版本执行同一配方标准",
+              "quote_start": 512,
+              "quote_end": 531,
+              "relation": "support"
+            },
+            {
+              "evidence_ref": "E009",
+              "quote_type": "snippet",
+              "quote": "行业媒体称出口版本按目的地法规单独调整配方。",
+              "relation": "contradict",
+              "note": "原文抓取失败"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "block_id": "b_04_chart_time",
+      "type": "chart",
+      "section": "04",
+      "in_brief": false,
+      "data_basis": "computed",
+      "chart_kind": "bar",
+      "title": "报道数量时间分布",
+      "source_note": "统计口径：证据库 published_at 按日分桶，样本 10 条",
+      "series": [
+        {"name": "报道数", "data": [["2022-09-30", 2], ["2022-10-01", 3], ["2022-10-05", 3], ["2022-10-10", 2]]}
+      ]
+    },
+    {
+      "block_id": "b_04_chart_fallback",
+      "type": "text",
+      "section": "04",
+      "in_brief": false,
+      "text": "信源类型分布图未生成：可分级证据仅 6 条，低于出图阈值 8 条。",
+      "degraded_from": "chart",
+      "limitation_ref": "L03"
+    },
+    {
+      "block_id": "b_05_views",
+      "type": "viewpoint_list",
+      "section": "05",
+      "in_brief": false,
+      "items": [
+        {"stance": "企业", "summary": "涉事企业称产品符合国家标准。", "claim_ref": "C004", "evidence_refs": ["E004"]},
+        {"stance": "媒体评论", "summary": "评论认为争议核心是标准解释权而非合法性。", "claim_ref": "C007", "evidence_refs": ["E007"]}
+      ]
+    },
+    {
+      "block_id": "b_05_editorial_1",
+      "type": "editorial_note",
+      "section": "05",
+      "in_brief": false,
+      "is_editorial": true,
+      "editorial_basis": ["E005", "E008"],
+      "title": "声量低但值得注意的问题",
+      "text": "关于同一标准在不同销售地的执行差异，公开材料中缺少监管方的横向说明。"
+    },
+    {
+      "block_id": "b_06_history",
+      "type": "history_compare",
+      "section": "06",
+      "in_brief": false,
+      "cards": [
+        {
+          "event_name": "某乳制品行业标准争议",
+          "period": "2011",
+          "one_liner": "行业标准制定过程中的企业参与度引发讨论。",
+          "outcome": "标准后续修订并公开征求意见。",
+          "similarity": "争议核心均为标准制定的参与主体。",
+          "difference": "该事件由行业协会主导，本事件由消费者内容引爆。",
+          "evidence_refs": ["E010"]
+        }
+      ],
+      "matrix": {
+        "dimensions": ["事件性质", "爆发路径", "应对方式", "监管介入", "最终结局"],
+        "rows": [
+          {"event": "本事件", "values": ["食品标准争议", "短视频引爆", "企业声明", "监管说明", "持续发酵"]}
+        ]
+      }
+    },
+    {
+      "block_id": "b_07_advice",
+      "type": "recommendation",
+      "section": "07",
+      "in_brief": true,
+      "is_editorial": true,
+      "editorial_basis": ["E001", "E002", "E005"],
+      "items": [
+        {
+          "heading": "目前最可靠的结论是什么",
+          "text": "两地在售产品的配料标注确有差异，这一点有两个独立信源支撑。",
+          "claim_refs": ["C001"]
+        },
+        {
+          "heading": "遇到这类爆料先问哪三个问题",
+          "text": "对比的是不是同一品类同一规格？差异是否来自两地法规不同？发布者是否给出了可核对的原始材料？"
+        }
+      ]
+    },
+    {
+      "block_id": "b_08_limits",
+      "type": "limitations",
+      "section": "08",
+      "in_brief": true,
+      "items": [
+        {"id": "L01", "category": "一手材料缺失", "text": "两地在售同款 SKU 的完整配料表原始材料未取得。"},
+        {"id": "L02", "category": "核验强度降级", "text": "本次核验模型与生成模型不同源，但均为低成本档，交叉核验强度中等。"},
+        {"id": "L03", "category": "图表未出", "text": "信源类型分布图因可分级证据不足未生成。"},
+        {"id": "L04", "category": "证据强度", "text": "10 条证据中 3 条未取得原文，引用卡片已逐条标注。"},
+        {"id": "L05", "category": "主观成分", "text": "本报告含 2 条编辑判断内容，位于第 05、07 节。"},
+        {"id": "L06", "category": "条目拦截", "text": "1 条候选重要 claim 因未绑定证据被渲染层拦截，未进入正文。"}
+      ]
+    },
+    {
+      "block_id": "b_09_appendix",
+      "type": "evidence_appendix",
+      "section": "09",
+      "in_brief": false,
+      "items": [
+        {"evidence_ref": "E001", "title": "酱油国家标准起草单位信息", "source_name": "国家标准信息公共服务平台", "publisher_entity": "国家标准信息公共服务平台", "source_tier": 1, "source_role": "authority", "published_at": "2021-12-01", "url": "https://example.gov/std/18186", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD01", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000e1"},
+        {"evidence_ref": "E002", "title": "记者实地对比中日两地在售产品配料表", "source_name": "界面新闻", "publisher_entity": "界面新闻", "source_tier": 2, "source_role": "independent", "published_at": "2022-09-30", "url": "https://example.com/news/1", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD02", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000e2"},
+        {"evidence_ref": "E003", "title": "多家媒体走访核实两地配料标注", "source_name": "每日经济新闻", "publisher_entity": "每日经济新闻", "source_tier": 2, "source_role": "independent", "published_at": "2022-10-01", "url": "https://example.com/news/2", "fetch_status": "discovered", "snapshot_pk": null, "content_sha256": null},
+        {"evidence_ref": "E004", "title": "涉事企业关于产品标准的声明", "source_name": "涉事企业官网", "publisher_entity": "涉事企业", "source_tier": 1, "source_role": "party", "published_at": "2022-10-04", "url": "https://example.com/corp/statement", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD04", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000e4"},
+        {"evidence_ref": "E005", "title": "监管部门关于食品添加剂使用的公开说明", "source_name": "市场监管部门", "publisher_entity": "市场监管部门", "source_tier": 1, "source_role": "authority", "published_at": "2022-10-05", "url": "https://example.gov/notice/1", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD05", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000e5"},
+        {"evidence_ref": "E006", "title": "在日销售酱油产品添加剂标注调查资料", "source_name": "日本消费者厅公开资料", "publisher_entity": "日本消费者厅", "source_tier": 1, "source_role": "authority", "published_at": "2022-10-08", "url": "https://example.jp/caa/report", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD06", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000e6"},
+        {"evidence_ref": "E007", "title": "评论：争议核心是标准解释权", "source_name": "新浪财经", "publisher_entity": "每日经济新闻", "source_tier": 3, "source_role": "syndicated", "published_at": "2022-10-09", "url": "https://example.com/portal/3", "fetch_status": "discovered", "snapshot_pk": null, "content_sha256": null},
+        {"evidence_ref": "E008", "title": "出口版本与国内版本配方口径报道", "source_name": "财经媒体 A", "publisher_entity": "财经媒体 A", "source_tier": 2, "source_role": "independent", "published_at": "2022-10-10", "url": "https://example.com/news/4", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD08", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000e8"},
+        {"evidence_ref": "E009", "title": "行业媒体：出口版本按目的地法规调整", "source_name": "行业垂直媒体 B", "publisher_entity": "行业垂直媒体 B", "source_tier": 4, "source_role": "independent", "published_at": "2022-10-11", "url": "https://example.com/industry/5", "fetch_status": "fetch_failed", "snapshot_pk": null, "content_sha256": null},
+        {"evidence_ref": "E010", "title": "某乳制品行业标准争议回顾", "source_name": "财新", "publisher_entity": "财新", "source_tier": 2, "source_role": "independent", "published_at": "2011-06-20", "url": "https://example.com/history/6", "fetch_status": "fetched", "snapshot_pk": "01JZ8K3QF7M2X9V0RBTN4WCD10", "content_sha256": "9f2c0000000000000000000000000000000000000000000000000000000000f0"}
+      ]
+    }
+  ]
+}

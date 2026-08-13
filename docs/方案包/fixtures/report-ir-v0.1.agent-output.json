@@ -1,0 +1,107 @@
+{
+  "_comment": "报告 Agent 【原始输出】的参考形态——对照 report-ir-v0.1.fixture.json（渲染层回填后的形态）看，差别就是 05-核心契约 §0.5 的全部内容：模型只决定选哪些 claim、怎么排、写哪些叙述句；正文、徽章、结论、引用卡片、metrics、task、证据附录一个字都不由它产出。它写了也会被 R15 忽略。",
+  "blocks": [
+    {
+      "block_id": "b_01_summary",
+      "type": "executive_summary",
+      "section": "01",
+      "in_brief": true,
+      "is_editorial": false,
+      "lede": "2022 年 9 月底至 10 月中旬，一场围绕酱油配料表的讨论在多个平台持续发酵。",
+      "what": [{"text": "该公司同一品牌在中日两地销售的部分产品配料表存在差异。", "claim_ref": "C001"}],
+      "why": [{"text": "涉事产品所依据的国家标准由多家单位共同起草。", "claim_ref": "C003"}],
+      "so_what": [{"text": "监管部门于 10 月 5 日就食品添加剂使用作出公开说明。", "claim_ref": "C005"}]
+    },
+    {
+      "block_id": "b_02_timeline",
+      "type": "timeline",
+      "section": "02",
+      "in_brief": false,
+      "nodes": [
+        {"date": "2022-09-30", "text": "对比中日配料表的短视频在短视频平台传播，引发大规模讨论。", "claim_ref": "C001", "evidence_refs": ["E002"], "is_turning_point": true, "turning_type": "第一次转折", "quote_ref": "E002"},
+        {"date": "2022-10-05", "text": "监管部门就食品添加剂使用规定作出公开说明。", "claim_ref": "C005", "evidence_refs": ["E005"], "is_turning_point": true, "turning_type": "制度回响"},
+        {"date": "2022-10-10", "text": "关于涉事产品出口版本配方的说法在不同报道间出现分歧。", "claim_ref": "C006", "evidence_refs": ["E008"], "is_turning_point": false}
+      ]
+    },
+    {
+      "block_id": "b_03_factcheck",
+      "type": "fact_check_table",
+      "section": "03",
+      "in_brief": true,
+      "is_editorial": false,
+      "items": [
+        {"claim_ref": "C001"},
+        {"claim_ref": "C002"},
+        {"claim_ref": "C003"},
+        {"claim_ref": "C004"},
+        {"claim_ref": "C005"},
+        {"claim_ref": "C006"}
+      ]
+    },
+    {
+      "block_id": "b_04_chart_time",
+      "type": "chart",
+      "section": "04",
+      "in_brief": false,
+      "data_basis": "computed",
+      "chart_kind": "bar",
+      "title": "报道数量时间分布",
+      "source_note": "统计口径：证据库 published_at 按日分桶，样本 10 条",
+      "series": [{"name": "报道数", "data": [["2022-09-30", 2], ["2022-10-01", 3], ["2022-10-05", 3], ["2022-10-10", 2]]}]
+    },
+    {
+      "block_id": "b_04_chart_fallback",
+      "type": "text",
+      "section": "04",
+      "in_brief": false,
+      "text": "信源类型分布图未生成：可分级证据仅 6 条，低于出图阈值 8 条。",
+      "degraded_from": "chart",
+      "limitation_ref": "L03"
+    },
+    {
+      "block_id": "b_05_views",
+      "type": "viewpoint_list",
+      "section": "05",
+      "in_brief": false,
+      "items": [
+        {"stance": "企业", "summary": "涉事企业称产品符合国家标准。", "claim_ref": "C004", "evidence_refs": ["E004"]},
+        {"stance": "媒体评论", "summary": "评论认为争议核心是标准解释权而非合法性。", "claim_ref": "C007", "evidence_refs": ["E007"]}
+      ]
+    },
+    {
+      "block_id": "b_05_editorial_1",
+      "type": "editorial_note",
+      "section": "05",
+      "in_brief": false,
+      "is_editorial": true,
+      "editorial_basis": ["E005", "E008"],
+      "title": "声量低但值得注意的问题",
+      "text": "关于同一标准在不同销售地的执行差异，公开材料中缺少监管方的横向说明。"
+    },
+    {
+      "block_id": "b_06_history",
+      "type": "history_compare",
+      "section": "06",
+      "in_brief": false,
+      "cards": [
+        {"event_name": "某乳制品行业标准争议", "period": "2011", "one_liner": "行业标准制定过程中的企业参与度引发讨论。", "outcome": "标准后续修订并公开征求意见。", "similarity": "争议核心均为标准制定的参与主体。", "difference": "该事件由行业协会主导，本事件由消费者内容引爆。", "evidence_refs": ["E010"]}
+      ],
+      "matrix": {
+        "dimensions": ["事件性质", "爆发路径", "应对方式", "监管介入", "最终结局"],
+        "rows": [{"event": "本事件", "values": ["食品标准争议", "短视频引爆", "企业声明", "监管说明", "持续发酵"]}]
+      }
+    },
+    {
+      "block_id": "b_07_advice",
+      "type": "recommendation",
+      "section": "07",
+      "in_brief": true,
+      "is_editorial": true,
+      "editorial_basis": ["E001", "E002", "E005"],
+      "items": [
+        {"heading": "目前最可靠的结论是什么", "text": "两地在售产品的配料标注确有差异，这一点有两个独立信源支撑。", "claim_refs": ["C001"]},
+        {"heading": "遇到这类爆料先问哪三个问题", "text": "对比的是不是同一品类同一规格？差异是否来自两地法规不同？发布者是否给出了可核对的原始材料？"}
+      ]
+    }
+  ]
+}

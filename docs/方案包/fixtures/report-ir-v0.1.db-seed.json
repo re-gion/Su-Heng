@@ -1,0 +1,51 @@
+{
+  "_comment": "report-ir-v0.1.fixture.json 对应的数据库种子：claim / evidence / claim_evidence 三张表的行。渲染层的 R2（悬空引用）、R3（引用卡片非空）、R15（权威字段回填）、R16（核验完整性）、R17（引用闭包）都要拿 IR 跟这份种子对照才能校验，所以两份必须同时改。字段名与 02-系统架构设计 §6 的 DDL 一致。",
+  "task_id": "t_20260812_ab12",
+
+  "claim": [
+    {"local_id": "C001", "text": "该公司同一品牌在中日两地销售的部分产品配料表存在差异。", "statement_kind": "fact", "rumor_text": "海天在国外卖零添加、在国内卖科技与狠活", "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "verified", "verdict": "support", "verification_state": "complete", "independent_sources": 2, "max_source_tier": 2},
+    {"local_id": "C002", "text": "海天在日本销售的酱油产品普遍不含任何食品添加剂。", "statement_kind": "rumor", "rumor_text": null, "correction_text": "日本在售同类产品同样普遍使用食品添加剂，种类与用量受当地法规约束。", "is_key": 1, "is_key_reason": null, "badge": "refuted", "verdict": "contradict", "verification_state": "complete", "independent_sources": 1, "max_source_tier": 1},
+    {"local_id": "C003", "text": "涉事产品所依据的国家标准由多家单位共同起草。", "statement_kind": "fact", "rumor_text": "国标是海天自己一家定的", "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "verified", "verdict": "support", "verification_state": "complete", "independent_sources": 1, "max_source_tier": 1},
+    {"local_id": "C004", "text": "涉事企业于 2022 年 10 月 4 日发布声明，称其产品全部符合国家标准且不存在双标。", "statement_kind": "fact", "rumor_text": null, "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "unverified", "verdict": "partial", "verification_state": "complete", "independent_sources": 0, "max_source_tier": 1},
+    {"local_id": "C005", "text": "监管部门于 2022 年 10 月 5 日就食品添加剂使用规定作出公开说明。", "statement_kind": "fact", "rumor_text": null, "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "verified", "verdict": "support", "verification_state": "complete", "independent_sources": 1, "max_source_tier": 1},
+    {"local_id": "C006", "text": "涉事产品出口版本与国内版本使用同一套配方。", "statement_kind": "fact", "rumor_text": null, "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "disputed", "verdict": "conflict", "verification_state": "complete", "independent_sources": 1, "max_source_tier": 2},
+    {"local_id": "C007", "text": "有媒体评论认为争议核心是国家标准的解释权而非产品合法性。", "statement_kind": "fact", "rumor_text": null, "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "unverified", "verdict": "partial", "verification_state": "complete", "independent_sources": 0, "max_source_tier": 3},
+    {"local_id": "C008", "text": "该事件导致涉事企业股价在两周内出现明显波动。", "statement_kind": "fact", "rumor_text": null, "correction_text": null, "is_key": 1, "is_key_reason": null, "badge": "unverified", "verdict": null, "verification_state": "pending", "independent_sources": 0, "max_source_tier": null, "_note": "无绑定证据 → 被 R3 拦截，计入 metrics.key_claims_rejected=1 与局限性 L06。它是候选但不在 IR 里，这正是 candidate(8) = rendered(7) + rejected(1) 的来源"}
+  ],
+
+  "evidence": [
+    {"local_id": "E001", "publisher_entity": "国家标准信息公共服务平台", "source_tier": 1, "source_role": "authority", "fetch_status": "fetched", "published_at": "2021-12-01"},
+    {"local_id": "E002", "publisher_entity": "界面新闻", "source_tier": 2, "source_role": "independent", "fetch_status": "fetched", "published_at": "2022-09-30"},
+    {"local_id": "E003", "publisher_entity": "每日经济新闻", "source_tier": 2, "source_role": "independent", "fetch_status": "discovered", "published_at": "2022-10-01"},
+    {"local_id": "E004", "publisher_entity": "涉事企业", "source_tier": 1, "source_role": "party", "fetch_status": "fetched", "published_at": "2022-10-04"},
+    {"local_id": "E005", "publisher_entity": "市场监管部门", "source_tier": 1, "source_role": "authority", "fetch_status": "fetched", "published_at": "2022-10-05"},
+    {"local_id": "E006", "publisher_entity": "日本消费者厅", "source_tier": 1, "source_role": "authority", "fetch_status": "fetched", "published_at": "2022-10-08"},
+    {"local_id": "E007", "publisher_entity": "每日经济新闻", "source_tier": 3, "source_role": "syndicated", "fetch_status": "discovered", "published_at": "2022-10-09", "_note": "新浪财经转载每经，publisher_entity 归并到上游，因此它与 E003 在独立信源计数上算同一个主体"},
+    {"local_id": "E008", "publisher_entity": "财经媒体 A", "source_tier": 2, "source_role": "independent", "fetch_status": "fetched", "published_at": "2022-10-10"},
+    {"local_id": "E009", "publisher_entity": "行业垂直媒体 B", "source_tier": 4, "source_role": "independent", "fetch_status": "fetch_failed", "published_at": "2022-10-11"},
+    {"local_id": "E010", "publisher_entity": "财新", "source_tier": 2, "source_role": "independent", "fetch_status": "fetched", "published_at": "2011-06-20"}
+  ],
+
+  "claim_evidence": [
+    {"claim": "C001", "evidence": "E002", "relation": "support", "quote_type": "verbatim", "quote": "国内版含谷氨酸钠等添加剂，日本版未标注该成分", "quote_start": 1204, "quote_end": 1229, "quote_verified": 1, "cited_verified": 1, "ord": 0},
+    {"claim": "C001", "evidence": "E003", "relation": "support", "quote_type": "snippet", "quote": "多家媒体走访核实两地在售产品配料标注情况，确认存在成分标注差异。", "quote_start": null, "quote_end": null, "quote_verified": 0, "cited_verified": 1, "ord": 1},
+    {"claim": "C002", "evidence": "E006", "relation": "contradict", "quote_type": "verbatim", "quote": "所调查的多款在日销售酱油中，标注含有食品添加剂的占多数", "quote_start": 880, "quote_end": 913, "quote_verified": 1, "cited_verified": 1, "ord": 0},
+    {"claim": "C003", "evidence": "E001", "relation": "support", "quote_type": "verbatim", "quote": "起草单位：中国调味品协会等多家单位", "quote_start": 320, "quote_end": 340, "quote_verified": 1, "cited_verified": 1, "ord": 0},
+    {"claim": "C004", "evidence": "E004", "relation": "partial", "quote_type": "verbatim", "quote": "本公司所有产品均严格按照国家标准生产", "quote_start": 96, "quote_end": 114, "quote_verified": 1, "cited_verified": 1, "ord": 0},
+    {"claim": "C005", "evidence": "E005", "relation": "support", "quote_type": "verbatim", "quote": "食品添加剂的使用须符合相关国家标准的规定", "quote_start": 210, "quote_end": 231, "quote_verified": 1, "cited_verified": 1, "ord": 0},
+    {"claim": "C006", "evidence": "E008", "relation": "support", "quote_type": "verbatim", "quote": "出口版本与国内版本执行同一配方标准", "quote_start": 512, "quote_end": 531, "quote_verified": 1, "cited_verified": 1, "ord": 0},
+    {"claim": "C006", "evidence": "E009", "relation": "contradict", "quote_type": "snippet", "quote": "行业媒体称出口版本按目的地法规单独调整配方。", "quote_start": null, "quote_end": null, "quote_verified": 0, "cited_verified": 1, "ord": 1},
+    {"claim": "C007", "evidence": "E007", "relation": "partial", "quote_type": "snippet", "quote": "评论认为争议核心是标准解释权而非合法性。", "quote_start": null, "quote_end": null, "quote_verified": 0, "cited_verified": 1, "ord": 0}
+  ],
+
+  "expected_badges": {
+    "C001": {"badge": "verified", "rule": "D7", "why": "ind_S=2（界面新闻、每日经济新闻），无反证、无冲突"},
+    "C002": {"badge": "refuted", "rule": "D4", "why": "ind_S=0，ind_U=1 且为裁判性 authority"},
+    "C003": {"badge": "verified", "rule": "D8", "why": "ind_S=1 且该主体 authority+L1，单源·官方"},
+    "C004": {"badge": "unverified", "rule": "D11", "why": "party 非归属性 claim，证据不进立场归并；只剩 partial"},
+    "C005": {"badge": "verified", "rule": "D8", "why": "同 C003"},
+    "C006": {"badge": "disputed", "rule": "D2", "why": "ind_S=1、ind_U=1，来自不同主体"},
+    "C007": {"badge": "unverified", "rule": "D11", "why": "只有 partial"},
+    "C008": {"badge": "unverified", "rule": "R3 拦截", "why": "无绑定证据，整条不进正文"}
+  }
+}
