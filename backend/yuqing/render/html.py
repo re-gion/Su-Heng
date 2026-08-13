@@ -99,11 +99,22 @@ def _appendix(block: dict[str, Any]) -> str:
             f"{_escape(citation.get('note') or '')}</small></blockquote>"
             for citation in item.get("citations", [])
         )
+        original = (
+            f'<blockquote class="original"><strong>原文（{_escape(item.get("lang") or "unknown")}）</strong><br>{_escape(item.get("original_excerpt"))}</blockquote>'
+            if item.get("original_excerpt")
+            else ""
+        )
+        translation = (
+            f'<blockquote class="translation"><strong>机器翻译（中文，仅供阅读，不参与逐字核验）</strong><br>{_escape(item.get("machine_translation_zh"))}</blockquote>'
+            if item.get("machine_translation_zh")
+            else ""
+        )
         cards.append(
             f'<article class="evidence-card" id="evidence-{ref}"><div class="evidence-id">{ref}</div>'
             f"<h3>{_escape(item.get('title'))}</h3><p>{_escape(item.get('source_name'))} · L{_escape(item.get('source_tier'))} · {_escape(strength)}</p>"
             f'<p class="published">发布日期：{_escape(item.get("published_at") or "未知")}</p>'
-            f'{quotes}<p><a href="{_escape(item.get("url"))}" rel="noreferrer">访问公开来源</a> {snapshot}</p></article>'
+            f'<p class="published">证据类型：{_escape(item.get("kind") or "web")} · 语言：{_escape(item.get("lang") or "unknown")}</p>'
+            f'{quotes}{original}{translation}<p><a href="{_escape(item.get("url"))}" rel="noreferrer">访问公开来源</a> {snapshot}</p></article>'
         )
     return f'<section id="evidence"><h2>证据卡片</h2>{"".join(cards)}</section>'
 
@@ -179,6 +190,27 @@ def _generic_block(block: dict[str, Any]) -> str:
             else ""
         )
         return f'<section id="section-{_escape(block.get("section"))}"><h2>{title}</h2>{"".join(cards)}{fallback}</section>'
+    if block_type == "comment_insight":
+        collections = "".join(
+            f"<li><strong>{_escape(item.get('platform'))}</strong> · {_escape(item.get('title'))} · "
+            f"{_escape(item.get('collected_count'))} 条 · {_escape(item.get('sampling_method'))}</li>"
+            for item in block.get("collections", [])
+        )
+        insights = "".join(
+            f'<article class="narrative-card"><p>{_escape(item.get("text"))}'
+            + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
+            + "</p></article>"
+            for item in block.get("items", [])
+        )
+        fallback = (
+            f'<p class="fallback-note">{_escape(block.get("fallback_text"))}</p>'
+            if block.get("fallback_text")
+            else ""
+        )
+        return (
+            f'<section id="comment-insight"><h2>{title}</h2><p class="sample-notice">'
+            f"{_escape(block.get('sample_notice'))}</p><ul>{collections}</ul>{insights}{fallback}</section>"
+        )
     collection = block.get("items") or block.get("cards") or []
     items = "".join(
         f'<article class="narrative-card"><h3>{_escape(item.get("event_name") or item.get("agent") or "要点")}</h3>'
@@ -224,6 +256,7 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
             "viewpoint_list",
             "history_compare",
             "recommendation",
+            "comment_insight",
         }:
             body.append(_generic_block(block))
         elif block.get("fallback_text"):

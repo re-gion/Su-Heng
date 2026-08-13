@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 Depth = Literal["quick", "standard", "deep"]
 TaskStatus = Literal["queued", "running", "pausing", "paused", "stopping", "failed", "done"]
@@ -8,6 +8,9 @@ FetchStatus = Literal["discovered", "fetched", "fetch_failed"]
 SourceRole = Literal["authority", "party", "independent", "syndicated", "unknown"]
 StatementKind = Literal["fact", "rumor"]
 Badge = Literal["verified", "unverified", "disputed", "refuted"]
+SourceScope = Literal["auto", "domestic", "global"]
+CommentMode = Literal["off", "smart", "manual", "hybrid"]
+EvidenceKind = Literal["web", "local_dataset", "social_comments"]
 
 
 class TaskCreate(BaseModel):
@@ -15,6 +18,20 @@ class TaskCreate(BaseModel):
     user_note: str | None = None
     depth: Depth = "standard"
     time_range: "TimeRange | None" = None
+    source_scope: SourceScope = "auto"
+    source_languages: list[str] = Field(default_factory=lambda: ["zh", "en"], max_length=3)
+    comment_mode: CommentMode = "off"
+    comment_urls: list[HttpUrl] = Field(default_factory=list, max_length=20)
+
+    @field_validator("source_languages")
+    @classmethod
+    def validate_source_languages(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(item.strip().lower() for item in value if item.strip()))
+        if not normalized:
+            raise ValueError("source_languages 至少包含一种语言")
+        if any(len(item) < 2 or len(item) > 15 for item in normalized):
+            raise ValueError("source_languages 必须使用 BCP-47 语言标签")
+        return normalized
 
     @property
     def time_range_from(self) -> str | None:
@@ -38,6 +55,11 @@ class TaskRecord(BaseModel):
     time_range_from: str | None = None
     time_range_to: str | None = None
     status: TaskStatus
+    phase: str = "planning"
+    source_scope: SourceScope = "auto"
+    source_languages: list[str] = ["zh", "en"]
+    comment_mode: CommentMode = "off"
+    comment_urls: list[str] = []
     outer_round: int
     tokens_used: int
     cost_estimate: float
@@ -67,6 +89,7 @@ class EvidenceCreate(BaseModel):
     content_sha256: str | None = None
     lang: str | None = "zh"
     extra: dict | None = None
+    kind: EvidenceKind = "web"
 
 
 class EvidenceRecord(BaseModel):
@@ -87,6 +110,9 @@ class EvidenceRecord(BaseModel):
     snapshot_path: str | None
     content_sha256: str | None
     provider: str | None
+    lang: str | None = "zh"
+    extra: dict | None = None
+    kind: EvidenceKind = "web"
 
 
 class QuoteCreate(BaseModel):

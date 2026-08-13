@@ -130,7 +130,7 @@ def test_compatible_new_minor_uses_unknown_block_fallback():
 
 @pytest.mark.parametrize(
     ("schema_version", "min_reader_minor"),
-    [("0.3", 3), ("1.0", 0)],
+    [("0.4", 4), ("1.0", 0)],
 )
 def test_incompatible_ir_versions_fail_clearly(schema_version, min_reader_minor):
     report = load_fixture()
@@ -159,8 +159,8 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
 
     migrated = migrate_report(report)
 
-    assert migrated["schema_version"] == "0.2"
-    assert migrated["min_reader_minor"] == 1
+    assert migrated["schema_version"] == "0.3"
+    assert migrated["min_reader_minor"] == 3
     card = next(
         card
         for block in migrated["blocks"]
@@ -171,7 +171,7 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
     assert card["comparison"] == "旧版对照内容"
     assert card["evidence_refs"] == ["E001"]
     assert card["provenance"] == "历史报告迁移"
-    assert migrated["migration_history"] == ["0.1->0.2"]
+    assert migrated["migration_history"] == ["0.1->0.2", "0.2->0.3"]
 
 
 def test_unknown_report_ir_is_rejected_instead_of_silently_rendered():

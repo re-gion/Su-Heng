@@ -17,7 +17,7 @@ def _items(body: dict[str, Any], *paths: tuple[str, ...]) -> list[dict[str, Any]
     return []
 
 
-def _normalized(items: list[dict[str, Any]], provider: str) -> list[SearchResult]:
+def _normalized(items: list[dict[str, Any]], provider: str, lang: str = "zh") -> list[SearchResult]:
     result = []
     for item in items:
         url = item.get("url") or item.get("link")
@@ -37,6 +37,7 @@ def _normalized(items: list[dict[str, Any]], provider: str) -> list[SearchResult
                 or item.get("datePublished"),
                 source_name=item.get("media") or item.get("source") or item.get("siteName"),
                 provider=provider,
+                lang=str(item.get("language") or item.get("lang") or lang),
                 raw=item,
             )
         )
@@ -73,7 +74,9 @@ class ZhipuSearchProvider(_HTTPProvider):
         )
         response.raise_for_status()
         return _normalized(
-            _items(response.json(), ("search_result",), ("data", "search_result")), self.name
+            _items(response.json(), ("search_result",), ("data", "search_result")),
+            self.name,
+            params.lang,
         )
 
 
@@ -92,7 +95,7 @@ class QianfanSearchProvider(_HTTPProvider):
         )
         response.raise_for_status()
         return _normalized(
-            _items(response.json(), ("references",), ("data", "references")), self.name
+            _items(response.json(), ("references",), ("data", "references")), self.name, params.lang
         )[: params.top_k]
 
 
@@ -114,7 +117,7 @@ class TavilySearchProvider(_HTTPProvider):
             payload["include_domains"] = params.include_domains
         response = await self.client.post("https://api.tavily.com/search", json=payload)
         response.raise_for_status()
-        return _normalized(_items(response.json(), ("results",)), self.name)
+        return _normalized(_items(response.json(), ("results",)), self.name, params.lang)
 
 
 class SerperSearchProvider(_HTTPProvider):
@@ -124,11 +127,22 @@ class SerperSearchProvider(_HTTPProvider):
         tbs = {"oneDay": "qdr:d", "oneWeek": "qdr:w", "oneMonth": "qdr:m", "oneYear": "qdr:y"}.get(
             params.freshness
         )
+        language = params.lang.lower()
+        default_region = {
+            "zh": ("cn", "zh-cn"),
+            "en": ("us", "en"),
+            "ja": ("jp", "ja"),
+            "ko": ("kr", "ko"),
+            "de": ("de", "de"),
+            "fr": ("fr", "fr"),
+            "es": ("es", "es"),
+        }.get(language.split("-", 1)[0], ("us", language))
+        gl = (params.region or default_region[0]).split("-", 1)[0].lower()
         payload: dict[str, Any] = {
             "q": params.query,
             "num": params.top_k,
-            "gl": "cn",
-            "hl": "zh-cn",
+            "gl": gl,
+            "hl": default_region[1],
         }
         if tbs:
             payload["tbs"] = tbs
@@ -138,4 +152,4 @@ class SerperSearchProvider(_HTTPProvider):
             json=payload,
         )
         response.raise_for_status()
-        return _normalized(_items(response.json(), ("news",), ("organic",)), self.name)
+        return _normalized(_items(response.json(), ("news",), ("organic",)), self.name, params.lang)

@@ -45,6 +45,7 @@ class EvidenceStore:
                     published_at=result.published_at.isoformat() if result.published_at else None,
                     retrieval_query=query,
                     provider=result.provider,
+                    lang=result.lang,
                     extra={"source_tier_matched": tier_matched},
                 )
             )

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import zipfile
 from functools import partial
 from io import BytesIO
@@ -62,7 +63,7 @@ def test_health_loads_v15_history_tools_without_definition_warnings(runtime_dir:
         response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json()["version"] == "0.2.0"
+    assert response.json()["version"] == "0.3.0"
     assert response.json()["agent_definitions"]["warnings"] == []
 
 
@@ -338,6 +339,45 @@ def test_pdf_and_evidence_package_exports_preserve_report_and_sanitized_citation
     assert "<script" not in snapshot_html
 
 
+def test_social_comment_snapshot_endpoint_returns_sanitized_json(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
+    with TestClient(app) as client:
+        task_id = client.post("/api/tasks", json={"event_query": "评论快照"}).json()["task_id"]
+        snapshot = runtime_dir / "snapshots" / task_id / "comments.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(
+            json.dumps(
+                {
+                    "sampling_method": "fixture",
+                    "comments": [{"id": "匿名哈希", "text": "脱敏评论"}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        evidence = client.portal.call(
+            client.app.state.database.add_evidence,
+            EvidenceCreate(
+                task_id=task_id,
+                url="https://weibo.com/123456/AbCdEf",
+                title="评论样本",
+                content_text="脱敏评论",
+                fetch_status="fetched",
+                fetched_at="2026-08-13T10:00:00+08:00",
+                snapshot_path=str(snapshot),
+                content_sha256="a" * 64,
+                kind="social_comments",
+            ),
+        )
+
+        response = client.get(f"/api/evidence/{evidence.pk}/snapshot")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["comments"] == [{"id": "匿名哈希", "text": "脱敏评论"}]
+    assert response.headers["x-snapshot-sanitized"] == "true"
+
+
 def test_resume_claim_is_single_flight(runtime_dir: Path):
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
     with TestClient(app) as client:
@@ -486,3 +526,80 @@ def test_unknown_report_ir_returns_explicit_compatibility_error(runtime_dir: Pat
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "REPORT_IR_UNSUPPORTED"
+
+
+def test_v2_task_contract_persists_language_scope_and_comment_options(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=ImmediateOrchestrator)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "event_query": "CrowdStrike global outage",
+                "source_scope": "global",
+                "source_languages": ["zh", "en", "de"],
+                "comment_mode": "hybrid",
+                "comment_urls": ["https://www.zhihu.com/question/123456789"],
+            },
+        )
+        detail = client.get(f"/api/tasks/{created.json()['task_id']}")
+
+    assert created.status_code == 202
+    assert detail.status_code == 200
+    connection = sqlite3.connect(runtime_dir / "yuqing.db")
+    row = connection.execute(
+        "SELECT source_scope,source_languages,comment_mode,comment_urls FROM task WHERE id=?",
+        (created.json()["task_id"],),
+    ).fetchone()
+    connection.close()
+    assert row == (
+        "global",
+        '["zh", "en", "de"]',
+        "hybrid",
+        '["https://www.zhihu.com/question/123456789"]',
+    )
+
+
+def test_comment_selection_pause_cannot_be_bypassed_and_skip_continues(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=ImmediateOrchestrator)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"event_query": "评论确认测试"})
+        task_id = created.json()["task_id"]
+        connection = sqlite3.connect(runtime_dir / "yuqing.db")
+        connection.execute(
+            "UPDATE task SET status='paused',phase='comment_selection' WHERE id=?", (task_id,)
+        )
+        connection.execute(
+            """INSERT INTO task_state(task_id,step_key,kind,status,replay,payload,result_ref,created_at,updated_at)
+               VALUES(?, 'comments:selection','round_checkpoint','settled','safe','{}',
+               '{"phase":"comment_selection"}','2026-01-01','2026-01-01')""",
+            (task_id,),
+        )
+        connection.commit()
+        connection.close()
+
+        blocked = client.post(f"/api/tasks/{task_id}/resume")
+        skipped = client.post(f"/api/tasks/{task_id}/comment-selection", json={"action": "skip"})
+
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "COMMENT_SELECTION_REQUIRED"
+    assert skipped.status_code == 202
+
+
+def test_comment_login_state_endpoints_reject_non_local_requests(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
+    with TestClient(app, base_url="http://192.168.1.50") as client:
+        created = client.post(
+            "/api/tasks",
+            json={"event_query": "远程评论任务", "comment_mode": "smart"},
+        )
+        candidate = client.get("/api/tasks/not-found/comment-candidates")
+        selection = client.post("/api/tasks/not-found/comment-selection", json={"action": "skip"})
+        stopped = client.post("/api/tasks/not-found/comment-collection/stop")
+
+    assert created.status_code == 403
+    assert candidate.status_code == 403
+    assert selection.status_code == 403
+    assert stopped.status_code == 403
+    assert {
+        response.json()["error"]["code"] for response in (created, candidate, selection, stopped)
+    } == {"COMMENT_PLUGIN_LOCAL_ONLY"}

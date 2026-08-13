@@ -90,6 +90,10 @@ class ConfigService:
                 },
             },
             "fetch": {"provider_order": ["builtin"], "keys": {"jina": None, "firecrawl": None}},
+            "comments": {
+                "enabled": values.get("YUQING_COMMENT_PLUGIN_ENABLED", "false").lower()
+                in {"1", "true", "yes", "on"}
+            },
         }
 
     async def update(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -131,6 +135,13 @@ class ConfigService:
             if name not in SEARCH_PROVIDERS:
                 raise ValueError(f"未知搜索 provider：{name}")
             changes[f"{name.upper()}_API_KEY"] = value
+        comments = payload.get("comments") or {}
+        if not isinstance(comments, dict):
+            raise ValueError("comments 必须是对象")
+        if "enabled" in comments:
+            if not isinstance(comments["enabled"], bool):
+                raise ValueError("comments.enabled 必须是布尔值")
+            changes["YUQING_COMMENT_PLUGIN_ENABLED"] = "true" if comments["enabled"] else "false"
         for key, value in changes.items():
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} 必须是字符串或 null")

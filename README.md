@@ -1,6 +1,6 @@
-# 舆情专报 Agent（V1.5 数据纵深）
+# 舆情专报 Agent（V2 国际信源与评论深挖）
 
-V1.5 在完整参赛链路上补齐数据纵深：历史数据集与热榜快照进入本地 SQLite，历史洞察 Agent 本地优先、检索兜底；报告新增可追溯历史卡片和真实热度曲线，并可导出同源 HTML/PDF 与证据包 ZIP。分析过程通过 SSE 实时展示，进程中断可从检查点续跑。
+V2 在 V1.5 数据纵深之上加入中英文国际信源闭环，以及默认关闭、逐帖确认的登录态评论插件。外文原文始终是核验依据；评论只作为确认帖子的脱敏样本，不外推为整体民意。
 
 ## 十分钟启动（Windows PowerShell）
 
@@ -73,6 +73,8 @@ docker compose -f compose.demo.yml up --build -d
 - `YUQING_HOTLIST_URLS / PLATFORMS / INTERVAL_SECONDS`：热榜数据源、平台名和采集周期。
 - `YUQING_DEMO_*`：演示站只读、并发/每日额度、会话 Cookie 与报告 TTL；启用 HTTPS 时设置 `YUQING_DEMO_COOKIE_SECURE=true`，生产内网使用时保持 `YUQING_DEMO_MODE=false`。
 - `YUQING_PDF_BROWSER`：可选的 Edge/Chromium 可执行文件；Windows 会自动发现 Edge，镜像已内置 Chromium。
+- `YUQING_COMMENT_PLUGIN_ENABLED=true`：仅在本机启用智能选帖与登录态评论采集；Docker/Demo 强制关闭。
+- `YUQING_COMMENT_BROWSER`：可选的 Chrome/Edge 路径；登录态只保存在 `data/browser-profiles/`。
 - 设置页写入本地 SQLite，优先级高于 `.env`，不会反写 `.env`；所有密钥只返回脱敏值。
 - 只使用一组默认模型也能完成任务，但报告会如实标记模型同源造成的核验独立性限制。
 
@@ -106,7 +108,8 @@ npm run build
 
 ## 诚实边界
 
-- V1.5 只处理公开材料；不抓登录态评论，不做舆情走向预测，不输出无来源的情感百分比。
+- V2 默认仍只处理公开材料；评论插件必须主动开启并逐帖确认，不做舆情走向预测，不输出无来源的情感百分比。
+- 中英文支持完整检索与外部模型核验；其他语种为 best-effort。外文证据保留原文，机器译文只用于阅读。
 - 创建任务前会由 `utility` 角色执行公共性门禁；针对可识别普通个人或未成年人的私人指控会拒绝创建任务。
 - 报告图表只统计本次证据库，不代表全网绝对声量；样本不足会降级为文字并进入局限性声明。
 - 本地历史库只是辅助证据，未命中时仍以公开网页检索为主；导入者必须自行确认数据许可、个人信息和再分发边界。
@@ -115,3 +118,5 @@ npm run build
 - 原文抓取已阻断直接解析到内网/本机的 URL；DNS rebinding 的校验-连接绑定仍需在生产部署用受控 egress 抓取代理进一步加固。
 
 详细产品、架构与契约见 [方案包](docs/方案包/README.md)。
+
+评论登录、多语言与风险边界见 [V2 使用指南](docs/V2-评论插件与国际信源使用指南.md)。

@@ -8,6 +8,10 @@ CREATE TABLE IF NOT EXISTS task (
   user_note TEXT,
   time_range_from TEXT,
   time_range_to TEXT,
+  source_scope TEXT NOT NULL DEFAULT 'auto' CHECK (source_scope IN ('auto','domestic','global')),
+  source_languages TEXT NOT NULL DEFAULT '["zh","en"]',
+  comment_mode TEXT NOT NULL DEFAULT 'off' CHECK (comment_mode IN ('off','smart','manual','hybrid')),
+  comment_urls TEXT NOT NULL DEFAULT '[]',
   depth TEXT NOT NULL DEFAULT 'standard' CHECK (depth IN ('quick','standard','deep')),
   status TEXT NOT NULL CHECK (status IN ('queued','running','pausing','paused','stopping','failed','done')),
   phase TEXT NOT NULL DEFAULT 'planning',
@@ -25,6 +29,7 @@ CREATE TABLE IF NOT EXISTS evidence (
   local_id TEXT NOT NULL,
   url TEXT NOT NULL,
   url_hash TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'web' CHECK (kind IN ('web','local_dataset','social_comments')),
   title TEXT NOT NULL,
   source_name TEXT,
   source_domain TEXT NOT NULL,
@@ -48,8 +53,60 @@ CREATE TABLE IF NOT EXISTS evidence (
   CHECK (fetch_status = 'fetched' OR snippet IS NOT NULL)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_task_local ON evidence(task_id, local_id);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_task_url ON evidence(task_id, url_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_task_url ON evidence(task_id, url_hash, kind);
 CREATE INDEX IF NOT EXISTS ix_evidence_task_time ON evidence(task_id, published_at);
+
+CREATE TABLE IF NOT EXISTS social_candidate (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  url_hash TEXT NOT NULL,
+  platform TEXT NOT NULL CHECK (platform IN ('weibo','bilibili','zhihu','xiaohongshu','douyin','kuaishou','tieba')),
+  title TEXT NOT NULL,
+  snippet TEXT,
+  selection_mode TEXT NOT NULL CHECK (selection_mode IN ('smart','manual')),
+  score REAL NOT NULL CHECK (score BETWEEN 0 AND 100),
+  score_breakdown TEXT NOT NULL,
+  reasons TEXT NOT NULL,
+  public_metrics TEXT NOT NULL DEFAULT '{}',
+  published_at TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','collected','failed')),
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id,url_hash)
+);
+CREATE INDEX IF NOT EXISTS ix_social_candidate_task_score
+ON social_candidate(task_id, score DESC);
+
+CREATE TABLE IF NOT EXISTS comment_collection (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  candidate_id TEXT NOT NULL REFERENCES social_candidate(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','stopped')),
+  planned_limit INTEGER NOT NULL,
+  collected_count INTEGER NOT NULL DEFAULT 0,
+  sampling_method TEXT,
+  error TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  UNIQUE(task_id,candidate_id)
+);
+
+CREATE TABLE IF NOT EXISTS social_comment (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  collection_id TEXT NOT NULL REFERENCES comment_collection(id) ON DELETE CASCADE,
+  parent_id TEXT REFERENCES social_comment(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL,
+  text TEXT NOT NULL,
+  published_at TEXT,
+  like_count INTEGER,
+  reply_count INTEGER,
+  source_url TEXT NOT NULL,
+  depth INTEGER NOT NULL DEFAULT 0 CHECK (depth BETWEEN 0 AND 3),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_social_comment_collection
+ON social_comment(collection_id, depth, like_count DESC);
 
 CREATE TABLE IF NOT EXISTS claim (
   pk TEXT PRIMARY KEY,

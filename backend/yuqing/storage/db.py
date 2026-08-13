@@ -76,6 +76,28 @@ class Database:
         connection.execute("PRAGMA busy_timeout=5000")
         schema = (Path(__file__).with_name("schema.sql")).read_text(encoding="utf-8")
         connection.executescript(schema)
+        task_columns = {row[1] for row in connection.execute("PRAGMA table_info(task)").fetchall()}
+        task_migrations = {
+            "source_scope": "TEXT NOT NULL DEFAULT 'auto' CHECK (source_scope IN ('auto','domestic','global'))",
+            "source_languages": 'TEXT NOT NULL DEFAULT \'["zh","en"]\'',
+            "comment_mode": "TEXT NOT NULL DEFAULT 'off' CHECK (comment_mode IN ('off','smart','manual','hybrid'))",
+            "comment_urls": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for name, declaration in task_migrations.items():
+            if name not in task_columns:
+                connection.execute(f"ALTER TABLE task ADD COLUMN {name} {declaration}")
+        evidence_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(evidence)").fetchall()
+        }
+        if "kind" not in evidence_columns:
+            connection.execute(
+                "ALTER TABLE evidence ADD COLUMN kind TEXT NOT NULL DEFAULT 'web' "
+                "CHECK (kind IN ('web','local_dataset','social_comments'))"
+            )
+        connection.execute("DROP INDEX IF EXISTS ux_evidence_task_url")
+        connection.execute(
+            "CREATE UNIQUE INDEX ux_evidence_task_url ON evidence(task_id,url_hash,kind)"
+        )
         hot_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(hot_snapshot)").fetchall()
         }
@@ -146,8 +168,10 @@ class Database:
         stamp = now_iso()
         task_id = f"t_{datetime.now():%Y%m%d}_{uuid.uuid4().hex[:8]}"
         await self.execute_write(
-            """INSERT INTO task(id,event_query,user_note,time_range_from,time_range_to,depth,status,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,'queued',?,?)""",
+            """INSERT INTO task(
+                 id,event_query,user_note,time_range_from,time_range_to,depth,source_scope,
+                 source_languages,comment_mode,comment_urls,status,created_at,updated_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
             (
                 task_id,
                 data.event_query,
@@ -155,6 +179,10 @@ class Database:
                 data.time_range_from,
                 data.time_range_to,
                 data.depth,
+                data.source_scope,
+                json.dumps(data.source_languages, ensure_ascii=False),
+                data.comment_mode,
+                json.dumps([str(item) for item in data.comment_urls], ensure_ascii=False),
                 stamp,
                 stamp,
             ),
@@ -165,13 +193,20 @@ class Database:
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
         row = await self.fetch_one("SELECT * FROM task WHERE id=?", (task_id,))
-        return TaskRecord.model_validate(dict(row)) if row else None
+        return self._task_record(row) if row else None
+
+    @staticmethod
+    def _task_record(row: sqlite3.Row) -> TaskRecord:
+        value = dict(row)
+        value["source_languages"] = json.loads(value.get("source_languages") or "[]")
+        value["comment_urls"] = json.loads(value.get("comment_urls") or "[]")
+        return TaskRecord.model_validate(value)
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
         rows = await self.fetch_all(
             "SELECT * FROM task ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
         )
-        return [TaskRecord.model_validate(dict(row)) for row in rows]
+        return [self._task_record(row) for row in rows]
 
     async def set_task_status(self, task_id: str, status: str, phase: str | None = None) -> None:
         if phase is None:
@@ -351,8 +386,8 @@ class Database:
         def operation(connection: sqlite3.Connection) -> str:
             self._assert_investigation_open(connection, data.task_id)
             existing = connection.execute(
-                "SELECT local_id FROM evidence WHERE task_id=? AND url_hash=?",
-                (data.task_id, url_hash),
+                "SELECT local_id FROM evidence WHERE task_id=? AND url_hash=? AND kind=?",
+                (data.task_id, url_hash, data.kind),
             ).fetchone()
             if existing:
                 return str(existing[0])
@@ -363,16 +398,17 @@ class Database:
             parts = urlsplit(normalized)
             connection.execute(
                 """INSERT INTO evidence(
-                    pk,task_id,local_id,url,url_hash,title,source_name,source_domain,publisher_entity,
+                    pk,task_id,local_id,url,url_hash,kind,title,source_name,source_domain,publisher_entity,
                     origin_url,source_role,source_tier,published_at,discovered_at,fetch_status,fetched_at,
                     snippet,content_text,snapshot_path,content_sha256,retrieval_query,provider,lang,extra)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     uuid.uuid4().hex,
                     data.task_id,
                     local_id,
                     normalized,
                     url_hash,
+                    data.kind,
                     data.title,
                     data.source_name,
                     parts.hostname or "",
@@ -405,13 +441,19 @@ class Database:
         row = await self.fetch_one(
             "SELECT * FROM evidence WHERE task_id=? AND local_id=?", (task_id, local_id)
         )
-        return EvidenceRecord.model_validate(dict(row)) if row else None
+        return self._evidence_record(row) if row else None
+
+    @staticmethod
+    def _evidence_record(row: sqlite3.Row) -> EvidenceRecord:
+        value = dict(row)
+        value["extra"] = json.loads(value["extra"]) if value.get("extra") else None
+        return EvidenceRecord.model_validate(value)
 
     async def list_evidence(self, task_id: str) -> list[EvidenceRecord]:
         rows = await self.fetch_all(
             "SELECT * FROM evidence WHERE task_id=? ORDER BY local_id", (task_id,)
         )
-        return [EvidenceRecord.model_validate(dict(row)) for row in rows]
+        return [self._evidence_record(row) for row in rows]
 
     async def add_claim(self, data: ClaimCreate) -> ClaimRecord:
         def operation(connection: sqlite3.Connection) -> str:
@@ -563,7 +605,8 @@ class Database:
             """SELECT ce.*, e.pk AS pk, e.pk AS evidence_pk, e.task_id, e.local_id AS evidence_id,
                       e.local_id, e.url, e.title, e.snippet, e.source_name, e.source_domain,
                       e.publisher_entity, e.source_role, e.source_tier, e.published_at,
-                      e.fetch_status, e.content_text, e.snapshot_path, e.content_sha256, e.provider
+                      e.fetch_status, e.content_text, e.snapshot_path, e.content_sha256, e.provider,
+                      e.lang, e.extra, e.kind
                FROM claim_evidence ce JOIN evidence e ON e.pk=ce.evidence_pk
                WHERE ce.claim_pk=? ORDER BY ce.ord""",
             (claim_pk,),

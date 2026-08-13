@@ -5,7 +5,7 @@ import secrets
 
 from pydantic import ValidationError
 
-from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection
+from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection, SearchQuery
 from yuqing.core.llm.gateway import LLMGateway
 from yuqing.core.llm.roles import LLMRole
 from yuqing.storage.models import ClaimRecord, EvidenceRecord
@@ -18,7 +18,11 @@ class OpenAIInvestigationAgent:
         self.role = role
 
     async def plan(self, event_query: str) -> InvestigationPlan:
-        prompt = f'事件：{event_query}\n输出 JSON：{{"queries":["检索词"]}}，最多 3 个检索词。'
+        prompt = (
+            f"事件：{event_query}\n"
+            '输出 JSON：{"queries":[{"query":"检索词","language":"zh","region":"CN"}]}。'
+            "默认至少生成一条中文和一条英文查询；若事件明确涉及第三语种，可增加一条。最多 6 条。"
+        )
         for attempt in range(2):
             try:
                 result = await self.gateway.complete_json(
@@ -26,15 +30,24 @@ class OpenAIInvestigationAgent:
                     self.system_prompt,
                     prompt + ("\n上次格式不合格，只输出完整 JSON。" if attempt else ""),
                 )
-                queries = [
-                    str(item).strip()[:200]
-                    for item in result.get("queries", [])
-                    if str(item).strip()
-                ]
-                return InvestigationPlan(queries=queries[:3])
+                queries = []
+                for item in result.get("queries", []):
+                    if isinstance(item, str):
+                        item = {"query": item, "language": "zh", "region": "CN"}
+                    if not isinstance(item, dict) or not str(item.get("query", "")).strip():
+                        continue
+                    queries.append(SearchQuery.model_validate(item))
+                return InvestigationPlan(queries=queries[:6])
             except (ValidationError, ValueError, TypeError, KeyError):
                 continue
-        return InvestigationPlan(queries=[event_query[:200]])
+        return InvestigationPlan(
+            queries=[
+                SearchQuery(query=event_query[:200], language="zh", region="CN"),
+                SearchQuery(
+                    query=f"{event_query[:180]} latest reports", language="en", region="US"
+                ),
+            ]
+        )
 
     async def summarize(
         self, event_query: str, evidence: list[EvidenceRecord]

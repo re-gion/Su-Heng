@@ -66,6 +66,9 @@ class SearchChain:
             for provider in self.providers
             if required is None or required in provider.capabilities
         ]
+        if params.lang.split("-", 1)[0].lower() != "zh":
+            preferred = {"tavily": 0, "serper": 1}
+            eligible.sort(key=lambda provider: preferred.get(provider.name, 2))
         for provider in eligible:
             if required and required not in provider.capabilities:
                 continue

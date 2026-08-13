@@ -370,6 +370,7 @@ class HistoricalDataService:
                     published_at=match.source_published_at,
                     retrieval_query=event_query,
                     provider="local_dataset",
+                    kind="local_dataset",
                     extra={
                         "historical_event_id": match.event_id,
                         "provenance": match.provenance,

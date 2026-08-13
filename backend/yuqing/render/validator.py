@@ -42,7 +42,7 @@ def _walk(value: Any):
 
 
 def _version_compatible(
-    report: dict[str, Any], reader_major: int = 0, reader_minor: int = 2
+    report: dict[str, Any], reader_major: int = 0, reader_minor: int = 3
 ) -> bool:
     try:
         major, _minor = (int(part) for part in report["schema_version"].split(".", 1))

@@ -13,6 +13,7 @@ from yuqing.render.validator import validate_report
 from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
 from yuqing.services.report_builder import BriefReportBuilder, EntailmentVerifier
+from yuqing.services.translation import Translator
 from yuqing.storage.db import Database
 
 
@@ -30,12 +31,14 @@ class FullReportBuilder:
         entailment_verifier: EntailmentVerifier | None = None,
         reporter: ReportSectionAgent | None = None,
         historical_data: HistoricalDataService | None = None,
+        translator: Translator | None = None,
     ):
         self.database = database
         self.reports_dir = Path(reports_dir)
         self.brief = BriefReportBuilder(database, reports_dir, entailment_verifier)
         self.reporter = reporter
         self.historical_data = historical_data or HistoricalDataService(database)
+        self.translator = translator
 
     async def build(
         self,
@@ -53,6 +56,7 @@ class FullReportBuilder:
         by_type = {block["type"]: block for block in report["blocks"]}
         appendix_items = by_type["evidence_appendix"]["items"]
         appendix_ids = {item["evidence_ref"] for item in appendix_items}
+        evidence_by_id = {item.local_id: item for item in evidence}
         for item in evidence:
             if item.local_id in appendix_ids:
                 continue
@@ -70,8 +74,33 @@ class FullReportBuilder:
                     "fetch_status": item.fetch_status,
                     "snapshot_pk": item.pk if item.fetch_status == "fetched" else None,
                     "content_sha256": item.content_sha256,
+                    "kind": item.kind,
+                    "lang": item.lang or "unknown",
+                    "original_excerpt": (item.content_text or item.snippet or "")[:1200],
                 }
             )
+        for appendix in appendix_items:
+            source = evidence_by_id.get(appendix.get("evidence_ref"))
+            if source is None:
+                continue
+            appendix.setdefault("kind", source.kind)
+            appendix.setdefault("lang", source.lang or "unknown")
+            appendix.setdefault(
+                "original_excerpt", (source.content_text or source.snippet or "")[:1200]
+            )
+            if (
+                self.translator is not None
+                and (source.lang or "zh").split("-", 1)[0].lower() != "zh"
+                and appendix["original_excerpt"]
+                and appendix.get("citations")
+                and not appendix.get("machine_translation_zh")
+            ):
+                try:
+                    appendix["machine_translation_zh"] = await self.translator.translate_to_chinese(
+                        appendix["original_excerpt"], source.lang or "unknown"
+                    )
+                except Exception:
+                    appendix["translation_status"] = "unavailable"
         report["metrics"].update(
             evidence_total=len(evidence),
             evidence_fetched=sum(item.fetch_status == "fetched" for item in evidence),
@@ -85,7 +114,7 @@ class FullReportBuilder:
             time_span_days=self._time_span_days(evidence),
         )
         header = by_type["report_header"]
-        header["subtitle"] = "三 Agent 协作 · 公开证据可核验专报"
+        header["subtitle"] = "四席协作 · 多语言公开证据与确认评论样本可核验专报"
         snapshot = json.loads(task.config_snapshot) if task.config_snapshot else {}
         header["models_used"] = snapshot.get("models_used", {})
 
@@ -111,8 +140,13 @@ class FullReportBuilder:
                 }
             )
 
+        cited_evidence_ids = {evidence_id for claim in claims for evidence_id in claim.evidence_ids}
         dated = sorted(
-            (item for item in evidence if item.published_at),
+            (
+                item
+                for item in evidence
+                if item.published_at and item.local_id in cited_evidence_ids
+            ),
             key=lambda item: item.published_at or "",
         )
         timeline = {
@@ -180,6 +214,50 @@ class FullReportBuilder:
             "fallback_text": "当前样本不足以形成可核验的观点分类，不输出情感百分比。"
             if not summaries
             else None,
+        }
+        comment_rows = await self.database.fetch_all(
+            """SELECT s.platform,c.status,c.collected_count,c.sampling_method,s.url,s.title
+               FROM comment_collection c JOIN social_candidate s ON s.id=c.candidate_id
+               WHERE c.task_id=? ORDER BY c.started_at""",
+            (task_id,),
+        )
+        comment_messages = [item for item in forum if item.agent == "comment_insight"]
+        comment_insight = {
+            "block_id": "b_05_comment_insight",
+            "type": "comment_insight",
+            "section": "05",
+            "in_brief": False,
+            "title": "确认帖子评论样本洞察",
+            "sample_notice": "仅代表用户确认帖子的已采集样本，不代表平台整体或全网民意。",
+            "collections": [dict(item) for item in comment_rows],
+            "items": [
+                {
+                    "text": item.content,
+                    "evidence_refs": [ref for ref in item.refs if ref.startswith("E")],
+                    "sampling_scope": item.payload.get("sampling_scope"),
+                }
+                for item in comment_messages
+            ],
+            "fallback_text": "本任务未采集登录态评论，报告仅基于公开搜索材料。"
+            if not comment_rows
+            else None,
+        }
+        evidence_counts = Counter(item.lang or "unknown" for item in evidence)
+        available_languages = {language for language, count in evidence_counts.items() if count > 0}
+        requested = task.source_languages
+        report["language_coverage"] = {
+            "requested": task.source_languages,
+            "complete": [
+                item for item in requested if item in {"zh", "en"} and item in available_languages
+            ],
+            "best_effort": [
+                item
+                for item in requested
+                if item not in {"zh", "en"} and item in available_languages
+            ],
+            "missing": [item for item in requested if item not in available_languages],
+            "evidence_counts": dict(evidence_counts),
+            "report_language": "zh-CN",
         }
         history_messages = [message for message in summaries if message.agent == "history_insight"]
         local_history = await self.historical_data.task_matches(task_id)
@@ -279,6 +357,7 @@ class FullReportBuilder:
             by_type["fact_check_table"],
             *propagation,
             viewpoint,
+            comment_insight,
             history,
             recommendations,
             by_type["limitations"],

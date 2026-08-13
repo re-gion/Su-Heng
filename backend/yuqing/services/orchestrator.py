@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from yuqing.agents.runtime import InvestigationAgent
+from yuqing.agents.runtime import InvestigationAgent, SearchQuery
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
 from yuqing.core.search.base import SearchParams, SearchProvider
@@ -58,11 +58,22 @@ class M0Orchestrator:
             await self.database.save_checkpoint(
                 task_id,
                 "inner1:planned",
-                {"phase": "investigating", "next_round": 1, "next_queries": queries},
+                {
+                    "phase": "investigating",
+                    "next_round": 1,
+                    "next_queries": [item.model_dump(mode="json") for item in queries],
+                },
             )
 
         while inner_round <= self.max_inner_rounds and queries:
-            for query in queries:
+            for query_item in queries:
+                query = (
+                    query_item
+                    if isinstance(query_item, SearchQuery)
+                    else SearchQuery.model_validate(query_item)
+                    if isinstance(query_item, dict)
+                    else SearchQuery(query=str(query_item))
+                )
                 await self.events.emit(
                     task_id,
                     "agent.status",
@@ -70,18 +81,26 @@ class M0Orchestrator:
                         "agent": "fact_investigator",
                         "phase": "searching",
                         "inner_round": inner_round,
-                        "queries": [query],
+                        "queries": [query.model_dump(mode="json")],
                     },
                 )
-                results = await self.search.search(SearchParams(query=query, top_k=top_k))
-                records = await self.evidence.add_search_results(task_id, query, results)
+                results = await self.search.search(
+                    SearchParams(
+                        query=query.query,
+                        top_k=top_k,
+                        lang=query.language,
+                        region=query.region,
+                    )
+                )
+                records = await self.evidence.add_search_results(task_id, query.query, results)
                 await self.events.emit(
                     task_id,
                     "search.result",
                     {
                         "agent": "fact_investigator",
                         "provider": self.search.name,
-                        "query": query,
+                        "query": query.query,
+                        "language": query.language,
                         "hits": len(results),
                         "degraded_from": None,
                     },

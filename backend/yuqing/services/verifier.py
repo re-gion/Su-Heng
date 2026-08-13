@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Literal, Protocol
 
@@ -35,7 +36,10 @@ class ClaimVerifierService:
         stances: list[EntityEvidence] = []
         completed = True
         for row in rows:
-            evidence = EvidenceRecord.model_validate(dict(row))
+            evidence_data = dict(row)
+            if isinstance(evidence_data.get("extra"), str):
+                evidence_data["extra"] = json.loads(evidence_data["extra"])
+            evidence = EvidenceRecord.model_validate(evidence_data)
             try:
                 for attempt in range(2):
                     result = await self.verifier.verify(claim, evidence)
@@ -67,16 +71,19 @@ class ClaimVerifierService:
                 cited_verified=cited_verified,
                 is_correction=result.is_correction,
             )
-            stances.append(
-                EntityEvidence(
-                    publisher_entity=evidence.publisher_entity or evidence.source_domain,
-                    source_role=evidence.source_role,
-                    source_tier=evidence.source_tier,
-                    relation=result.relation,
-                    published_at=evidence.published_at,
-                    is_correction=result.is_correction,
+            # 评论样本可以校验“样本中出现了该观点”，但不能作为事实性陈述的
+            # 独立发布主体计数。即使后续误将评论证据绑定到事实 claim，这里也兜底隔离。
+            if evidence.kind != "social_comments":
+                stances.append(
+                    EntityEvidence(
+                        publisher_entity=evidence.publisher_entity or evidence.source_domain,
+                        source_role=evidence.source_role,
+                        source_tier=evidence.source_tier,
+                        relation=result.relation,
+                        published_at=evidence.published_at,
+                        is_correction=result.is_correction,
+                    )
                 )
-            )
 
         attribution = bool(re.match(r"^.+(发布|回应|声明|表示|称)", claim.text))
         inputs = merge_stances(

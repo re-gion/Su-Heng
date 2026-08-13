@@ -4,10 +4,15 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from yuqing.agents.runtime import InvestigationAgent
+from yuqing.agents.runtime import InvestigationAgent, SearchQuery
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
 from yuqing.core.search.base import SearchParams, SearchProvider
+from yuqing.services.comment_plugin import (
+    CommentCandidateInput,
+    CommentPluginService,
+    adapter_for_url,
+)
 from yuqing.services.evidence_store import EvidenceStore
 from yuqing.services.forum import ForumBoard, ForumMessageCreate
 from yuqing.services.full_report import FullReportBuilder, ReportSectionAgent
@@ -17,6 +22,42 @@ from yuqing.services.verifier import ClaimVerifierService, EvidenceVerifier
 from yuqing.storage.db import Database
 from yuqing.storage.models import ClaimCreate
 from yuqing.storage.snapshots import SnapshotStore
+
+
+def _default_region(language: str) -> str:
+    base = language.split("-", 1)[0].lower()
+    return {
+        "zh": "CN",
+        "en": "US",
+        "de": "DE",
+        "fr": "FR",
+        "es": "ES",
+        "ja": "JP",
+        "ko": "KR",
+        "ru": "RU",
+        "pt": "BR",
+        "ar": "SA",
+    }.get(base, base.upper())
+
+
+def ensure_requested_languages(plan, requested_languages: Sequence[str], event_query: str):
+    """LLM 负责建议检索词，代码负责保证用户明确选择的语言实际执行。"""
+
+    normalized = list(dict.fromkeys(item.lower() for item in requested_languages))[:3]
+    existing = {item.language.lower(): item for item in plan.queries}
+    queries: list[SearchQuery] = []
+    for language in normalized:
+        query = existing.get(language)
+        if query is None:
+            suffix = "最新报道" if language.startswith("zh") else "latest reports"
+            query = SearchQuery(
+                query=f"{event_query[:160]} {suffix}"[:200],
+                language=language,
+                region=_default_region(language),
+            )
+        queries.append(query)
+    queries.extend(item for item in plan.queries if item.language.lower() not in normalized)
+    return plan.model_copy(update={"queries": queries[:6]})
 
 
 class V1Orchestrator:
@@ -34,6 +75,10 @@ class V1Orchestrator:
         reports_dir: Path,
         reporter: ReportSectionAgent | None = None,
         historical_data: HistoricalDataService | None = None,
+        comment_plugin: CommentPluginService | None = None,
+        comment_agent: InvestigationAgent | None = None,
+        translator: object | None = None,
+        comment_evaluator: object | None = None,
         usage: object | None = None,
         models_used: Mapping[str, str] | None = None,
         closeables: Sequence[object] = (),
@@ -49,12 +94,16 @@ class V1Orchestrator:
         self.verification = ClaimVerifierService(database, verifier)
         entailment = verifier if hasattr(verifier, "entails") else None
         self.historical_data = historical_data or HistoricalDataService(database)
+        self.comment_plugin = comment_plugin
+        self.comment_agent = comment_agent
+        self.comment_evaluator = comment_evaluator
         self.reports = FullReportBuilder(
             database,
             reports_dir,
             entailment,
             reporter,
             historical_data=self.historical_data,
+            translator=translator,
         )
         self.max_outer_rounds = max(1, max_outer_rounds)
         self.max_inner_rounds = max(1, max_inner_rounds)
@@ -66,6 +115,128 @@ class V1Orchestrator:
         self._search_calls = 0
         self._fetch_calls = 0
         self._budget_depth = "standard"
+
+    async def _prepare_comment_candidates(self, task, investigation_query: str) -> int:
+        if self.comment_plugin is None or not self.comment_plugin.enabled:
+            return 0
+        if self.comment_evaluator is not None:
+            self.comment_plugin.evaluator = self.comment_evaluator
+        inputs: list[CommentCandidateInput] = []
+        for item in await self.database.list_evidence(task.id):
+            try:
+                adapter_for_url(item.url)
+            except ValueError:
+                continue
+            inputs.append(
+                CommentCandidateInput(
+                    url=item.url,
+                    title=item.title,
+                    snippet=item.snippet or "",
+                    published_at=item.published_at,
+                )
+            )
+        if task.comment_mode in {"smart", "hybrid"}:
+            domains = {
+                "weibo": ["weibo.com"],
+                "bilibili": ["bilibili.com"],
+                "zhihu": ["zhihu.com"],
+                "xiaohongshu": ["xiaohongshu.com"],
+                "douyin": ["douyin.com"],
+                "kuaishou": ["kuaishou.com"],
+                "tieba": ["tieba.baidu.com"],
+            }
+            for platform, include_domains in domains.items():
+                if not await self._reserve_tool("search"):
+                    break
+                try:
+                    results = await self.search.search(
+                        SearchParams(
+                            query=f"{task.event_query} {platform} 评论 热议",
+                            top_k=3,
+                            include_domains=include_domains,
+                            lang="zh",
+                            region="CN",
+                        )
+                    )
+                except Exception as exc:
+                    self._limitations.append(
+                        f"{platform} 候选帖子搜索失败（{type(exc).__name__}），可手工补充 URL。"
+                    )
+                    continue
+                for result in results:
+                    try:
+                        adapter_for_url(result.url)
+                    except ValueError:
+                        continue
+                    inputs.append(
+                        CommentCandidateInput(
+                            url=result.url,
+                            title=result.title,
+                            snippet=result.snippet,
+                            published_at=result.published_at.isoformat()
+                            if result.published_at
+                            else None,
+                        )
+                    )
+        candidates = await self.comment_plugin.discover_candidates(task, inputs)
+        await self.events.emit(
+            task.id,
+            "agent.status",
+            {
+                "agent": "comment_insight",
+                "phase": "awaiting_selection",
+                "candidates": len(candidates),
+            },
+        )
+        return len(candidates)
+
+    async def _run_comment_insight(self, task_id: str, event_query: str, board: ForumBoard) -> None:
+        if self.comment_agent is None:
+            return
+        comment_evidence = [
+            item
+            for item in await self.database.list_evidence(task_id)
+            if item.kind == "social_comments"
+        ]
+        if not comment_evidence:
+            await self.events.emit(
+                task_id,
+                "agent.status",
+                {"agent": "comment_insight", "phase": "skipped", "inner_round": 0},
+            )
+            return
+        await self.events.emit(
+            task_id,
+            "agent.status",
+            {"agent": "comment_insight", "phase": "summarizing", "inner_round": 1},
+        )
+        generated = await self.comment_agent.summarize(event_query, comment_evidence)
+        refs: list[str] = []
+        findings: list[str] = []
+        for item in generated:
+            allowed = [
+                ref for ref in item.evidence_ids if ref in {e.local_id for e in comment_evidence}
+            ]
+            if not allowed:
+                continue
+            # 评论洞察是样本观点，不进入事实 claim / 徽章 / 独立信源统计。
+            refs.extend(allowed)
+            findings.append(item.text)
+        await self._post(
+            board,
+            ForumMessageCreate(
+                task_id=task_id,
+                round=1,
+                agent="comment_insight",
+                type="summary",
+                content="；".join(findings) or "评论样本不足，未形成可引用观点。",
+                refs=sorted(set(refs)),
+                payload={"sampling_scope": "已确认帖子的脱敏评论样本，不代表整体民意"},
+            ),
+        )
+        await self.events.emit(
+            task_id, "agent.status", {"agent": "comment_insight", "phase": "done", "inner_round": 1}
+        )
 
     async def aclose(self) -> None:
         for resource in self.closeables:
@@ -177,13 +348,21 @@ class V1Orchestrator:
             {"agent": agent_name, "phase": "planning", "inner_round": 1},
         )
         plan = await agent.plan(scoped_query)
+        task = await self.database.get_task(task_id)
+        requested_languages = task.source_languages if task else ["zh", "en"]
+        plan = ensure_requested_languages(plan, requested_languages, event_query)
         claims_before = {item.text for item in await self.database.list_claims(task_id)}
         findings: list[str] = []
         last_reason = "达到小 Loop 上限"
         for inner_round in range(1, self.max_inner_rounds + 1):
             query_limit = 1 if top_k <= 5 else (3 if top_k <= 8 else 4)
-            queries = plan.queries[:query_limit]
-            for query in queries:
+            queries = plan.queries[: max(query_limit, len(requested_languages))]
+            for query_item in queries:
+                query = (
+                    query_item
+                    if isinstance(query_item, SearchQuery)
+                    else SearchQuery(query=str(query_item), language="zh", region="CN")
+                )
                 if not await self._reserve_tool("search"):
                     self._limitations.append(
                         f"全局搜索调用已达 {self._search_calls} 次上限，停止新增检索。"
@@ -196,17 +375,19 @@ class V1Orchestrator:
                         "agent": agent_name,
                         "phase": "searching",
                         "inner_round": inner_round,
-                        "queries": [query],
+                        "queries": [query.model_dump(mode="json")],
                     },
                 )
                 results = await self.search.search(
                     SearchParams(
-                        query=query,
+                        query=query.query,
                         top_k=top_k,
                         freshness="oneYear" if agent_name == "history_insight" else "noLimit",
+                        lang=query.language,
+                        region=query.region,
                     )
                 )
-                records = await self.evidence.add_search_results(task_id, query, results)
+                records = await self.evidence.add_search_results(task_id, query.query, results)
                 degraded_from = getattr(self.search, "last_degraded_from", None)
                 provider_name = getattr(self.search, "last_provider", self.search.name)
                 await self.events.emit(
@@ -215,7 +396,8 @@ class V1Orchestrator:
                     {
                         "agent": agent_name,
                         "provider": provider_name,
-                        "query": query,
+                        "query": query.query,
+                        "language": query.language,
                         "hits": len(results),
                         "degraded_from": degraded_from,
                     },
@@ -316,7 +498,15 @@ class V1Orchestrator:
             )
             if not should_continue:
                 break
-            plan.queries = reflection.next_queries[:3]
+            plan.queries = [
+                SearchQuery(
+                    query=value,
+                    language=requested_languages[index % len(requested_languages)],
+                    region=_default_region(requested_languages[index % len(requested_languages)]),
+                )
+                for index, value in enumerate(reflection.next_queries[:3])
+            ]
+            plan = ensure_requested_languages(plan, requested_languages, event_query)
 
         refs = sorted(
             {
@@ -490,6 +680,10 @@ class V1Orchestrator:
             )
         if task.user_note:
             investigation_query += f"\n用户补充说明：{task.user_note}"
+        investigation_query += (
+            f"\n信源范围：{task.source_scope}；检索语言：{', '.join(task.source_languages)}。"
+            "最终报告使用中文；外文原文不可被译文替换。"
+        )
         if not stop_requested:
             await self.database.set_task_status(task_id, "running", "forum")
             await self.events.emit(
@@ -497,7 +691,7 @@ class V1Orchestrator:
                 "task.status",
                 {"status": "running", "phase": "forum", "progress": 5},
             )
-        if phase not in {"investigated", "verified"}:
+        if phase not in {"investigated", "comment_selection", "comments_ready", "verified"}:
             start_round = int(checkpoint.get("next_outer_round", 1)) if checkpoint else 1
             if checkpoint is None:
                 await self.database.save_checkpoint(
@@ -593,6 +787,29 @@ class V1Orchestrator:
             )
 
         checkpoint = await self.database.latest_checkpoint(task_id)
+        phase = checkpoint.get("phase") if checkpoint else None
+        if (
+            not stop_requested
+            and task.comment_mode != "off"
+            and self.comment_plugin is not None
+            and self.comment_plugin.enabled
+            and phase == "investigated"
+        ):
+            candidates = await self._prepare_comment_candidates(task, investigation_query)
+            await self.database.save_checkpoint(
+                task_id,
+                "comments:selection",
+                {"phase": "comment_selection", "candidate_count": candidates},
+            )
+            await self.database.set_task_status(task_id, "paused", "comment_selection")
+            await self.events.emit(
+                task_id,
+                "task.status",
+                {"status": "paused", "phase": "comment_selection", "progress": 60},
+            )
+            return
+        if phase == "comments_ready":
+            await self._run_comment_insight(task_id, investigation_query, board)
         if checkpoint is None or checkpoint.get("phase") != "verified":
             await self.database.set_task_status(task_id, "running", "verifying")
             verify_limit = {"quick": 30, "standard": 100, "deep": 240}[task.depth]

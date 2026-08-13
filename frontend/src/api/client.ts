@@ -11,7 +11,9 @@ export type TaskListItem = {
   task_id: string
   event_query: string
   status: string
+  phase: string
   resumable: boolean
+  comment_selection_required: boolean
   report_id: string | null
 }
 
@@ -31,7 +33,14 @@ export async function getDataStatus(): Promise<DataStatus> {
   return response.json() as Promise<DataStatus>
 }
 
-export async function createTask(eventQuery: string, depth = 'standard', userNote = '', timeFrom = '', timeTo = ''): Promise<CreatedTask> {
+export type CreateTaskOptions = {
+  sourceScope: 'auto' | 'domestic' | 'global'
+  sourceLanguages: string[]
+  commentMode: 'off' | 'smart' | 'manual' | 'hybrid'
+  commentUrls: string[]
+}
+
+export async function createTask(eventQuery: string, depth = 'standard', userNote = '', timeFrom = '', timeTo = '', options: CreateTaskOptions = { sourceScope: 'auto', sourceLanguages: ['zh', 'en'], commentMode: 'off', commentUrls: [] }): Promise<CreatedTask> {
   const response = await fetch('/api/tasks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -40,6 +49,10 @@ export async function createTask(eventQuery: string, depth = 'standard', userNot
       depth,
       user_note: userNote || null,
       time_range: timeFrom || timeTo ? { from: timeFrom || null, to: timeTo || null } : null,
+      source_scope: options.sourceScope,
+      source_languages: options.sourceLanguages,
+      comment_mode: options.commentMode,
+      comment_urls: options.commentUrls,
     }),
   })
   if (!response.ok) {
@@ -72,7 +85,28 @@ export type PublicConfig = {
     roles: Record<string, { api_key: string | null; base_url: string | null; model: string | null; effective: { api_key: string | null; base_url: string; model: string }; source: Record<string, string> }>
   }
   search: { provider_order: string[]; keys: Record<string, string | null> }
+  comments: { enabled: boolean }
 }
+
+export type CommentPlatformStatus = { platform: string; profile_present: boolean; browser_open: boolean }
+export type CommentPluginStatus = { enabled: boolean; available: boolean; demo_mode: boolean; container: boolean; platforms: CommentPlatformStatus[]; risk_notice: string }
+export type CommentCandidate = { id: string; url: string; platform: string; title: string; snippet: string | null; score: number; score_breakdown: Record<string, number>; reasons: string[]; selection_mode: string; status: string; login_profile_present: boolean }
+export type CommentCandidates = { task_id: string; phase: string; items: CommentCandidate[]; budgets: { posts: number; comments_per_post: number } }
+
+export async function getCommentPluginStatus(): Promise<CommentPluginStatus> {
+  const response = await fetch('/api/comment-plugin/status')
+  if (!response.ok) throw new Error('无法读取评论插件状态')
+  return response.json() as Promise<CommentPluginStatus>
+}
+export const openCommentLogin = (platform: string) => mutation(`/api/comment-plugin/platforms/${platform}/login`)
+export const clearCommentProfile = (platform: string) => mutation(`/api/comment-plugin/platforms/${platform}/profile`, 'DELETE', { confirm: true })
+export async function getCommentCandidates(taskId: string): Promise<CommentCandidates> {
+  const response = await fetch(`/api/tasks/${taskId}/comment-candidates`)
+  if (!response.ok) throw new Error('无法读取评论候选')
+  return response.json() as Promise<CommentCandidates>
+}
+export const submitCommentSelection = (taskId: string, payload: { action: 'approve' | 'skip'; candidate_ids?: string[]; urls?: string[] }) => mutation(`/api/tasks/${taskId}/comment-selection`, 'POST', payload)
+export const stopCommentCollection = (taskId: string) => mutation(`/api/tasks/${taskId}/comment-collection/stop`)
 
 export async function getConfig(): Promise<PublicConfig> {
   const response = await fetch('/api/config')

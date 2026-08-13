@@ -33,28 +33,36 @@ class BriefReportBuilder:
         claims = await self.database.list_claims(task_id)
         rendered_claims = []
         appendix: dict[str, dict] = {}
+        rejection_reasons: dict[str, int] = {}
+        rejected_citations = 0
         for claim in claims:
             rows = await self.database.claim_evidence_rows(claim.pk)
             citations = []
             states = []
             for row in rows:
-                states.append(row["fetch_status"])
                 note = None
                 if row["fetch_status"] == "discovered":
                     note = "原文未取得"
                 elif row["fetch_status"] == "fetch_failed":
                     note = "原文抓取失败"
-                citations.append(
-                    {
-                        "evidence_ref": row["evidence_id"],
-                        "quote_type": row["quote_type"],
-                        "quote": row["quote"],
-                        "quote_start": row["quote_start"],
-                        "quote_end": row["quote_end"],
-                        "relation": row["relation"],
-                        "note": note,
-                    }
+                valid_citation = not (
+                    row["quote_type"] == "paraphrase" and row["relation"] in {None, "not_mentioned"}
                 )
+                if valid_citation:
+                    states.append(row["fetch_status"])
+                    citations.append(
+                        {
+                            "evidence_ref": row["evidence_id"],
+                            "quote_type": row["quote_type"],
+                            "quote": row["quote"],
+                            "quote_start": row["quote_start"],
+                            "quote_end": row["quote_end"],
+                            "relation": row["relation"],
+                            "note": note,
+                        }
+                    )
+                else:
+                    rejected_citations += 1
                 appendix.setdefault(
                     row["evidence_id"],
                     {
@@ -85,6 +93,8 @@ class BriefReportBuilder:
                     }
                 )
             if not citations:
+                reason = "引用未通过回溯核验" if rows else "没有绑定证据"
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 continue
             grade = (
                 "fulltext"
@@ -117,7 +127,7 @@ class BriefReportBuilder:
             "key_claims_candidate": len(claims),
             "key_claims_rendered": total,
             "key_claims_rejected": len(claims) - total,
-            "rejection_reasons": {},
+            "rejection_reasons": rejection_reasons,
             "key_claims_verification_skipped": sum(
                 item["verification_state"] == "skipped" for item in rendered_claims
             ),
@@ -156,6 +166,14 @@ class BriefReportBuilder:
                 "text": f"{metrics['evidence_snippet_only']} 条证据未取得原文或抓取失败，引用卡片已逐条标注。",
             }
         ]
+        if rejected_citations:
+            limitations.append(
+                {
+                    "id": "L02",
+                    "category": "引用回溯",
+                    "text": f"{rejected_citations} 条转述引用未通过原文回溯，已从事实正文移除。",
+                }
+            )
         summary_items = []
         rejected_summary = 0
         for item in rendered_claims[:12]:
@@ -174,7 +192,7 @@ class BriefReportBuilder:
         if rejected_summary:
             limitations.append(
                 {
-                    "id": "L02",
+                    "id": "L03",
                     "category": "摘要语义校验",
                     "text": f"{rejected_summary} 条摘要句未通过蕴含校验，已从执行摘要移除。",
                 }
@@ -187,6 +205,9 @@ class BriefReportBuilder:
                 "task_id": task.id,
                 "event_query": task.event_query,
                 "depth": task.depth,
+                "source_scope": task.source_scope,
+                "source_languages": task.source_languages,
+                "comment_mode": task.comment_mode,
                 "generated_at": stamp,
             },
             "metrics": metrics,

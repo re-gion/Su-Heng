@@ -74,6 +74,7 @@ class LangSearchProvider:
                 published_at=item.get("datePublished") or item.get("published_at"),
                 source_name=item.get("siteName") or item.get("source_name"),
                 provider=self.name,
+                lang=params.lang,
                 raw=item,
             )
             for item in items

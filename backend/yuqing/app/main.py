@@ -19,6 +19,7 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from yuqing.agents.loader import load_definitions
 from yuqing.agents.openai_runtime import OpenAIInvestigationAgent
 from yuqing.agents.reporter import OpenAIReportAgent
+from yuqing.core.comments import adapter_for_url
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.builtin import BuiltinFetchProvider
 from yuqing.core.llm.factory import LLMClientFactory
@@ -37,6 +38,11 @@ from yuqing.render.ir_migrations import (
     UnsupportedReportVersion,
     migrate_report,
 )
+from yuqing.services.comment_plugin import (
+    CommentPluginService,
+    OpenAICandidateEvaluator,
+    PlaywrightCommentCollector,
+)
 from yuqing.services.configuration import ConfigService
 from yuqing.services.governance import ReportRetentionService
 from yuqing.services.historical_data import HistoricalDataService
@@ -53,6 +59,7 @@ from yuqing.services.report_delivery import (
     EvidencePackageBuilder,
     PdfExporter,
 )
+from yuqing.services.translation import OpenAITranslator
 from yuqing.services.v1_orchestrator import V1Orchestrator
 from yuqing.storage.db import Database
 from yuqing.storage.models import TaskCreate, TaskRecord
@@ -127,6 +134,7 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             "history_insight",
             "moderator",
             "reporter",
+            "comment_insight",
         }
         missing = required - set(by_name)
         if missing:
@@ -181,6 +189,13 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             verifier=OpenAIEvidenceVerifier(gateway, llm_factory),
             reports_dir=runtime_dir / "reports",
             reporter=OpenAIReportAgent(gateway, by_name["reporter"].system_prompt),
+            comment_agent=OpenAIInvestigationAgent(
+                gateway,
+                by_name["comment_insight"].system_prompt,
+                by_name["comment_insight"].model_role,
+            ),
+            translator=OpenAITranslator(gateway),
+            comment_evaluator=OpenAICandidateEvaluator(gateway),
             usage=gateway,
             models_used=model_names,
             closeables=[llm_factory, *(provider.client for provider in providers)],
@@ -223,6 +238,9 @@ def create_app(
     ]
     hotlist_interval = max(0, int(os.getenv("YUQING_HOTLIST_INTERVAL_SECONDS", "0")))
     demo_ttl_hours = max(1, int(os.getenv("YUQING_DEMO_REPORT_TTL_HOURS", "24")))
+    in_container = (
+        Path("/.dockerenv").exists() or os.getenv("YUQING_CONTAINER", "").lower() == "true"
+    )
     if policy_checker is None:
         if orchestrator_factory is None:
             policy_checker = assess_public_interest
@@ -239,7 +257,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        for directory in (data_dir / "snapshots", data_dir / "reports"):
+        for directory in (
+            data_dir / "snapshots",
+            data_dir / "reports",
+            data_dir / "browser-profiles",
+        ):
             await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
         database = Database(data_dir / "yuqing.db")
         await database.initialize()
@@ -250,6 +272,17 @@ def create_app(
         app.state.jobs = set()
         app.state.pdf_exporter = pdf_exporter or ChromiumPdfExporter()
         app.state.delivery = EvidencePackageBuilder(database, SnapshotStore(data_dir / "snapshots"))
+        resolved = await ConfigService(database).resolved_environ()
+        effective_comment_enabled = (
+            not is_demo
+            and not in_container
+            and resolved.get("YUQING_COMMENT_PLUGIN_ENABLED", "false").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        comment_collector = PlaywrightCommentCollector(data_dir / "browser-profiles")
+        app.state.comment_plugin = CommentPluginService(
+            database, data_dir, enabled=effective_comment_enabled, collector=comment_collector
+        )
         app.state.demo_mode = is_demo
         app.state.demo_slots = asyncio.Semaphore(demo_concurrency_limit) if is_demo else None
         app.state.service_jobs = []
@@ -299,6 +332,7 @@ def create_app(
             await asyncio.gather(*app.state.service_jobs, return_exceptions=True)
         if collector is not None:
             await collector.aclose()
+        await comment_collector.aclose()
         jobs = list(app.state.jobs)
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
@@ -309,7 +343,7 @@ def create_app(
             await close_resources()
         await database.close()
 
-    app = FastAPI(title="舆情专报 Agent", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="舆情专报 Agent", version="0.3.0", lifespan=lifespan)
     demo_cookie_name = "yuqing_demo_session"
 
     def demo_owner_hash(request: Request) -> str | None:
@@ -367,6 +401,34 @@ def create_app(
     def services(request: Request) -> tuple[Database, EventBus]:
         return request.app.state.database, request.app.state.events
 
+    def local_plugin_request(request: Request) -> bool:
+        host = (request.url.hostname or "").lower()
+        client_host = (request.client.host if request.client else "").lower()
+        if host not in {"127.0.0.1", "localhost", "::1", "testserver"}:
+            return False
+        if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            return False
+        origin = request.headers.get("origin")
+        if not origin:
+            return True
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(origin)
+        return (parsed.hostname or "").lower() == host
+
+    def comment_plugin_access_error(request: Request):
+        if is_demo or in_container:
+            return error_response(
+                "COMMENT_PLUGIN_UNAVAILABLE",
+                "评论登录态插件在 Demo 或容器环境中不可用。",
+                403,
+            )
+        if not local_plugin_request(request):
+            return error_response(
+                "COMMENT_PLUGIN_LOCAL_ONLY", "登录态插件仅允许本机同源访问。", 403
+            )
+        return None
+
     async def existing_task(task_id: str, request: Request):
         database, _ = services(request)
         task = await database.get_task(task_id)
@@ -392,6 +454,8 @@ def create_app(
             await demo_slot.acquire()
         try:
             orchestrator = factory(database, events)
+            if hasattr(orchestrator, "comment_plugin"):
+                orchestrator.comment_plugin = request.app.state.comment_plugin
             if resume:
                 await orchestrator.resume_task(task_id)
             else:
@@ -454,8 +518,8 @@ def create_app(
         )
         return {
             "status": "ok" if configured else "degraded",
-            "version": "0.2.0",
-            "ir_schema_versions": ["0.1", CURRENT_SCHEMA_VERSION],
+            "version": "0.3.0",
+            "ir_schema_versions": ["0.1", "0.2", CURRENT_SCHEMA_VERSION],
             "db": {
                 "ok": True,
                 "path": str(database.path),
@@ -488,9 +552,19 @@ def create_app(
             return error_response("DEMO_READ_ONLY", "演示站禁止修改配置。", 403)
         if os.getenv("YUQING_DEMO_MODE", "").lower() in {"1", "true", "yes"}:
             return error_response("CONFIG_WRITE_DISABLED", "演示模式下配置写入已关闭。", 403)
+        if "comments" in payload:
+            access_error = comment_plugin_access_error(request)
+            if access_error is not None:
+                return access_error
         database, _ = services(request)
         try:
-            return await ConfigService(database).update(payload)
+            updated = await ConfigService(database).update(payload)
+            if "comments" in payload:
+                requested = bool((payload.get("comments") or {}).get("enabled"))
+                request.app.state.comment_plugin.enabled = (
+                    requested and not is_demo and not in_container
+                )
+            return updated
         except ValueError as exc:
             return error_response("CONFIG_INVALID", str(exc), 422, recoverable=True)
 
@@ -580,6 +654,10 @@ def create_app(
         payload: TaskCreate, request: Request, background: BackgroundTasks
     ) -> Any:
         database, _ = services(request)
+        if payload.comment_mode != "off" or payload.comment_urls:
+            access_error = comment_plugin_access_error(request)
+            if access_error is not None:
+                return access_error
         demo_session = request.cookies.get(demo_cookie_name)
         if is_demo:
             demo_session = demo_session or secrets.token_urlsafe(32)
@@ -651,6 +729,205 @@ def create_app(
         )
         return response
 
+    @app.get("/api/comment-plugin/status")
+    async def comment_plugin_status(request: Request) -> dict[str, Any]:
+        plugin: CommentPluginService = request.app.state.comment_plugin
+        return {
+            "enabled": plugin.enabled,
+            "available": not is_demo and not in_container and local_plugin_request(request),
+            "demo_mode": is_demo,
+            "container": in_container,
+            "platforms": plugin.platform_status(),
+            "risk_notice": "仅采集用户确认帖子；不绕过验证码或风控，评论样本不代表整体民意。",
+        }
+
+    @app.post("/api/comment-plugin/platforms/{platform}/login", status_code=202)
+    async def open_comment_login(platform: str, request: Request):
+        if not local_plugin_request(request):
+            return error_response(
+                "COMMENT_PLUGIN_LOCAL_ONLY", "登录态插件仅允许本机同源访问。", 403
+            )
+        plugin: CommentPluginService = request.app.state.comment_plugin
+        try:
+            await plugin.open_login(platform)
+        except ValueError as exc:
+            return error_response("COMMENT_PLATFORM_UNKNOWN", str(exc), 404)
+        except RuntimeError as exc:
+            return error_response("COMMENT_PLUGIN_UNAVAILABLE", str(exc), 409, recoverable=True)
+        return {"platform": platform, "status": "browser_opened"}
+
+    @app.delete("/api/comment-plugin/platforms/{platform}/profile")
+    async def clear_comment_profile(
+        platform: str, request: Request, payload: dict[str, Any] | None = None
+    ):
+        if not local_plugin_request(request):
+            return error_response(
+                "COMMENT_PLUGIN_LOCAL_ONLY", "登录态插件仅允许本机同源访问。", 403
+            )
+        if not payload or payload.get("confirm") is not True:
+            return error_response("CONFIRM_REQUIRED", "清除登录数据需要明确确认。", 422)
+        try:
+            removed = await request.app.state.comment_plugin.clear_profile(platform)
+        except ValueError as exc:
+            return error_response("COMMENT_PLATFORM_UNKNOWN", str(exc), 404)
+        return {"platform": platform, "removed": removed}
+
+    @app.get("/api/tasks/{task_id}/comment-candidates")
+    async def comment_candidates(task_id: str, request: Request):
+        access_error = comment_plugin_access_error(request)
+        if access_error is not None:
+            return access_error
+        task = await existing_task(task_id, request)
+        plugin: CommentPluginService = request.app.state.comment_plugin
+        candidates = await plugin.list_candidates(task.id)
+        statuses = {item["platform"]: item for item in plugin.platform_status()}
+        return {
+            "task_id": task.id,
+            "phase": task.phase,
+            "items": [
+                {
+                    **item.model_dump(mode="json"),
+                    "login_profile_present": statuses[item.platform]["profile_present"],
+                }
+                for item in candidates
+            ],
+            "budgets": {
+                "quick": {"posts": 2, "comments_per_post": 100},
+                "standard": {"posts": 5, "comments_per_post": 200},
+                "deep": {"posts": 8, "comments_per_post": 300},
+            }[task.depth],
+        }
+
+    async def continue_after_comment_selection(
+        request: Request, task_id: str, candidate_ids: list[str]
+    ) -> None:
+        database, events = services(request)
+        task = await database.get_task(task_id)
+        if task is None:
+            return
+        plugin: CommentPluginService = request.app.state.comment_plugin
+        try:
+            summary = await plugin.collect_selected(task, candidate_ids) if candidate_ids else None
+        except Exception as exc:
+            await database.set_task_status(task_id, "failed", "comment_collection")
+            await events.emit(
+                task_id,
+                "error",
+                {
+                    "code": "COMMENT_COLLECTION_FAILED",
+                    "message": f"评论采集未完成：{type(exc).__name__}",
+                    "recoverable": True,
+                },
+            )
+            await events.emit_task_status(
+                task_id, status="failed", phase="comment_collection", progress=65
+            )
+            return
+        if summary and summary.errors:
+            await events.emit(
+                task_id,
+                "warning",
+                {"code": "COMMENT_COLLECTION_PARTIAL", "message": "；".join(summary.errors)},
+            )
+        await database.save_checkpoint(
+            task_id,
+            "comments:ready",
+            {
+                "phase": "comments_ready",
+                "completed": summary.completed if summary else 0,
+                "failed": summary.failed if summary else 0,
+            },
+        )
+        await database.set_task_status(task_id, "running", "comment_analysis")
+        await events.emit(
+            task_id,
+            "task.status",
+            {"status": "running", "phase": "comment_analysis", "progress": 70},
+        )
+        await run_safely(request, task_id, resume=True)
+
+    @app.post("/api/tasks/{task_id}/comment-selection", status_code=202)
+    async def select_comments(
+        task_id: str, request: Request, background: BackgroundTasks, payload: dict[str, Any]
+    ):
+        access_error = comment_plugin_access_error(request)
+        if access_error is not None:
+            return access_error
+        task = await existing_task(task_id, request)
+        if task.status != "paused" or task.phase != "comment_selection":
+            return error_response(
+                "COMMENT_SELECTION_NOT_READY", "任务当前不在评论候选确认阶段。", 409
+            )
+        action = payload.get("action")
+        if action not in {"approve", "skip"}:
+            return error_response("VALIDATION_ERROR", "action 必须是 approve 或 skip。", 422)
+        plugin: CommentPluginService = request.app.state.comment_plugin
+        extra_urls = payload.get("urls") or []
+        if extra_urls:
+            try:
+                supplemented_task = task.model_copy(
+                    update={"comment_urls": [*task.comment_urls, *map(str, extra_urls)]}
+                )
+                await plugin.discover_candidates(
+                    supplemented_task,
+                    [],
+                )
+            except ValueError as exc:
+                return error_response("COMMENT_URL_UNSUPPORTED", str(exc), 422)
+        candidate_ids = list(
+            dict.fromkeys(str(item) for item in payload.get("candidate_ids") or [])
+        )
+        if action == "approve":
+            if not plugin.enabled:
+                return error_response("COMMENT_PLUGIN_DISABLED", "评论插件尚未启用。", 409)
+            candidates = {item.id: item for item in await plugin.list_candidates(task_id)}
+            extra_canonical = {
+                adapter_for_url(str(url)).canonicalize(str(url)) for url in extra_urls
+            }
+            candidate_ids.extend(
+                item.id for item in candidates.values() if item.url in extra_canonical
+            )
+            candidate_ids = list(dict.fromkeys(candidate_ids))
+            if not candidate_ids or any(item not in candidates for item in candidate_ids):
+                return error_response(
+                    "COMMENT_CANDIDATE_INVALID", "请选择当前任务的候选帖子。", 422
+                )
+            missing = []
+            for platform in sorted({candidates[item].platform for item in candidate_ids}):
+                if not await plugin.has_login(platform):
+                    missing.append(platform)
+            if missing:
+                return error_response(
+                    "COMMENT_LOGIN_REQUIRED",
+                    "以下平台尚未在专用浏览器登录：" + "、".join(missing),
+                    409,
+                    recoverable=True,
+                    details={"platforms": missing},
+                )
+        else:
+            candidate_ids = []
+        try:
+            claimed = await plugin.claim_selection(
+                task_id,
+                candidate_ids,
+                next_phase="comment_collection" if candidate_ids else "comment_analysis",
+            )
+        except ValueError as exc:
+            return error_response("COMMENT_SELECTION_INVALID", str(exc), 422)
+        if not claimed:
+            return error_response("COMMENT_SELECTION_CONFLICT", "任务已被其他请求处理。", 409)
+        background.add_task(continue_after_comment_selection, request, task_id, candidate_ids)
+        return {"task_id": task_id, "status": "running", "selected": len(candidate_ids)}
+
+    @app.post("/api/tasks/{task_id}/comment-collection/stop", status_code=202)
+    async def stop_comment_collection(task_id: str, request: Request):
+        access_error = comment_plugin_access_error(request)
+        if access_error is not None:
+            return access_error
+        await existing_task(task_id, request)
+        await request.app.state.comment_plugin.stop(task_id)
+        return {"task_id": task_id, "status": "stopping"}
+
     @app.get("/api/tasks")
     async def list_tasks(
         request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 20
@@ -673,9 +950,15 @@ def create_app(
                     "task_id": task.id,
                     "event_query": task.event_query,
                     "status": task.status,
+                    "phase": task.phase,
                     "depth": task.depth,
                     "outer_round": task.outer_round,
-                    "resumable": task.status in {"paused", "failed"} and checkpoint is not None,
+                    "resumable": (
+                        task.status in {"paused", "failed"}
+                        and checkpoint is not None
+                        and task.phase != "comment_selection"
+                    ),
+                    "comment_selection_required": task.phase == "comment_selection",
                     "report_id": report["id"] if report else None,
                     "created_at": task.created_at,
                     "updated_at": task.updated_at,
@@ -717,7 +1000,12 @@ def create_app(
             },
             "degradations": [],
             "report_id": report["id"] if report else None,
-            "resumable": row["status"] in {"paused", "failed"} and checkpoint is not None,
+            "resumable": (
+                row["status"] in {"paused", "failed"}
+                and checkpoint is not None
+                and row["phase"] != "comment_selection"
+            ),
+            "comment_selection_required": row["phase"] == "comment_selection",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -731,6 +1019,15 @@ def create_app(
                 "TASK_NOT_FOUND", "任务不存在。", 404, details={"task_id": task_id}
             )
         checkpoint = await database.latest_checkpoint(task_id)
+        if task.phase == "comment_selection" or (
+            checkpoint and checkpoint.get("phase") == "comment_selection"
+        ):
+            return error_response(
+                "COMMENT_SELECTION_REQUIRED",
+                "请先确认候选帖子或选择跳过评论采集。",
+                409,
+                recoverable=True,
+            )
         if task.status not in {"paused", "failed"} or checkpoint is None:
             return error_response(
                 "TASK_NOT_RESUMABLE",
@@ -1014,6 +1311,23 @@ def create_app(
             return error_response("EVIDENCE_NOT_FOUND", "证据不存在。", 404)
         if row["fetch_status"] != "fetched":
             return error_response("SNAPSHOT_NOT_AVAILABLE", "该证据没有原文快照。", 404)
+        if row["kind"] == "social_comments":
+            try:
+                raw_snapshot = await asyncio.to_thread(
+                    Path(row["snapshot_path"]).read_text, encoding="utf-8"
+                )
+                payload = json.loads(raw_snapshot)
+            except (OSError, json.JSONDecodeError):
+                return error_response("SNAPSHOT_NOT_AVAILABLE", "评论样本快照不可读取。", 404)
+            return JSONResponse(
+                payload,
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                    "Referrer-Policy": "no-referrer",
+                    "X-Snapshot-Sanitized": "true",
+                },
+            )
         body = SnapshotStore(data_dir / "snapshots").read_sanitized(
             row["snapshot_path"], row["content_text"]
         )

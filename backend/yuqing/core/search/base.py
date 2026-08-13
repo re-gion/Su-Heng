@@ -13,6 +13,7 @@ class SearchParams(BaseModel):
     include_domains: list[str] = []
     exclude_domains: list[str] = []
     lang: str = "zh"
+    region: str | None = None
 
 
 class SearchResult(BaseModel):
@@ -23,6 +24,7 @@ class SearchResult(BaseModel):
     published_at: datetime | None = None
     source_name: str | None = None
     provider: str
+    lang: str = "zh"
     raw: dict[str, Any] = {}
 
 

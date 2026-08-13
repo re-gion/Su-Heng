@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import shutil
-import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -46,43 +45,38 @@ class ChromiumPdfExporter:
 
     async def export(self, html: str, target: Path) -> Path:
         browser = await asyncio.to_thread(self._resolve_browser)
-        source = target.with_suffix(".print.html")
-        profile = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="yuqing-pdf-"))
-        await asyncio.to_thread(source.parent.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(source.write_text, html, encoding="utf-8")
-        process: asyncio.subprocess.Process | None = None
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         try:
-            process = await asyncio.create_subprocess_exec(
-                browser,
-                "--headless",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--no-first-run",
-                "--no-pdf-header-footer",
-                "--run-all-compositor-stages-before-draw",
-                f"--user-data-dir={profile}",
-                f"--print-to-pdf={target}",
-                source.as_uri(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
-            except TimeoutError as error:
-                process.kill()
-                await process.wait()
-                raise RuntimeError("浏览器 PDF 导出超时") from error
-            target_exists = await asyncio.to_thread(target.is_file)
-            if process.returncode != 0 or not target_exists:
-                message = stderr.decode("utf-8", errors="replace")[-500:]
-                raise RuntimeError(f"浏览器 PDF 导出失败：{message}")
+            from playwright.async_api import async_playwright
+
+            async with asyncio.timeout(90), async_playwright() as playwright:
+                instance = await playwright.chromium.launch(
+                    executable_path=browser,
+                    headless=True,
+                )
+                try:
+                    page = await instance.new_page()
+                    await page.set_content(html, wait_until="load")
+                    await page.emulate_media(media="print")
+                    await page.pdf(
+                        path=str(target),
+                        format="A4",
+                        print_background=True,
+                        prefer_css_page_size=True,
+                    )
+                finally:
+                    await instance.close()
+            if not await asyncio.to_thread(target.is_file):
+                raise RuntimeError("浏览器未生成 PDF 文件")
             return target
-        finally:
-            if process is not None and process.returncode is None:
-                process.kill()
-                await process.wait()
-            await asyncio.to_thread(source.unlink, missing_ok=True)
-            await asyncio.to_thread(shutil.rmtree, profile, ignore_errors=True)
+        except TimeoutError as error:
+            raise RuntimeError("浏览器 PDF 导出超时") from error
+        except ImportError as error:
+            raise RuntimeError("Playwright 未安装，无法导出 PDF") from error
+        except RuntimeError:
+            raise
+        except Exception as error:
+            raise RuntimeError(f"浏览器 PDF 导出失败：{str(error)[-500:]}") from error
 
 
 class EvidencePackageBuilder:
@@ -124,10 +118,46 @@ class EvidencePackageBuilder:
             if evidence is None or not evidence["snapshot_path"]:
                 continue
             local_id = str(item.get("evidence_ref"))
-            relative = f"snapshots/{local_id}.html"
-            sanitized = self.snapshots.read_sanitized(
-                evidence["snapshot_path"], evidence["content_text"] or ""
-            )
+            if evidence["kind"] == "social_comments":
+                relative = f"snapshots/{local_id}.comments.json"
+                try:
+                    content = await asyncio.to_thread(
+                        Path(evidence["snapshot_path"]).read_text, encoding="utf-8"
+                    )
+                    raw = json.loads(content)
+                    allowed = {
+                        "platform": raw.get("platform"),
+                        "source_url": raw.get("source_url"),
+                        "sampling_method": raw.get("sampling_method"),
+                        "collected_at": raw.get("collected_at"),
+                        "comments": [
+                            {
+                                key: item.get(key)
+                                for key in (
+                                    "id",
+                                    "parent_id",
+                                    "text",
+                                    "published_at",
+                                    "like_count",
+                                    "reply_count",
+                                    "depth",
+                                )
+                            }
+                            for item in raw.get("comments", [])
+                            if isinstance(item, dict)
+                        ],
+                    }
+                    sanitized = json.dumps(allowed, ensure_ascii=False, indent=2)
+                except (OSError, ValueError, TypeError):
+                    sanitized = json.dumps(
+                        {"error": "评论快照不可读", "evidence_ref": local_id},
+                        ensure_ascii=False,
+                    )
+            else:
+                relative = f"snapshots/{local_id}.html"
+                sanitized = self.snapshots.read_sanitized(
+                    evidence["snapshot_path"], evidence["content_text"] or ""
+                )
             files.append((relative, sanitized))
             html = html.replace(f"/api/evidence/{evidence_pk}/snapshot", relative)
             manifest["evidence"].append(
@@ -136,6 +166,7 @@ class EvidencePackageBuilder:
                     "title": item.get("title"),
                     "url": item.get("url"),
                     "content_sha256": item.get("content_sha256"),
+                    "kind": item.get("kind", "web"),
                     "snapshot_file": relative,
                     "snapshot_sha256": hashlib.sha256(sanitized.encode()).hexdigest(),
                 }
