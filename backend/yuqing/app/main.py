@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from collections.abc import AsyncIterable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,23 +10,39 @@ from typing import Annotated, Any, Protocol
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from yuqing.agents.loader import load_definitions
 from yuqing.agents.openai_runtime import OpenAIInvestigationAgent
+from yuqing.agents.reporter import OpenAIReportAgent
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.builtin import BuiltinFetchProvider
 from yuqing.core.llm.factory import LLMClientFactory
 from yuqing.core.llm.gateway import LLMGateway
-from yuqing.core.search.langsearch import LangSearchProvider
+from yuqing.core.search.chain import SearchChain
+from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
+from yuqing.core.search.providers import (
+    QianfanSearchProvider,
+    SerperSearchProvider,
+    TavilySearchProvider,
+    ZhipuSearchProvider,
+)
+from yuqing.render.html import render_html
+from yuqing.services.configuration import ConfigService
+from yuqing.services.moderation import OpenAIModerator
 from yuqing.services.openai_verifier import OpenAIEvidenceVerifier
-from yuqing.services.orchestrator import M0Orchestrator
+from yuqing.services.public_interest import (
+    PolicyChecker,
+    PublicInterestDecision,
+    assess_public_interest,
+)
+from yuqing.services.v1_orchestrator import V1Orchestrator
 from yuqing.storage.db import Database
 from yuqing.storage.models import TaskCreate, TaskRecord
 from yuqing.storage.snapshots import SnapshotStore
 
-load_dotenv()
+load_dotenv(Path(__file__).parents[3] / ".env")
 
 
 class Orchestrator(Protocol):
@@ -55,39 +72,106 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
     definitions_dir = Path(__file__).parents[1] / "agents" / "definitions"
     skills_dir = Path(__file__).parents[1] / "agents" / "skills"
 
+    known_tools = {
+        "web_search",
+        "fetch_page",
+        "evidence_write",
+        "evidence_search",
+        "claim_write",
+        "forum_post",
+        "forum_read",
+        "read_skill",
+    }
     definitions, errors = load_definitions(
         definitions_dir,
-        known_tools={"web_search", "fetch_page", "evidence_write", "claim_write"},
+        known_tools=known_tools,
         skills_directory=skills_dir,
     )
-    llm_factory = LLMClientFactory()
-    gateway = LLMGateway(llm_factory)
-    search: LangSearchProvider | None = None
     fetcher = BuiltinFetchProvider()
+    provider_types = {
+        "langsearch": LangSearchProvider,
+        "zhipu": ZhipuSearchProvider,
+        "qianfan": QianfanSearchProvider,
+        "tavily": TavilySearchProvider,
+        "serper": SerperSearchProvider,
+    }
+    langsearch_limiters: dict[str, LangSearchLimiter] = {}
+    search_failures: dict[str, int] = {}
+    search_opened_at: dict[str, float] = {}
 
-    def factory(database: Database, events: EventBus) -> M0Orchestrator:
-        nonlocal search
-        if errors or not definitions:
-            raise ValueError("事实调查 Agent 定义加载失败：" + "; ".join(errors))
-        if search is None:
-            search = LangSearchProvider(os.getenv("LANGSEARCH_API_KEY", ""))
-        return M0Orchestrator(
+    def factory(database: Database, events: EventBus) -> V1Orchestrator:
+        if errors:
+            raise ValueError("Agent 定义加载失败：" + "; ".join(errors))
+        by_name = {definition.name: definition for definition in definitions if definition.enabled}
+        required = {
+            "fact_investigator",
+            "media_propagation",
+            "history_insight",
+            "moderator",
+            "reporter",
+        }
+        missing = required - set(by_name)
+        if missing:
+            raise ValueError("缺少 Agent 定义：" + ", ".join(sorted(missing)))
+        stored = {
+            str(row["key"]): str(row["value"])
+            for row in database._read("SELECT key,value FROM config")
+        }
+        environ = dict(os.environ)
+        environ.update(stored)
+        llm_factory = LLMClientFactory(environ)
+        gateway = LLMGateway(llm_factory)
+        order = [
+            item.strip()
+            for item in environ.get(
+                "SEARCH_PROVIDER_ORDER", "langsearch,zhipu,qianfan,tavily,serper"
+            ).split(",")
+            if item.strip() in provider_types
+        ]
+        providers = []
+        for name in order:
+            key = environ.get(f"{name.upper()}_API_KEY", "").strip()
+            if not key:
+                continue
+            if name == "langsearch":
+                limiter = langsearch_limiters.setdefault(key, LangSearchLimiter(1.1))
+                provider = LangSearchProvider(key, limiter=limiter)
+            else:
+                provider = provider_types[name](key)
+            providers.append(provider)
+        if not providers:
+            raise ValueError("未配置任何可用搜索 provider")
+        search = SearchChain(providers, failures=search_failures, opened_at=search_opened_at)
+        agents = {
+            name: OpenAIInvestigationAgent(
+                gateway, by_name[name].system_prompt, by_name[name].model_role
+            )
+            for name in ("fact_investigator", "media_propagation", "history_insight")
+        }
+        model_names = {
+            role: f"{llm_factory.config(role).base_url}|{llm_factory.config(role).model}"
+            for role in ("analyst_a", "analyst_b", "analyst_c", "moderator", "verifier", "reporter")
+        }
+        return V1Orchestrator(
             database,
             events,
             search=search,
             fetcher=fetcher,
             snapshots=SnapshotStore(runtime_dir / "snapshots"),
-            agent=OpenAIInvestigationAgent(gateway, definitions[0].system_prompt),
+            agents=agents,
+            moderator=OpenAIModerator(gateway, by_name["moderator"].system_prompt),
             verifier=OpenAIEvidenceVerifier(gateway, llm_factory),
             reports_dir=runtime_dir / "reports",
-            max_inner_rounds=definitions[0].max_inner_rounds,
+            reporter=OpenAIReportAgent(gateway, by_name["reporter"].system_prompt),
+            usage=gateway,
+            models_used=model_names,
+            closeables=[llm_factory, *(provider.client for provider in providers)],
+            max_outer_rounds=3,
+            max_inner_rounds=max(by_name[name].max_inner_rounds for name in agents),
         )
 
     async def close_resources() -> None:
         await fetcher.client.aclose()
-        if search is not None:
-            await search.client.aclose()
-        await llm_factory.aclose()
 
     factory.aclose = close_resources  # type: ignore[attr-defined]
 
@@ -95,10 +179,26 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
 
 
 def create_app(
-    *, runtime_dir: Path | None = None, orchestrator_factory: OrchestratorFactory | None = None
+    *,
+    runtime_dir: Path | None = None,
+    orchestrator_factory: OrchestratorFactory | None = None,
+    policy_checker: PolicyChecker | None = None,
 ) -> FastAPI:
     data_dir = Path(runtime_dir or os.getenv("YUQING_DATA_DIR", Path.cwd() / "data")).resolve()
     factory = orchestrator_factory or _build_default_orchestrator(data_dir)
+    if policy_checker is None:
+        if orchestrator_factory is None:
+            policy_checker = assess_public_interest
+        else:
+
+            async def allow_test_policy(
+                _database: Database, _event_query: str, _user_note: str | None
+            ) -> PublicInterestDecision:
+                return PublicInterestDecision(
+                    allowed=True, reason="测试编排器默认放行", category="test"
+                )
+
+            policy_checker = allow_test_policy
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -115,7 +215,9 @@ def create_app(
         jobs = list(app.state.jobs)
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
-        close_resources = getattr(factory, "aclose", None)
+        # 测试/插件允许用 Orchestrator 类直接充当 factory；类上的实例 aclose
+        # 不属于 factory 生命周期，不能在这里以无绑定方法调用。
+        close_resources = None if isinstance(factory, type) else getattr(factory, "aclose", None)
         if close_resources is not None:
             await close_resources()
         await database.close()
@@ -164,6 +266,7 @@ def create_app(
 
     async def run_safely(request: Request, task_id: str, *, resume: bool = False) -> None:
         database, events = services(request)
+        orchestrator: Orchestrator | None = None
         try:
             orchestrator = factory(database, events)
             if resume:
@@ -171,31 +274,49 @@ def create_app(
             else:
                 await orchestrator.run_task(task_id)
         except Exception as exc:
-            await database.set_task_status(task_id, "failed", "finished")
+            current = await database.get_task(task_id)
+            if current is None or current.status in {"paused", "done"}:
+                return
             await events.emit(
                 task_id,
                 "error",
                 {"code": "INTERNAL_ERROR", "message": str(exc), "recoverable": True},
             )
-            await events.emit(
-                task_id,
-                "task.status",
-                {"status": "failed", "phase": "finished", "progress": 100},
-            )
+            await events.emit_task_status(task_id, status="failed", phase="finished", progress=100)
+        finally:
+            if orchestrator is not None:
+                close = getattr(orchestrator, "aclose", None)
+                if close is not None:
+                    await close()
 
     @app.get("/api/health")
     async def health(request: Request) -> dict[str, Any]:
         database, _ = services(request)
         wal = await database.fetch_one("PRAGMA journal_mode")
-        search_configured = (
-            bool(os.getenv("LANGSEARCH_API_KEY")) if orchestrator_factory is None else True
-        )
-        llm_configured = (
-            bool(os.getenv("DEFAULT_API_KEY") or os.getenv("LLM_ANALYST_A_API_KEY"))
-            and bool(os.getenv("DEFAULT_API_KEY") or os.getenv("LLM_VERIFIER_API_KEY"))
-            if orchestrator_factory is None
-            else True
-        )
+        public_config = await ConfigService(database).public()
+        role_status = {
+            role: (
+                "configured"
+                if values["effective"].get("api_key")
+                and values["effective"].get("base_url")
+                and values["effective"].get("model")
+                else "missing"
+            )
+            for role, values in public_config["llm"]["roles"].items()
+        }
+        provider_order = public_config["search"]["provider_order"]
+        search_status = [
+            {
+                "name": name,
+                "configured": bool(public_config["search"]["keys"].get(name)),
+                "breaker": "closed",
+            }
+            for name in provider_order
+        ]
+        llm_configured = all(value == "configured" for value in role_status.values())
+        search_configured = any(item["configured"] for item in search_status)
+        if orchestrator_factory is not None:
+            llm_configured = search_configured = True
         snapshots_writable = os.access(data_dir / "snapshots", os.W_OK)
         reports_writable = os.access(data_dir / "reports", os.W_OK)
         configured = (
@@ -203,7 +324,16 @@ def create_app(
         )
         definitions, definition_errors = load_definitions(
             Path(__file__).parents[1] / "agents" / "definitions",
-            known_tools={"web_search", "fetch_page", "evidence_write", "claim_write"},
+            known_tools={
+                "web_search",
+                "fetch_page",
+                "evidence_write",
+                "evidence_search",
+                "claim_write",
+                "forum_post",
+                "forum_read",
+                "read_skill",
+            },
             skills_directory=Path(__file__).parents[1] / "agents" / "skills",
         )
         return {
@@ -220,13 +350,8 @@ def create_app(
                 "snapshots_writable": snapshots_writable,
                 "reports_writable": reports_writable,
             },
-            "llm_roles": {
-                "analyst_a": "configured" if llm_configured else "missing",
-                "verifier": "configured" if llm_configured else "missing",
-            },
-            "search_providers": [
-                {"name": "langsearch", "configured": search_configured, "breaker": "closed"}
-            ],
+            "llm_roles": role_status,
+            "search_providers": search_status,
             "agent_definitions": {
                 "loaded": len(definitions),
                 "rejected": len(definition_errors),
@@ -236,11 +361,121 @@ def create_app(
             "orphan_tasks": request.app.state.orphaned,
         }
 
+    @app.get("/api/config")
+    async def read_config(request: Request) -> dict[str, Any]:
+        database, _ = services(request)
+        return await ConfigService(database).public()
+
+    @app.put("/api/config")
+    async def update_config(payload: dict[str, Any], request: Request):
+        if os.getenv("YUQING_DEMO_MODE", "").lower() in {"1", "true", "yes"}:
+            return error_response("CONFIG_WRITE_DISABLED", "演示模式下配置写入已关闭。", 403)
+        database, _ = services(request)
+        try:
+            return await ConfigService(database).update(payload)
+        except ValueError as exc:
+            return error_response("CONFIG_INVALID", str(exc), 422, recoverable=True)
+
+    @app.post("/api/config/test")
+    async def test_config(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        database, _ = services(request)
+        environ = await ConfigService(database).resolved_environ()
+        started = time.perf_counter()
+        try:
+            if payload.get("kind") == "llm":
+                role = payload.get("role")
+                if role not in {
+                    "analyst_a",
+                    "analyst_b",
+                    "analyst_c",
+                    "moderator",
+                    "verifier",
+                    "reporter",
+                    "utility",
+                }:
+                    raise ValueError("未知 LLM 角色")
+                llm_factory = LLMClientFactory(environ)
+                try:
+                    reply, _ = await LLMGateway(llm_factory).ping(role)
+                    resolved = llm_factory.config(role)
+                finally:
+                    await llm_factory.aclose()
+                return {
+                    "ok": True,
+                    "kind": "llm",
+                    "role": role,
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "sample": reply,
+                    "resolved": {"base_url": resolved.base_url, "model": resolved.model},
+                }
+            if payload.get("kind") == "search":
+                name = str(payload.get("provider") or "")
+                provider_type = {
+                    "langsearch": LangSearchProvider,
+                    "zhipu": ZhipuSearchProvider,
+                    "qianfan": QianfanSearchProvider,
+                    "tavily": TavilySearchProvider,
+                    "serper": SerperSearchProvider,
+                }.get(name)
+                if provider_type is None:
+                    raise ValueError("未知搜索 provider")
+                provider = provider_type(environ.get(f"{name.upper()}_API_KEY", ""))
+                try:
+                    result = await provider.search(
+                        __import__(
+                            "yuqing.core.search.base", fromlist=["SearchParams"]
+                        ).SearchParams(query="舆情", top_k=1)
+                    )
+                finally:
+                    await provider.client.aclose()
+                return {
+                    "ok": True,
+                    "kind": "search",
+                    "provider": name,
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "sample": result[0].title if result else "连接成功，无结果",
+                }
+            raise ValueError("kind 必须是 llm 或 search")
+        except Exception as exc:
+            text = str(exc)
+            auth = "401" in text or "403" in text
+            code = (
+                "LLM_AUTH_FAILED"
+                if payload.get("kind") == "llm" and auth
+                else "LLM_UNREACHABLE"
+                if payload.get("kind") == "llm"
+                else "SEARCH_PROVIDER_UNREACHABLE"
+            )
+            return {
+                "ok": False,
+                "kind": payload.get("kind"),
+                "role": payload.get("role"),
+                "provider": payload.get("provider"),
+                "latency_ms": round((time.perf_counter() - started) * 1000),
+                "error": {"code": code, "message": text, "recoverable": True},
+            }
+
     @app.post("/api/tasks", status_code=202)
     async def create_task(
         payload: TaskCreate, request: Request, background: BackgroundTasks
     ) -> dict[str, Any]:
         database, _ = services(request)
+        try:
+            decision = await policy_checker(database, payload.event_query, payload.user_note)
+        except Exception as exc:
+            return error_response(
+                "POLICY_CHECK_UNAVAILABLE",
+                f"公共性门禁暂时不可用：{type(exc).__name__}",
+                503,
+                recoverable=True,
+            )
+        if not decision.allowed:
+            return error_response(
+                "POLICY_BLOCKED",
+                decision.reason,
+                422,
+                details={"category": decision.category},
+            )
         task = await database.create_task(payload)
         background.add_task(run_safely, request, task.id)
         return {
@@ -296,7 +531,11 @@ def create_app(
             "event_query": row["event_query"],
             "status": row["status"],
             "phase": row["phase"],
-            "progress": {"outer_round": row["outer_round"], "max_outer_rounds": 1, "agents": []},
+            "progress": {
+                "outer_round": row["outer_round"],
+                "max_outer_rounds": {"quick": 1, "standard": 2, "deep": 3}[row["depth"]],
+                "agents": [],
+            },
             "metrics": {
                 "evidence_total": evidence_count["n"],
                 "claims_total": claim_count["n"],
@@ -326,8 +565,102 @@ def create_app(
                 409,
                 details={"task_id": task_id, "status": task.status},
             )
+        claimed = await database.claim_task_status(
+            task_id, ("paused", "failed"), "running", "resuming"
+        )
+        if not claimed:
+            current = await database.get_task(task_id)
+            return error_response(
+                "TASK_NOT_RESUMABLE",
+                "任务已被其他请求认领续跑。",
+                409,
+                details={"task_id": task_id, "status": current.status if current else "missing"},
+            )
         background.add_task(run_safely, request, task_id, resume=True)
         return {"task_id": task_id, "status": "running", "resumed_from": checkpoint}
+
+    @app.post("/api/tasks/{task_id}/pause", status_code=202)
+    async def pause_task(task_id: str, request: Request):
+        database, events = services(request)
+        task = await database.get_task(task_id)
+        if task is None:
+            return error_response(
+                "TASK_NOT_FOUND", "任务不存在。", 404, details={"task_id": task_id}
+            )
+        if task.status == "pausing":
+            return {"task_id": task_id, "status": "pausing", "requested_at": task.updated_at}
+        if task.status != "running":
+            return error_response(
+                "TASK_NOT_PAUSABLE", f"任务当前状态为 {task.status}，不能暂停。", 409
+            )
+        await database.set_task_status(task_id, "pausing")
+        await events.emit(
+            task_id, "task.status", {"status": "pausing", "phase": "forum", "progress": 0}
+        )
+        current = await database.get_task(task_id)
+        return {"task_id": task_id, "status": "pausing", "requested_at": current.updated_at}
+
+    @app.post("/api/tasks/{task_id}/stop", status_code=202)
+    async def stop_task(
+        task_id: str,
+        request: Request,
+        background: BackgroundTasks,
+        payload: dict[str, Any] | None = None,
+    ):
+        database, events = services(request)
+        task = await database.get_task(task_id)
+        if task is None:
+            return error_response(
+                "TASK_NOT_FOUND", "任务不存在。", 404, details={"task_id": task_id}
+            )
+        if task.status == "stopping":
+            return {"task_id": task_id, "status": "stopping", "will_generate_report": True}
+        if task.status not in {"running", "pausing", "paused"}:
+            return error_response(
+                "TASK_NOT_STOPPABLE", f"任务当前状态为 {task.status}，不能停止。", 409
+            )
+        previous = task.status
+        claimed = await database.claim_task_status(task_id, (task.status,), "stopping", "forum")
+        if not claimed:
+            return error_response("TASK_NOT_STOPPABLE", "任务状态已变化，请刷新后重试。", 409)
+        await events.emit(
+            task_id, "task.status", {"status": "stopping", "phase": "forum", "progress": 0}
+        )
+        if previous == "paused":
+            background.add_task(run_safely, request, task_id, resume=True)
+        return {"task_id": task_id, "status": "stopping", "will_generate_report": True}
+
+    @app.delete("/api/tasks/{task_id}")
+    async def delete_task(task_id: str, request: Request):
+        database, _ = services(request)
+        task = await database.get_task(task_id)
+        if task is None:
+            return error_response(
+                "TASK_NOT_FOUND", "任务不存在。", 404, details={"task_id": task_id}
+            )
+        if task.status in {"running", "pausing", "stopping"}:
+            return error_response("TASK_NOT_DELETABLE", "运行中的任务需先停止。", 409)
+        deleted = await database.delete_task(task_id)
+        removed_files = 0
+        allowed = [(data_dir / "snapshots").resolve(), (data_dir / "reports").resolve()]
+
+        def remove_material(raw_path: str) -> bool:
+            path = Path(raw_path).resolve()
+            if (
+                not any(path == root or root in path.parents for root in allowed)
+                or not path.is_file()
+            ):
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            return True
+
+        for raw_path in deleted.pop("files"):
+            removed_files += int(await asyncio.to_thread(remove_material, raw_path))
+        deleted["snapshot_files"] = removed_files
+        return {"task_id": task_id, "deleted": deleted}
 
     @app.get("/api/tasks/{task_id}/events", response_class=EventSourceResponse)
     async def task_events(
@@ -400,15 +733,25 @@ def create_app(
         return json.loads(report["ir_json"])
 
     @app.get("/api/reports/{report_id}/html", response_class=HTMLResponse)
-    async def read_report_html(report_id: str, request: Request):
+    async def read_report_html(
+        report_id: str,
+        request: Request,
+        view: Annotated[str, Query(pattern="^(brief|full)$")] = "brief",
+        download: Annotated[bool, Query()] = False,
+    ):
         database, _ = services(request)
-        report = await database.fetch_one("SELECT html_path FROM report WHERE id=?", (report_id,))
-        report_exists = report is not None and await asyncio.to_thread(
-            Path(report["html_path"]).is_file
+        report = await database.fetch_one(
+            "SELECT html_path,ir_json FROM report WHERE id=?", (report_id,)
         )
-        if not report_exists:
+        if report is None:
             return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
-        return FileResponse(report["html_path"], media_type="text/html")
+        rendered = render_html(json.loads(report["ir_json"]), view=view)
+        headers = (
+            {"Content-Disposition": f'attachment; filename="yuqing-{report_id}.html"'}
+            if download
+            else None
+        )
+        return HTMLResponse(rendered, headers=headers)
 
     @app.get("/api/evidence/{evidence_pk}/snapshot", response_class=HTMLResponse)
     async def read_snapshot(evidence_pk: str, request: Request):

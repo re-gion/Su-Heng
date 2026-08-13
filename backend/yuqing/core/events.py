@@ -73,6 +73,39 @@ class EventBus:
                 queue.put_nowait(envelope)
         return envelope
 
+    async def emit_task_status(
+        self, task_id: str, *, status: str, phase: str, progress: int
+    ) -> EventEnvelope:
+        """在同一事务内提交任务状态和对应 SSE 事件。"""
+        stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        data = {"status": status, "phase": phase, "progress": progress}
+
+        def operation(connection):
+            connection.execute(
+                "UPDATE task SET status=?,phase=?,updated_at=? WHERE id=?",
+                (status, phase, stamp, task_id),
+            )
+            row = connection.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM event_log WHERE task_id=?", (task_id,)
+            ).fetchone()
+            event = EventEnvelope(
+                event="task.status", task_id=task_id, seq=int(row[0]), ts=stamp, data=data
+            )
+            connection.execute(
+                "INSERT INTO event_log(task_id,seq,event_type,ts,payload) VALUES(?,?,?,?,?)",
+                (task_id, event.seq, event.event, stamp, event.model_dump_json()),
+            )
+            return event
+
+        envelope = await self.database.write(operation)
+        for queue in tuple(self._subscribers.get(task_id, ())):
+            try:
+                queue.put_nowait(envelope)
+            except asyncio.QueueFull:
+                queue.get_nowait()
+                queue.put_nowait(envelope)
+        return envelope
+
     def subscribe(self, task_id: str) -> asyncio.Queue[EventEnvelope]:
         queue: asyncio.Queue[EventEnvelope] = asyncio.Queue(maxsize=self.subscriber_buffer_size)
         self._subscribers[task_id].add(queue)

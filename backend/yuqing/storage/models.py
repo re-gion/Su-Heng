@@ -41,6 +41,7 @@ class TaskRecord(BaseModel):
     outer_round: int
     tokens_used: int
     cost_estimate: float
+    config_snapshot: str | None = None
     created_at: str
     updated_at: str
 
@@ -121,6 +122,8 @@ class ClaimRecord(BaseModel):
     agent: str
     round: int
     section: str | None
+    is_key: bool = True
+    is_key_reason: str | None = None
     badge: Badge | None
     verdict: str | None
     verification_state: str

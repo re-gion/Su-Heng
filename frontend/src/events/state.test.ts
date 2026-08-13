@@ -20,4 +20,17 @@ describe('SSE public state seam', () => {
     const reset = applyEvent(duplicate, event(0, '__reset__', {}))
     expect(reset).toEqual(initialStreamState)
   })
+
+  it('renders forum host budget and independent agent phases from V1 events', () => {
+    let state = initialStreamState
+    state = applyEvent(state, event(1, 'agent.status', { agent: 'history_insight', phase: 'searching' }))
+    state = applyEvent(state, event(2, 'forum.message', { agent: 'history_insight', type: 'summary', content: '找到历史对照', round: 1 }))
+    state = applyEvent(state, event(3, 'host.review', { release: false, reason: '仍有一个缺口', gaps: [{ desc: '补查官方通报', priority: 'high' }] }))
+    state = applyEvent(state, event(4, 'budget.update', { tokens_used: 1200, tokens_limit: 500000, calls: 3 }))
+
+    expect(state.agents.history_insight).toBe('searching')
+    expect(state.forum[0].content).toBe('找到历史对照')
+    expect(state.hostReviews[0].reason).toBe('仍有一个缺口')
+    expect(state.budget.tokensUsed).toBe(1200)
+  })
 })

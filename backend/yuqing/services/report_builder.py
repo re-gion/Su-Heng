@@ -117,7 +117,9 @@ class BriefReportBuilder:
             "key_claims_rendered": total,
             "key_claims_rejected": len(claims) - total,
             "rejection_reasons": {},
-            "key_claims_verification_skipped": 0,
+            "key_claims_verification_skipped": sum(
+                item["verification_state"] == "skipped" for item in rendered_claims
+            ),
             "citation_coverage": 1.0 if total else 0.0,
             "verified_rate": verified / total if total else 0.0,
             "weighted_verified_rate": (

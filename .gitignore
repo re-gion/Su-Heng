@@ -20,6 +20,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 .playwright-cli/
+output/playwright/
 
 # 系统与崩溃文件
 bash.exe.stackdump

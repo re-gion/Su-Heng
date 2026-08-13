@@ -7,7 +7,7 @@ const eventTypes = [
   'report.section', 'report.done', 'budget.update', 'warning', 'error',
 ]
 
-export function useTaskStream(taskId: string | null) {
+export function useTaskStream(taskId: string | null, revision = 0) {
   const [state, dispatch] = useReducer(applyEvent, initialStreamState)
 
   useEffect(() => {
@@ -15,15 +15,22 @@ export function useTaskStream(taskId: string | null) {
     if (!taskId) return undefined
     const source = new EventSource(`/api/tasks/${taskId}/events?since_seq=0`)
     const onMessage = (raw: MessageEvent<string>) => {
-      const message = JSON.parse(raw.data) as TaskEvent
+      if (typeof raw.data !== 'string' || !raw.data) return
+      let message: TaskEvent
+      try {
+        message = JSON.parse(raw.data) as TaskEvent
+      } catch {
+        return
+      }
       dispatch(message)
+      if (message.event === 'task.status' && ['done', 'failed', 'paused'].includes(String(message.data.status))) {
+        source.close()
+      }
     }
     eventTypes.forEach((name) => source.addEventListener(name, onMessage as EventListener))
-    source.onerror = () => {
-      // EventSource 会自动重连；服务端通过 Last-Event-ID/since_seq 保证补发。
-    }
+    // 运行中断线由 EventSource 自动重连；终态在消息处理器主动关闭。
     return () => source.close()
-  }, [taskId])
+  }, [taskId, revision])
 
   return state
 }

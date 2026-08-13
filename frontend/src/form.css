@@ -1,0 +1,39 @@
+.date-field {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  border: 1px solid #78909c;
+  background: #fff;
+}
+
+.date-field span {
+  padding-left: 13px;
+  color: #607680;
+  font-size: 12px;
+}
+
+.date-field input {
+  border: 0;
+}
+
+.provider-order {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px;
+  background: #0c2939;
+  color: #fff;
+}
+
+.provider-order span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #6f8996;
+  padding: 5px 7px;
+}
+
+.provider-order button {
+  padding: 3px 6px;
+  background: #155b73;
+}

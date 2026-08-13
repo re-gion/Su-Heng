@@ -41,3 +41,15 @@ async def test_invalid_json_response_is_retried_before_returning():
     assert factory.completions.calls == 2
     assert gateway.calls == 2
     assert gateway.tokens_used == 6
+
+
+@pytest.mark.asyncio
+async def test_token_budget_rejects_call_before_external_request():
+    factory = FakeFactory()
+    gateway = LLMGateway(factory)
+    gateway.token_limit = 10
+
+    with pytest.raises(RuntimeError, match="token budget exhausted"):
+        await gateway.complete_json("analyst_a", "system", "user", max_tokens=100)
+
+    assert factory.completions.calls == 0

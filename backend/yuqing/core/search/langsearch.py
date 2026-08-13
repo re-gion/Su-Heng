@@ -8,25 +8,38 @@ import httpx
 from yuqing.core.search.base import SearchParams, SearchResult
 
 
+class LangSearchLimiter:
+    def __init__(self, interval: float):
+        self.interval = interval
+        self.last_call = 0.0
+        self.lock = asyncio.Lock()
+
+
 class LangSearchProvider:
     name = "langsearch"
     capabilities = {"freshness", "domain_filter", "publish_time"}
 
-    def __init__(self, api_key: str, *, client: httpx.AsyncClient | None = None, qps: float = 1.0):
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        client: httpx.AsyncClient | None = None,
+        qps: float = 1.0,
+        limiter: LangSearchLimiter | None = None,
+    ):
         if not api_key:
             raise ValueError("LANGSEARCH_API_KEY 未配置")
         self.api_key = api_key
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10))
-        self._interval = 1 / qps
-        self._last_call = 0.0
-        self._rate_lock = asyncio.Lock()
+        # 官方 1 QPS 按服务端时间窗口计数；留出 10% 抖动余量避免边界 429。
+        self._limiter = limiter or LangSearchLimiter(1.1 / qps)
 
     async def _throttle(self) -> None:
-        async with self._rate_lock:
-            delay = self._interval - (time.monotonic() - self._last_call)
+        async with self._limiter.lock:
+            delay = self._limiter.interval - (time.monotonic() - self._limiter.last_call)
             if delay > 0:
                 await asyncio.sleep(delay)
-            self._last_call = time.monotonic()
+            self._limiter.last_call = time.monotonic()
 
     async def search(self, params: SearchParams) -> list[SearchResult]:
         await self._throttle()

@@ -60,6 +60,14 @@ class Database:
         ] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
 
+    @staticmethod
+    def _assert_investigation_open(connection: sqlite3.Connection, task_id: str) -> None:
+        row = connection.execute("SELECT status FROM task WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError("task not found")
+        if row[0] in {"stopping", "done"}:
+            raise RuntimeError("task investigation is sealed")
+
     async def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path)
@@ -169,11 +177,165 @@ class Database:
                 (status, phase, now_iso(), task_id),
             )
 
+    async def claim_task_status(
+        self, task_id: str, expected: Sequence[str], status: str, phase: str
+    ) -> bool:
+        placeholders = ",".join("?" for _ in expected)
+        changed = await self.execute_write(
+            f"UPDATE task SET status=?,phase=?,updated_at=? WHERE id=? AND status IN ({placeholders})",
+            (status, phase, now_iso(), task_id, *expected),
+        )
+        return changed == 1
+
+    async def set_outer_round(self, task_id: str, outer_round: int) -> None:
+        await self.execute_write(
+            "UPDATE task SET outer_round=?, updated_at=? WHERE id=?",
+            (outer_round, now_iso(), task_id),
+        )
+
+    async def update_task_usage(
+        self, task_id: str, *, tokens_used: int, cost_estimate: float
+    ) -> None:
+        await self.execute_write(
+            "UPDATE task SET tokens_used=?,cost_estimate=?,updated_at=? WHERE id=?",
+            (tokens_used, cost_estimate, now_iso(), task_id),
+        )
+
+    async def set_task_config_snapshot(self, task_id: str, snapshot: dict[str, Any]) -> None:
+        await self.execute_write(
+            "UPDATE task SET config_snapshot=?,updated_at=? WHERE id=?",
+            (json.dumps(snapshot, ensure_ascii=False), now_iso(), task_id),
+        )
+
+    async def config_values(self) -> dict[str, str]:
+        rows = await self.fetch_all("SELECT key,value FROM config")
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    async def set_config_value(
+        self, key: str, value: str | None, *, is_secret: bool = False
+    ) -> None:
+        if value is None:
+            await self.execute_write("DELETE FROM config WHERE key=?", (key,))
+            return
+        await self.execute_write(
+            """INSERT INTO config(key,value,is_secret,updated_at) VALUES(?,?,?,?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,is_secret=excluded.is_secret,updated_at=excluded.updated_at""",
+            (key, value.strip(), int(is_secret), now_iso()),
+        )
+
+    async def set_config_values(
+        self, changes: dict[str, str | None], *, secret_keys: set[str]
+    ) -> None:
+        def operation(connection: sqlite3.Connection) -> None:
+            stamp = now_iso()
+            for key, value in changes.items():
+                if value is None:
+                    connection.execute("DELETE FROM config WHERE key=?", (key,))
+                else:
+                    connection.execute(
+                        """INSERT INTO config(key,value,is_secret,updated_at) VALUES(?,?,?,?)
+                           ON CONFLICT(key) DO UPDATE SET value=excluded.value,is_secret=excluded.is_secret,updated_at=excluded.updated_at""",
+                        (key, value.strip(), int(key in secret_keys), stamp),
+                    )
+
+        await self.write(operation)
+
+    async def delete_task(self, task_id: str) -> dict[str, Any]:
+        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            tables = {
+                "evidence": "evidence",
+                "claims": "claim",
+                "forum_messages": "forum_message",
+                "events": "event_log",
+                "reports": "report",
+            }
+            counts = {
+                label: int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE task_id=?", (task_id,)
+                    ).fetchone()[0]
+                )
+                for label, table in tables.items()
+            }
+            files = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT snapshot_path FROM evidence WHERE task_id=? AND snapshot_path IS NOT NULL",
+                    (task_id,),
+                ).fetchall()
+            ]
+            files.extend(
+                row[0]
+                for row in connection.execute(
+                    "SELECT html_path FROM report WHERE task_id=? AND html_path IS NOT NULL",
+                    (task_id,),
+                ).fetchall()
+            )
+            deleted = connection.execute("DELETE FROM task WHERE id=?", (task_id,)).rowcount
+            if deleted != 1:
+                raise ValueError("task not found")
+            counts["files"] = files
+            return counts
+
+        return await self.write(operation)
+
+    async def add_forum_message(
+        self,
+        *,
+        task_id: str,
+        round_number: int,
+        agent: str,
+        message_type: str,
+        content: str,
+        refs: list[str],
+        payload: dict[str, Any] | None,
+        created_at: str,
+    ) -> sqlite3.Row:
+        def operation(connection: sqlite3.Connection) -> sqlite3.Row:
+            self._assert_investigation_open(connection, task_id)
+            cursor = connection.execute(
+                """INSERT INTO forum_message(task_id,round,agent,type,content,refs,payload,created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    task_id,
+                    round_number,
+                    agent,
+                    message_type,
+                    content,
+                    json.dumps(refs, ensure_ascii=False),
+                    json.dumps(payload, ensure_ascii=False) if payload is not None else None,
+                    created_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM forum_message WHERE id=?", (cursor.lastrowid,)
+            ).fetchone()
+            assert row is not None
+            value = dict(row)
+            value["refs"] = json.loads(value["refs"] or "[]")
+            value["payload"] = json.loads(value["payload"]) if value["payload"] else None
+            return value  # type: ignore[return-value]
+
+        return await self.write(operation)
+
+    async def list_forum_messages(self, task_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch_all(
+            "SELECT * FROM forum_message WHERE task_id=? ORDER BY id", (task_id,)
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            value = dict(row)
+            value["refs"] = json.loads(value["refs"] or "[]")
+            value["payload"] = json.loads(value["payload"]) if value["payload"] else None
+            result.append(value)
+        return result
+
     async def add_evidence(self, data: EvidenceCreate) -> EvidenceRecord:
         normalized = normalize_url(str(data.url))
         url_hash = hashlib.sha256(normalized.encode()).hexdigest()
 
         def operation(connection: sqlite3.Connection) -> str:
+            self._assert_investigation_open(connection, data.task_id)
             existing = connection.execute(
                 "SELECT local_id FROM evidence WHERE task_id=? AND url_hash=?",
                 (data.task_id, url_hash),
@@ -240,10 +402,12 @@ class Database:
     async def add_claim(self, data: ClaimCreate) -> ClaimRecord:
         def operation(connection: sqlite3.Connection) -> str:
             task_row = connection.execute(
-                "SELECT depth FROM task WHERE id=?", (data.task_id,)
+                "SELECT depth,status FROM task WHERE id=?", (data.task_id,)
             ).fetchone()
             if task_row is None:
                 raise ValueError("task not found")
+            if task_row[1] in {"stopping", "done"}:
+                raise RuntimeError("task investigation is sealed")
             max_evidence = {"quick": 3, "standard": 4, "deep": 6}[task_row[0]]
             if len(data.evidence_ids) > max_evidence:
                 raise ValueError(f"当前深度单条 claim 最多绑定 {max_evidence} 条证据")
@@ -262,6 +426,9 @@ class Database:
             count = connection.execute(
                 "SELECT COUNT(*) FROM claim WHERE task_id=?", (data.task_id,)
             ).fetchone()[0]
+            max_claims = {"quick": 15, "standard": 40, "deep": 70}[task_row[0]]
+            if count >= max_claims:
+                raise ValueError(f"任务 claim 总数已达当前深度上限 {max_claims}")
             local_id = f"C{count + 1:03d}"
             claim_pk = uuid.uuid4().hex
             connection.execute(
@@ -354,17 +521,25 @@ class Database:
         snapshot_path: str,
         content_sha256: str,
     ) -> None:
-        await self.execute_write(
-            """UPDATE evidence SET fetch_status='fetched', fetched_at=?, content_text=?,
-               snapshot_path=?, content_sha256=? WHERE task_id=? AND local_id=?""",
-            (now_iso(), content_text, snapshot_path, content_sha256, task_id, local_id),
-        )
+        def operation(connection: sqlite3.Connection) -> None:
+            self._assert_investigation_open(connection, task_id)
+            connection.execute(
+                """UPDATE evidence SET fetch_status='fetched', fetched_at=?, content_text=?,
+                   snapshot_path=?, content_sha256=? WHERE task_id=? AND local_id=?""",
+                (now_iso(), content_text, snapshot_path, content_sha256, task_id, local_id),
+            )
+
+        await self.write(operation)
 
     async def update_evidence_failed(self, task_id: str, local_id: str, reason: str) -> None:
-        await self.execute_write(
-            "UPDATE evidence SET fetch_status='fetch_failed', extra=? WHERE task_id=? AND local_id=?",
-            (json.dumps({"fetch_error": reason}, ensure_ascii=False), task_id, local_id),
-        )
+        def operation(connection: sqlite3.Connection) -> None:
+            self._assert_investigation_open(connection, task_id)
+            connection.execute(
+                "UPDATE evidence SET fetch_status='fetch_failed', extra=? WHERE task_id=? AND local_id=?",
+                (json.dumps({"fetch_error": reason}, ensure_ascii=False), task_id, local_id),
+            )
+
+        await self.write(operation)
 
     async def evidence_by_pk(self, evidence_pk: str) -> sqlite3.Row | None:
         return await self.fetch_one("SELECT * FROM evidence WHERE pk=?", (evidence_pk,))
