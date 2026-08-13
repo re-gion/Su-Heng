@@ -76,6 +76,13 @@ class Database:
         connection.execute("PRAGMA busy_timeout=5000")
         schema = (Path(__file__).with_name("schema.sql")).read_text(encoding="utf-8")
         connection.executescript(schema)
+        hot_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(hot_snapshot)").fetchall()
+        }
+        if "asset_id" not in hot_columns:
+            connection.execute(
+                "ALTER TABLE hot_snapshot ADD COLUMN asset_id TEXT REFERENCES dataset_asset(id) ON DELETE SET NULL"
+            )
         connection.commit()
         self._connection = connection
         self._writer = asyncio.create_task(self._write_loop(), name="sqlite-single-writer")
@@ -268,6 +275,13 @@ class Database:
                 row[0]
                 for row in connection.execute(
                     "SELECT html_path FROM report WHERE task_id=? AND html_path IS NOT NULL",
+                    (task_id,),
+                ).fetchall()
+            )
+            files.extend(
+                row[0]
+                for row in connection.execute(
+                    "SELECT pdf_path FROM report WHERE task_id=? AND pdf_path IS NOT NULL",
                     (task_id,),
                 ).fetchall()
             )
@@ -655,6 +669,64 @@ class Database:
         return await self.fetch_one(
             "SELECT * FROM report WHERE task_id=? ORDER BY generated_at DESC LIMIT 1", (task_id,)
         )
+
+    async def set_report_pdf(self, report_id: str, pdf_path: str) -> None:
+        await self.execute_write("UPDATE report SET pdf_path=? WHERE id=?", (pdf_path, report_id))
+
+    async def consume_quota(self, scope: str, period_key: str, limit: int) -> bool:
+        def operation(connection: sqlite3.Connection) -> bool:
+            row = connection.execute(
+                "SELECT used FROM provider_quota WHERE provider=? AND period_key=?",
+                (scope, period_key),
+            ).fetchone()
+            used = int(row[0]) if row else 0
+            if used >= limit:
+                return False
+            connection.execute(
+                """INSERT INTO provider_quota(provider,period_key,used) VALUES(?,?,1)
+                   ON CONFLICT(provider,period_key) DO UPDATE SET used=used+1""",
+                (scope, period_key),
+            )
+            return True
+
+        return await self.write(operation)
+
+    async def request_takedown(self, report_id: str, reason: str) -> None:
+        await self.execute_write(
+            "INSERT INTO takedown_request(report_id,reason,requested_at) VALUES(?,?,?)",
+            (report_id, reason, now_iso()),
+        )
+
+    async def bind_demo_owner(self, task_id: str, owner_hash: str) -> None:
+        await self.execute_write(
+            "INSERT OR REPLACE INTO demo_task_owner(task_id,owner_hash,created_at) VALUES(?,?,?)",
+            (task_id, owner_hash, now_iso()),
+        )
+
+    async def demo_task_owned_by(self, task_id: str, owner_hash: str) -> bool:
+        row = await self.fetch_one(
+            "SELECT 1 FROM demo_task_owner WHERE task_id=? AND owner_hash=?",
+            (task_id, owner_hash),
+        )
+        return row is not None
+
+    async def report_under_review(self, report_id: str) -> bool:
+        row = await self.fetch_one(
+            "SELECT 1 FROM takedown_request WHERE report_id=? AND status='pending' LIMIT 1",
+            (report_id,),
+        )
+        return row is not None
+
+    async def data_status(self) -> dict[str, Any]:
+        row = await self.fetch_one(
+            """SELECT
+                 (SELECT COUNT(*) FROM dataset_asset) AS assets,
+                 (SELECT COUNT(*) FROM historical_event) AS historical_events,
+                 (SELECT COUNT(*) FROM hot_snapshot) AS hot_snapshots,
+                 (SELECT MIN(captured_at) FROM hot_snapshot) AS hot_from,
+                 (SELECT MAX(captured_at) FROM hot_snapshot) AS hot_to"""
+        )
+        return dict(row) if row else {}
 
     async def mark_orphaned_tasks(self) -> int:
         return await self.execute_write(

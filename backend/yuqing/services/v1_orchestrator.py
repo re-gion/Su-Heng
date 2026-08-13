@@ -11,6 +11,7 @@ from yuqing.core.search.base import SearchParams, SearchProvider
 from yuqing.services.evidence_store import EvidenceStore
 from yuqing.services.forum import ForumBoard, ForumMessageCreate
 from yuqing.services.full_report import FullReportBuilder, ReportSectionAgent
+from yuqing.services.historical_data import HistoricalDataService
 from yuqing.services.moderation import Moderator, ModeratorReview
 from yuqing.services.verifier import ClaimVerifierService, EvidenceVerifier
 from yuqing.storage.db import Database
@@ -32,6 +33,7 @@ class V1Orchestrator:
         verifier: EvidenceVerifier,
         reports_dir: Path,
         reporter: ReportSectionAgent | None = None,
+        historical_data: HistoricalDataService | None = None,
         usage: object | None = None,
         models_used: Mapping[str, str] | None = None,
         closeables: Sequence[object] = (),
@@ -46,7 +48,14 @@ class V1Orchestrator:
         self.moderator = moderator
         self.verification = ClaimVerifierService(database, verifier)
         entailment = verifier if hasattr(verifier, "entails") else None
-        self.reports = FullReportBuilder(database, reports_dir, entailment, reporter)
+        self.historical_data = historical_data or HistoricalDataService(database)
+        self.reports = FullReportBuilder(
+            database,
+            reports_dir,
+            entailment,
+            reporter,
+            historical_data=self.historical_data,
+        )
         self.max_outer_rounds = max(1, max_outer_rounds)
         self.max_inner_rounds = max(1, max_inner_rounds)
         self.usage = usage
@@ -116,6 +125,52 @@ class V1Orchestrator:
     ) -> dict[str, object]:
         digest = board.digest_for(agent_name, outer_round - 1) if outer_round > 1 else ""
         scoped_query = event_query + (f"\n主持人/论坛补充：{digest}" if digest else "")
+        if agent_name == "history_insight":
+            try:
+                task = await self.database.get_task(task_id)
+                evidence_before = {
+                    item.local_id for item in await self.database.list_evidence(task_id)
+                }
+                local_context = await self.historical_data.prepare_task_context(
+                    task_id,
+                    event_query,
+                    date_from=task.time_range_from if task else None,
+                    date_to=task.time_range_to if task else None,
+                )
+                if local_context:
+                    scoped_query += f"\n{local_context}"
+                    local_matches = await self.historical_data.task_matches(task_id)
+                    await self.events.emit(
+                        task_id,
+                        "search.result",
+                        {
+                            "agent": agent_name,
+                            "provider": "local_history",
+                            "query": event_query,
+                            "hits": len(local_matches),
+                            "degraded_from": None,
+                        },
+                    )
+                    for record in await self.database.list_evidence(task_id):
+                        if record.local_id in evidence_before or record.provider != "local_dataset":
+                            continue
+                        await self.events.emit(
+                            task_id,
+                            "evidence.added",
+                            {
+                                "evidence_id": record.local_id,
+                                "title": record.title,
+                                "source_name": record.source_name or record.source_domain,
+                                "source_tier": record.source_tier,
+                                "published_at": record.published_at,
+                                "agent": agent_name,
+                                "provenance": "本地库命中",
+                            },
+                        )
+            except Exception as exc:
+                self._limitations.append(
+                    f"本地历史层不可用（{type(exc).__name__}），历史 Agent 已独立降级到搜索回溯。"
+                )
         await self.events.emit(
             task_id,
             "agent.status",

@@ -136,6 +136,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_state_step ON task_state(task_id, step_key)
 
 CREATE TABLE IF NOT EXISTS hot_snapshot (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT REFERENCES dataset_asset(id) ON DELETE SET NULL,
   platform TEXT NOT NULL,
   captured_at TEXT NOT NULL,
   rank INTEGER NOT NULL,
@@ -144,6 +145,66 @@ CREATE TABLE IF NOT EXISTS hot_snapshot (
   url TEXT,
   raw TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_hot_snapshot_point
+ON hot_snapshot(platform, captured_at, rank, title);
+CREATE INDEX IF NOT EXISTS ix_hot_time ON hot_snapshot(captured_at, platform);
+CREATE INDEX IF NOT EXISTS ix_hot_title ON hot_snapshot(title);
+
+CREATE TABLE IF NOT EXISTS dataset_asset (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  license_label TEXT NOT NULL,
+  upstream_rights_note TEXT NOT NULL,
+  redistribution TEXT NOT NULL CHECK (redistribution IN ('allowed','restricted','unknown')),
+  personal_fields_removed INTEGER NOT NULL DEFAULT 1 CHECK (personal_fields_removed IN (0,1)),
+  content_sha256 TEXT,
+  record_count INTEGER NOT NULL DEFAULT 0,
+  metadata TEXT,
+  imported_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS historical_event (
+  id TEXT PRIMARY KEY,
+  asset_id TEXT NOT NULL REFERENCES dataset_asset(id) ON DELETE CASCADE,
+  event_name TEXT NOT NULL,
+  event_time_start TEXT,
+  event_time_end TEXT,
+  summary TEXT NOT NULL,
+  outcome TEXT,
+  nature TEXT,
+  outbreak_path TEXT,
+  response TEXT,
+  regulatory_involvement TEXT,
+  source_url TEXT NOT NULL,
+  source_title TEXT,
+  source_name TEXT,
+  source_published_at TEXT,
+  keywords TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  UNIQUE(asset_id, event_name, event_time_start, source_url)
+);
+CREATE INDEX IF NOT EXISTS ix_historical_event_time
+ON historical_event(event_time_start, event_time_end);
+CREATE INDEX IF NOT EXISTS ix_historical_event_name ON historical_event(event_name);
+
+CREATE TABLE IF NOT EXISTS event_alias (
+  event_id TEXT NOT NULL REFERENCES historical_event(id) ON DELETE CASCADE,
+  alias TEXT NOT NULL,
+  PRIMARY KEY(event_id, alias)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS task_history_match (
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  historical_event_id TEXT NOT NULL REFERENCES historical_event(id) ON DELETE CASCADE,
+  evidence_pk TEXT REFERENCES evidence(pk) ON DELETE SET NULL,
+  score REAL NOT NULL,
+  matched_terms TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(task_id, historical_event_id)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS config (
   key TEXT PRIMARY KEY,
@@ -168,3 +229,21 @@ CREATE TABLE IF NOT EXISTS provider_quota (
   used INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(provider, period_key)
 );
+
+CREATE TABLE IF NOT EXISTS takedown_request (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  report_id TEXT NOT NULL REFERENCES report(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+  requested_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_takedown_report_status
+ON takedown_request(report_id, status);
+
+CREATE TABLE IF NOT EXISTS demo_task_owner (
+  task_id TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  owner_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_demo_owner ON demo_task_owner(owner_hash, created_at);

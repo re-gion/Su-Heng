@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from yuqing.render.html import render_html
+from yuqing.render.ir_migrations import UnsupportedReportVersion, migrate_report
 from yuqing.render.validator import ReportValidationError, validate_report
 
 FIXTURE = Path(__file__).parents[3] / "docs" / "方案包" / "fixtures" / "report-ir-v0.1.fixture.json"
@@ -129,7 +130,7 @@ def test_compatible_new_minor_uses_unknown_block_fallback():
 
 @pytest.mark.parametrize(
     ("schema_version", "min_reader_minor"),
-    [("0.2", 2), ("1.0", 0)],
+    [("0.3", 3), ("1.0", 0)],
 )
 def test_incompatible_ir_versions_fail_clearly(schema_version, min_reader_minor):
     report = load_fixture()
@@ -137,6 +138,45 @@ def test_incompatible_ir_versions_fail_clearly(schema_version, min_reader_minor)
     report["min_reader_minor"] = min_reader_minor
     with pytest.raises(ReportValidationError, match="R1"):
         validate_report(report)
+
+
+def test_v01_report_migrates_without_losing_citations_or_history_content():
+    report = load_fixture()
+    history = {
+        "block_id": "history",
+        "type": "history_compare",
+        "section": "06",
+        "title": "历史对照",
+        "cards": [
+            {
+                "event_name": "旧版历史事件",
+                "comparison": "旧版对照内容",
+                "evidence_refs": ["E001"],
+            }
+        ],
+    }
+    report["blocks"].insert(-1, history)
+
+    migrated = migrate_report(report)
+
+    assert migrated["schema_version"] == "0.2"
+    assert migrated["min_reader_minor"] == 1
+    card = next(
+        card
+        for block in migrated["blocks"]
+        if block["type"] == "history_compare"
+        for card in block["cards"]
+        if card.get("event_name") == "旧版历史事件"
+    )
+    assert card["comparison"] == "旧版对照内容"
+    assert card["evidence_refs"] == ["E001"]
+    assert card["provenance"] == "历史报告迁移"
+    assert migrated["migration_history"] == ["0.1->0.2"]
+
+
+def test_unknown_report_ir_is_rejected_instead_of_silently_rendered():
+    with pytest.raises(UnsupportedReportVersion, match="不支持报告 IR 9.0"):
+        migrate_report({"schema_version": "9.0", "blocks": []})
 
 
 @pytest.mark.parametrize(

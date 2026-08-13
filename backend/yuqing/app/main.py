@@ -1,16 +1,19 @@
 import asyncio
+import hashlib
 import json
 import os
+import secrets
 import time
 from collections.abc import AsyncIterable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Protocol
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from yuqing.agents.loader import load_definitions
@@ -29,13 +32,26 @@ from yuqing.core.search.providers import (
     ZhipuSearchProvider,
 )
 from yuqing.render.html import render_html
+from yuqing.render.ir_migrations import (
+    CURRENT_SCHEMA_VERSION,
+    UnsupportedReportVersion,
+    migrate_report,
+)
 from yuqing.services.configuration import ConfigService
+from yuqing.services.governance import ReportRetentionService
+from yuqing.services.historical_data import HistoricalDataService
+from yuqing.services.hotlist import DailyHotCollector
 from yuqing.services.moderation import OpenAIModerator
 from yuqing.services.openai_verifier import OpenAIEvidenceVerifier
 from yuqing.services.public_interest import (
     PolicyChecker,
     PublicInterestDecision,
     assess_public_interest,
+)
+from yuqing.services.report_delivery import (
+    ChromiumPdfExporter,
+    EvidencePackageBuilder,
+    PdfExporter,
 )
 from yuqing.services.v1_orchestrator import V1Orchestrator
 from yuqing.storage.db import Database
@@ -52,6 +68,18 @@ class Orchestrator(Protocol):
 
 
 OrchestratorFactory = Callable[[Database, EventBus], Orchestrator]
+KNOWN_AGENT_TOOLS = {
+    "web_search",
+    "fetch_page",
+    "evidence_write",
+    "evidence_search",
+    "claim_write",
+    "forum_post",
+    "forum_read",
+    "hotlist_query",
+    "dataset_query",
+    "read_skill",
+}
 
 
 def error_response(
@@ -72,19 +100,9 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
     definitions_dir = Path(__file__).parents[1] / "agents" / "definitions"
     skills_dir = Path(__file__).parents[1] / "agents" / "skills"
 
-    known_tools = {
-        "web_search",
-        "fetch_page",
-        "evidence_write",
-        "evidence_search",
-        "claim_write",
-        "forum_post",
-        "forum_read",
-        "read_skill",
-    }
     definitions, errors = load_definitions(
         definitions_dir,
-        known_tools=known_tools,
+        known_tools=KNOWN_AGENT_TOOLS,
         skills_directory=skills_dir,
     )
     fetcher = BuiltinFetchProvider()
@@ -183,9 +201,28 @@ def create_app(
     runtime_dir: Path | None = None,
     orchestrator_factory: OrchestratorFactory | None = None,
     policy_checker: PolicyChecker | None = None,
+    pdf_exporter: PdfExporter | None = None,
+    demo_mode: bool | None = None,
 ) -> FastAPI:
     data_dir = Path(runtime_dir or os.getenv("YUQING_DATA_DIR", Path.cwd() / "data")).resolve()
     factory = orchestrator_factory or _build_default_orchestrator(data_dir)
+    is_demo = (
+        demo_mode
+        if demo_mode is not None
+        else os.getenv("YUQING_DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    demo_daily_limit = max(1, int(os.getenv("YUQING_DEMO_DAILY_LIMIT", "3")))
+    demo_concurrency_limit = max(1, int(os.getenv("YUQING_DEMO_CONCURRENCY_LIMIT", "1")))
+    hotlist_urls = [
+        item.strip() for item in os.getenv("YUQING_HOTLIST_URLS", "").split(",") if item.strip()
+    ]
+    hotlist_platforms = [
+        item.strip()
+        for item in os.getenv("YUQING_HOTLIST_PLATFORMS", "weibo,zhihu,douyin,toutiao").split(",")
+        if item.strip()
+    ]
+    hotlist_interval = max(0, int(os.getenv("YUQING_HOTLIST_INTERVAL_SECONDS", "0")))
+    demo_ttl_hours = max(1, int(os.getenv("YUQING_DEMO_REPORT_TTL_HOURS", "24")))
     if policy_checker is None:
         if orchestrator_factory is None:
             policy_checker = assess_public_interest
@@ -211,7 +248,57 @@ def create_app(
         app.state.events = EventBus(database)
         app.state.orphaned = orphaned
         app.state.jobs = set()
+        app.state.pdf_exporter = pdf_exporter or ChromiumPdfExporter()
+        app.state.delivery = EvidencePackageBuilder(database, SnapshotStore(data_dir / "snapshots"))
+        app.state.demo_mode = is_demo
+        app.state.demo_slots = asyncio.Semaphore(demo_concurrency_limit) if is_demo else None
+        app.state.service_jobs = []
+        app.state.hotlist_scheduler = {
+            "configured": bool(hotlist_urls and hotlist_interval),
+            "last_run": None,
+            "last_result": None,
+        }
+        collector = None
+        if is_demo:
+            retention = ReportRetentionService(database, data_dir, demo_ttl_hours)
+            await retention.cleanup_expired()
+
+            async def cleanup_forever() -> None:
+                while True:
+                    await asyncio.sleep(3600)
+                    await retention.cleanup_expired()
+
+            app.state.service_jobs.append(asyncio.create_task(cleanup_forever()))
+        if hotlist_urls and hotlist_interval:
+            collector = DailyHotCollector(HistoricalDataService(database), hotlist_urls)
+
+            async def collect_forever() -> None:
+                while True:
+                    app.state.hotlist_scheduler["last_run"] = (
+                        datetime.now().astimezone().isoformat(timespec="seconds")
+                    )
+                    try:
+                        result = await collector.collect(hotlist_platforms)
+                        app.state.hotlist_scheduler["last_result"] = {
+                            "inserted": result.inserted,
+                            "platforms": result.platforms,
+                        }
+                    except Exception as error:
+                        app.state.hotlist_scheduler["last_result"] = {
+                            "inserted": 0,
+                            "platforms": {},
+                            "error": type(error).__name__,
+                        }
+                    await asyncio.sleep(hotlist_interval)
+
+            app.state.service_jobs.append(asyncio.create_task(collect_forever()))
         yield
+        for service_job in app.state.service_jobs:
+            service_job.cancel()
+        if app.state.service_jobs:
+            await asyncio.gather(*app.state.service_jobs, return_exceptions=True)
+        if collector is not None:
+            await collector.aclose()
         jobs = list(app.state.jobs)
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
@@ -222,7 +309,34 @@ def create_app(
             await close_resources()
         await database.close()
 
-    app = FastAPI(title="舆情专报 Agent", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="舆情专报 Agent", version="0.2.0", lifespan=lifespan)
+    demo_cookie_name = "yuqing_demo_session"
+
+    def demo_owner_hash(request: Request) -> str | None:
+        value = request.cookies.get(demo_cookie_name)
+        return hashlib.sha256(value.encode()).hexdigest() if value else None
+
+    @app.middleware("http")
+    async def demo_report_privacy(request: Request, call_next):
+        if not is_demo:
+            return await call_next(request)
+        path = request.url.path
+        task_id = None
+        if path.startswith("/api/tasks/"):
+            task_id = path.split("/", 4)[3]
+        elif path.startswith("/api/reports/"):
+            report_id = path.split("/", 4)[3]
+            row = await request.app.state.database.fetch_one(
+                "SELECT task_id FROM report WHERE id=?", (report_id,)
+            )
+            task_id = row["task_id"] if row else None
+        if task_id:
+            owner_hash = demo_owner_hash(request)
+            if not owner_hash or not await request.app.state.database.demo_task_owned_by(
+                task_id, owner_hash
+            ):
+                return error_response("RESOURCE_NOT_FOUND", "资源不存在。", 404)
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -243,6 +357,12 @@ def create_app(
         if isinstance(exc.detail, dict) and "error" in exc.detail:
             return JSONResponse(exc.detail, status_code=exc.status_code, headers=exc.headers)
         return error_response("HTTP_ERROR", str(exc.detail), exc.status_code)
+
+    @app.exception_handler(UnsupportedReportVersion)
+    async def unsupported_report_version(
+        _request: Request, exc: UnsupportedReportVersion
+    ) -> JSONResponse:
+        return error_response("REPORT_IR_UNSUPPORTED", str(exc), 409, recoverable=True)
 
     def services(request: Request) -> tuple[Database, EventBus]:
         return request.app.state.database, request.app.state.events
@@ -267,6 +387,9 @@ def create_app(
     async def run_safely(request: Request, task_id: str, *, resume: bool = False) -> None:
         database, events = services(request)
         orchestrator: Orchestrator | None = None
+        demo_slot = request.app.state.demo_slots
+        if demo_slot is not None:
+            await demo_slot.acquire()
         try:
             orchestrator = factory(database, events)
             if resume:
@@ -288,6 +411,8 @@ def create_app(
                 close = getattr(orchestrator, "aclose", None)
                 if close is not None:
                     await close()
+            if demo_slot is not None:
+                demo_slot.release()
 
     @app.get("/api/health")
     async def health(request: Request) -> dict[str, Any]:
@@ -324,22 +449,13 @@ def create_app(
         )
         definitions, definition_errors = load_definitions(
             Path(__file__).parents[1] / "agents" / "definitions",
-            known_tools={
-                "web_search",
-                "fetch_page",
-                "evidence_write",
-                "evidence_search",
-                "claim_write",
-                "forum_post",
-                "forum_read",
-                "read_skill",
-            },
+            known_tools=KNOWN_AGENT_TOOLS,
             skills_directory=Path(__file__).parents[1] / "agents" / "skills",
         )
         return {
             "status": "ok" if configured else "degraded",
-            "version": "0.1.0",
-            "ir_schema_versions": ["0.1"],
+            "version": "0.2.0",
+            "ir_schema_versions": ["0.1", CURRENT_SCHEMA_VERSION],
             "db": {
                 "ok": True,
                 "path": str(database.path),
@@ -368,6 +484,8 @@ def create_app(
 
     @app.put("/api/config")
     async def update_config(payload: dict[str, Any], request: Request):
+        if is_demo:
+            return error_response("DEMO_READ_ONLY", "演示站禁止修改配置。", 403)
         if os.getenv("YUQING_DEMO_MODE", "").lower() in {"1", "true", "yes"}:
             return error_response("CONFIG_WRITE_DISABLED", "演示模式下配置写入已关闭。", 403)
         database, _ = services(request)
@@ -378,6 +496,8 @@ def create_app(
 
     @app.post("/api/config/test")
     async def test_config(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        if is_demo:
+            return error_response("DEMO_READ_ONLY", "演示站禁止测试或读取运行密钥。", 403)
         database, _ = services(request)
         environ = await ConfigService(database).resolved_environ()
         started = time.perf_counter()
@@ -458,8 +578,24 @@ def create_app(
     @app.post("/api/tasks", status_code=202)
     async def create_task(
         payload: TaskCreate, request: Request, background: BackgroundTasks
-    ) -> dict[str, Any]:
+    ) -> Any:
         database, _ = services(request)
+        demo_session = request.cookies.get(demo_cookie_name)
+        if is_demo:
+            demo_session = demo_session or secrets.token_urlsafe(32)
+            if payload.depth == "deep":
+                return error_response("DEMO_DEPTH_LIMIT", "演示站不开放深入模式。", 422)
+            running = await database.fetch_one(
+                "SELECT COUNT(*) AS total FROM task WHERE status IN ('queued','running','pausing','stopping')"
+            )
+            if running and int(running["total"]) >= demo_concurrency_limit:
+                return error_response(
+                    "DEMO_CONCURRENCY_LIMIT",
+                    f"演示站同时最多运行 {demo_concurrency_limit} 个任务。",
+                    429,
+                    recoverable=True,
+                )
+            client_key = hashlib.sha256(demo_session.encode()).hexdigest()[:16]
         try:
             decision = await policy_checker(database, payload.event_query, payload.user_note)
         except Exception as exc:
@@ -476,14 +612,44 @@ def create_app(
                 422,
                 details={"category": decision.category},
             )
+        if is_demo:
+            allowed = await database.consume_quota(
+                f"demo:{client_key}",
+                datetime.now().astimezone().date().isoformat(),
+                demo_daily_limit,
+            )
+            if not allowed:
+                return error_response(
+                    "DEMO_DAILY_LIMIT",
+                    f"演示站每个浏览器会话每日最多创建 {demo_daily_limit} 个任务。",
+                    429,
+                    recoverable=True,
+                )
         task = await database.create_task(payload)
+        if is_demo:
+            assert demo_session is not None
+            await database.bind_demo_owner(
+                task.id, hashlib.sha256(demo_session.encode()).hexdigest()
+            )
         background.add_task(run_safely, request, task.id)
-        return {
+        body = {
             "task_id": task.id,
             "status": task.status,
             "events_url": f"/api/tasks/{task.id}/events",
             "created_at": task.created_at,
         }
+        if not is_demo:
+            return body
+        response = JSONResponse(body, status_code=202)
+        response.set_cookie(
+            demo_cookie_name,
+            demo_session,
+            httponly=True,
+            samesite="strict",
+            secure=os.getenv("YUQING_DEMO_COOKIE_SECURE", "false").lower() == "true",
+            max_age=demo_ttl_hours * 3600,
+        )
+        return response
 
     @app.get("/api/tasks")
     async def list_tasks(
@@ -491,6 +657,13 @@ def create_app(
     ) -> dict[str, Any]:
         database, _ = services(request)
         tasks = await database.list_tasks(limit)
+        if is_demo:
+            owner_hash = demo_owner_hash(request)
+            tasks = [
+                task
+                for task in tasks
+                if owner_hash and await database.demo_task_owned_by(task.id, owner_hash)
+            ]
         items = []
         for task in tasks:
             report = await database.get_report_for_task(task.id)
@@ -730,7 +903,9 @@ def create_app(
         report = await database.get_report_for_task(task_id)
         if report is None:
             return error_response("REPORT_NOT_READY", "报告尚未生成。", 409, recoverable=True)
-        return json.loads(report["ir_json"])
+        if await database.report_under_review(report["id"]):
+            return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
+        return migrate_report(json.loads(report["ir_json"]))
 
     @app.get("/api/reports/{report_id}/html", response_class=HTMLResponse)
     async def read_report_html(
@@ -745,7 +920,9 @@ def create_app(
         )
         if report is None:
             return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
-        rendered = render_html(json.loads(report["ir_json"]), view=view)
+        if await database.report_under_review(report_id):
+            return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
+        rendered = render_html(migrate_report(json.loads(report["ir_json"])), view=view)
         headers = (
             {"Content-Disposition": f'attachment; filename="yuqing-{report_id}.html"'}
             if download
@@ -753,8 +930,84 @@ def create_app(
         )
         return HTMLResponse(rendered, headers=headers)
 
+    @app.get("/api/reports/{report_id}/pdf", response_class=FileResponse)
+    async def read_report_pdf(report_id: str, request: Request):
+        database, _ = services(request)
+        report = await database.fetch_one(
+            "SELECT pdf_path,ir_json FROM report WHERE id=?", (report_id,)
+        )
+        if report is None:
+            return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
+        if await database.report_under_review(report_id):
+            return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
+        target = data_dir / "reports" / f"{report_id}.pdf"
+        target_exists = await asyncio.to_thread(target.is_file)
+        if not target_exists:
+            try:
+                html = render_html(migrate_report(json.loads(report["ir_json"])), view="full")
+                await request.app.state.pdf_exporter.export(html, target)
+                await database.set_report_pdf(report_id, str(target))
+            except Exception as exc:
+                return error_response(
+                    "PDF_EXPORT_UNAVAILABLE",
+                    f"PDF 导出不可用：{exc}",
+                    503,
+                    recoverable=True,
+                )
+        return FileResponse(
+            target,
+            media_type="application/pdf",
+            filename=f"yuqing-{report_id}.pdf",
+        )
+
+    @app.get("/api/reports/{report_id}/evidence-package")
+    async def read_evidence_package(report_id: str, request: Request):
+        database, _ = services(request)
+        if await database.report_under_review(report_id):
+            return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
+        try:
+            payload = await request.app.state.delivery.build(report_id)
+        except ValueError:
+            return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
+        return Response(
+            payload,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="yuqing-{report_id}-evidence.zip"'
+            },
+        )
+
+    @app.post("/api/reports/{report_id}/takedown", status_code=202)
+    async def request_report_takedown(
+        report_id: str,
+        request: Request,
+        reason: Annotated[str, Query(min_length=3, max_length=500)],
+    ):
+        database, _ = services(request)
+        report = await database.fetch_one("SELECT id FROM report WHERE id=?", (report_id,))
+        if report is None:
+            return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
+        await database.request_takedown(report_id, reason.strip())
+        return {"report_id": report_id, "status": "pending", "visibility": "hidden"}
+
+    @app.get("/api/data/status")
+    async def read_data_status(request: Request) -> dict[str, Any]:
+        database, _ = services(request)
+        status = await database.data_status()
+        return {
+            "demo_mode": is_demo,
+            "assets": status.get("assets", 0),
+            "historical_events": status.get("historical_events", 0),
+            "hot_snapshots": status.get("hot_snapshots", 0),
+            "hot_coverage": {"from": status.get("hot_from"), "to": status.get("hot_to")},
+            "scheduler": request.app.state.hotlist_scheduler,
+            "report_ttl_hours": demo_ttl_hours if is_demo else None,
+        }
+
     @app.get("/api/evidence/{evidence_pk}/snapshot", response_class=HTMLResponse)
     async def read_snapshot(evidence_pk: str, request: Request):
+        if is_demo:
+            return error_response("SNAPSHOT_FORBIDDEN", "演示站不开放部署机快照。", 403)
         database, _ = services(request)
         row = await database.evidence_by_pk(evidence_pk)
         if row is None:

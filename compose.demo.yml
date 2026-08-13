@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      YUQING_DATA_DIR: /app/data
+      YUQING_DEMO_MODE: "true"
+    volumes:
+      - yuqing-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; body=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); sys.exit(0 if body.get('status') == 'ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+
+volumes:
+  yuqing-data:

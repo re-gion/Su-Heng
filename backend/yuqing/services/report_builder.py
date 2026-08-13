@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 from yuqing.render.html import render_html
+from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
 from yuqing.render.validator import validate_report
 from yuqing.storage.db import Database
 
@@ -179,8 +180,8 @@ class BriefReportBuilder:
                 }
             )
         report = {
-            "schema_version": "0.1",
-            "min_reader_minor": 1,
+            "schema_version": CURRENT_SCHEMA_VERSION,
+            "min_reader_minor": CURRENT_READER_MINOR,
             "report_id": report_id,
             "task": {
                 "task_id": task.id,

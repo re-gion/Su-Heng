@@ -3,6 +3,7 @@ import {
   createTask,
   deleteTask,
   getConfig,
+  getDataStatus,
   listTasks,
   pauseTask,
   resumeTask,
@@ -10,16 +11,18 @@ import {
   testConfig,
   updateConfig,
   type PublicConfig,
+  type DataStatus,
   type TaskListItem,
 } from './api/client'
 import { useTaskStream } from './events/useTaskStream'
 import './styles.css'
 import './form.css'
+import './data-depth.css'
 
 const agents = [
   ['fact_investigator', '事实调查', '核对事件本身与官方材料'],
   ['media_propagation', '媒体传播', '梳理采编主体与报道口径'],
-  ['history_insight', '历史洞察', '按时间过滤回溯相似事件'],
+  ['history_insight', '历史洞察', '本地历史库优先，搜索回溯补充'],
 ] as const
 
 const phaseLabels: Record<string, string> = {
@@ -91,8 +94,10 @@ function App() {
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
   const [tasks, setTasks] = useState<TaskListItem[]>([])
+  const [dataStatus, setDataStatus] = useState<DataStatus | null>(null)
   const stream = useTaskStream(taskId, streamRevision)
   useEffect(() => { void listTasks().then(setTasks).catch(() => setTasks([])) }, [taskId, stream.status])
+  useEffect(() => { void getDataStatus().then(setDataStatus).catch(() => setDataStatus(null)) }, [])
 
   function selectTask(id: string) { history.replaceState(null, '', `?task=${encodeURIComponent(id)}`); setTaskId(id); setStreamRevision((value) => value + 1) }
   function clearTask() { history.replaceState(null, '', location.pathname); setTaskId(null); setStreamRevision((value) => value + 1) }
@@ -107,7 +112,7 @@ function App() {
   const budgetPercent = stream.budget.tokensLimit ? Math.min(100, stream.budget.tokensUsed / stream.budget.tokensLimit * 100) : 0
 
   return <>
-    <header className="masthead"><div className="brand-line"><span className="case-token">YX / V1</span><span>公开材料协作核验台</span><button className="text-button" onClick={() => setScreen('settings')}>配置中枢 ↗</button></div>
+    <header className="masthead"><div className="brand-line"><span className="case-token">YX / V1.5</span><span>公开材料协作核验台</span><button className="text-button" disabled={dataStatus?.demo_mode} onClick={() => setScreen('settings')}>{dataStatus?.demo_mode ? '演示站只读' : '配置中枢 ↗'}</button></div>
       <div className="hero-copy"><div><p className="hero-kicker">THREE DESKS · ONE EVIDENCE LEDGER</p><h1>三路调查，<br /><em>一条证据链</em></h1></div><p className="hero-note">事实、传播与历史三路并行。主持人只在真实缺口上追问，最终结论仍回到可点击证据。</p></div>
     </header>
     <main>
@@ -116,6 +121,8 @@ function App() {
         <select value={depth} onChange={(event) => setDepth(event.target.value)} aria-label="调查深度"><option value="quick">快速</option><option value="standard">标准</option><option value="deep">深入</option></select>
         <button disabled={submitting || !query.trim()}>{submitting ? '正在建立协作任务…' : '启动三路调查'}</button>
       </form>{formError && <p className="error">{formError}</p>}</section>
+
+      {dataStatus && <section className="data-depth"><div><span className="section-kicker">DATA / 数据纵深</span><h2>本地辅助层</h2><p>只对已覆盖事件优先命中；没有命中时，历史 Agent 会如实回退搜索。</p></div><dl><div><dt>数据资产</dt><dd>{dataStatus.assets}</dd></div><div><dt>历史事件</dt><dd>{dataStatus.historical_events}</dd></div><div><dt>热榜采集点</dt><dd>{dataStatus.hot_snapshots}</dd></div><div><dt>覆盖截止</dt><dd>{dataStatus.hot_coverage.to?.slice(0, 16) ?? '尚未采集'}</dd></div></dl></section>}
 
       {tasks.length > 0 && <section className="task-shelf"><span className="section-kicker">历史 / 任务台账</span><div className="task-list">{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.event_query}</strong><small>{item.status} · {item.task_id}</small></button><div className="task-actions">{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); setTasks(await listTasks()) })}>删除</button>}</div></article>)}</div></section>}
 
@@ -130,7 +137,7 @@ function App() {
 
         <section className="evidence-ledger"><article><span className="section-kicker">06 / 证据台账</span><h2>{stream.evidence.length} 条公开材料</h2>{stream.evidence.map((item) => <div className="evidence-row" key={item.id}><span className="mono">{item.id}</span><div><strong>{item.title}</strong><small>{item.source} · L{item.tier}</small></div></div>)}</article><article><span className="section-kicker">07 / 降级与判定</span><h2>系统没有藏起来的限制</h2>{stream.degradations.map((item, index) => <p className="degradation" key={`${index}-${item}`}>{item}</p>)}{stream.decisions.map((item, index) => <p className="decision" key={`${index}-${item}`}>{item}</p>)}{stream.errors.map((item, index) => <p className="error" key={`${index}-${item}`}>{item}</p>)}</article></section>
       </>}
-    </main><footer>仅处理公开材料 · 图表只从证据库计算 · 不做舆情走向预测 · V1 参赛 MVP</footer>
+    </main><footer>仅处理公开材料 · 本地库只作辅助检索 · 图表只用实计数据 · 不做舆情走向预测 · V1.5 数据纵深</footer>
   </>
 }
 

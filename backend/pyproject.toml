@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "yuqing-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "可核验的舆情专报 Agent"
 requires-python = ">=3.11"
 dependencies = [
@@ -34,6 +34,10 @@ dev = [
 [project.scripts]
 yuqing-llm-ping = "yuqing.scripts.llm_ping:run"
 yuqing-search-probe = "yuqing.scripts.search_probe:run"
+yuqing-import-dataset = "yuqing.scripts.import_dataset:run"
+yuqing-collect-hotlist = "yuqing.scripts.collect_hotlist:run"
+yuqing-migrate-reports = "yuqing.scripts.migrate_reports:run"
+yuqing-import-weibo-hot-history = "yuqing.scripts.import_weibo_hot_history:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["yuqing"]

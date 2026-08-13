@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from yuqing.render.html import render_html
 from yuqing.render.validator import validate_report
 from yuqing.services.forum import ForumMessage
+from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
 from yuqing.services.report_builder import BriefReportBuilder, EntailmentVerifier
 from yuqing.storage.db import Database
 
@@ -28,11 +29,13 @@ class FullReportBuilder:
         reports_dir: Path,
         entailment_verifier: EntailmentVerifier | None = None,
         reporter: ReportSectionAgent | None = None,
+        historical_data: HistoricalDataService | None = None,
     ):
         self.database = database
         self.reports_dir = Path(reports_dir)
         self.brief = BriefReportBuilder(database, reports_dir, entailment_verifier)
         self.reporter = reporter
+        self.historical_data = historical_data or HistoricalDataService(database)
 
     async def build(
         self,
@@ -153,7 +156,12 @@ class FullReportBuilder:
                 },
             ],
         }
-        propagation = self._propagation_blocks(evidence, by_type["limitations"])
+        hot_points = await self.historical_data.hotlist_query(
+            task.event_query,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        propagation = self._propagation_blocks(evidence, by_type["limitations"], hot_points)
         summaries = [message for message in forum if message.type == "summary"]
         viewpoint = {
             "block_id": "b_05_viewpoints",
@@ -174,23 +182,39 @@ class FullReportBuilder:
             else None,
         }
         history_messages = [message for message in summaries if message.agent == "history_insight"]
+        local_history = await self.historical_data.task_matches(task_id)
+        local_cards = [
+            {
+                "event_name": item.event_name,
+                "event_time": item.event_time_start,
+                "summary": item.summary,
+                "outcome": item.dimensions["最终结局"],
+                "comparison": f"相似点：{('、'.join(sorted(item.matched_terms)) or '结构化维度相近')}。关键差异：事件主体与发生时间不同，不能据此预测本事件走向。",
+                "dimensions": item.dimensions,
+                "provenance": item.provenance,
+                "evidence_refs": [item.evidence_id],
+            }
+            for item in local_history
+        ]
+        search_cards = [
+            {
+                "event_name": "搜索回溯发现",
+                "comparison": message.content,
+                "provenance": "搜索回溯",
+                "evidence_refs": [ref for ref in message.refs if ref.startswith("E")],
+            }
+            for message in history_messages
+            if any(ref.startswith("E") for ref in message.refs)
+        ]
         history = {
             "block_id": "b_06_history",
             "type": "history_compare",
             "section": "06",
             "in_brief": False,
             "title": "历史对照",
-            "cards": [
-                {
-                    "event_name": "搜索回溯发现",
-                    "comparison": message.content,
-                    "evidence_refs": [ref for ref in message.refs if ref.startswith("E")],
-                }
-                for message in history_messages
-                if any(ref.startswith("E") for ref in message.refs)
-            ],
+            "cards": local_cards or search_cards,
             "fallback_text": "本轮未取得带来源的可靠历史对照，不以相似案例推演未来。"
-            if not history_messages
+            if not (local_cards or search_cards)
             else None,
         }
         recommendation_refs = [item.local_id for item in evidence[:3]]
@@ -282,8 +306,19 @@ class FullReportBuilder:
 
     @staticmethod
     def _propagation_blocks(
-        evidence: Sequence[Any], limitations: dict[str, Any]
+        evidence: Sequence[Any],
+        limitations: dict[str, Any],
+        hot_points: Sequence[HotSnapshotPoint] = (),
     ) -> list[dict[str, Any]]:
+        numeric_hot_points = [item for item in hot_points if item.heat_value is not None]
+        if hot_points and not numeric_hot_points:
+            limitations["items"].append(
+                {
+                    "id": "L15",
+                    "category": "热榜热度",
+                    "text": "热榜命中记录缺少可比较的数值热度，未绘制热度曲线。",
+                }
+            )
         if len(evidence) < 3:
             limitations["items"].append(
                 {
@@ -292,7 +327,7 @@ class FullReportBuilder:
                     "text": f"仅有 {len(evidence)} 条证据，传播图表已降级为文字，避免把小样本画成趋势。",
                 }
             )
-            return [
+            blocks = [
                 {
                     "block_id": "b_04_propagation_fallback",
                     "type": "text",
@@ -303,6 +338,9 @@ class FullReportBuilder:
                     "limitation_ref": "L04",
                 }
             ]
+            if numeric_hot_points:
+                blocks.append(FullReportBuilder._hot_chart(numeric_hot_points))
+            return blocks
 
         def count(field: str, fallback: str) -> list[dict[str, Any]]:
             values = Counter(str(getattr(item, field, None) or fallback) for item in evidence)
@@ -312,7 +350,7 @@ class FullReportBuilder:
             (item.published_at or "日期未知")[:10] if item.published_at else "日期未知"
             for item in evidence
         )
-        return [
+        blocks = [
             {
                 "block_id": "b_04_time_chart",
                 "type": "chart",
@@ -344,3 +382,27 @@ class FullReportBuilder:
                 "items": count("publisher_entity", "unknown"),
             },
         ]
+        if numeric_hot_points:
+            blocks.append(FullReportBuilder._hot_chart(numeric_hot_points))
+        return blocks
+
+    @staticmethod
+    def _hot_chart(hot_points: Sequence[HotSnapshotPoint]) -> dict[str, Any]:
+        return {
+            "block_id": "b_04_hot_chart",
+            "type": "chart",
+            "section": "04",
+            "in_brief": False,
+            "title": "真实热榜热度曲线",
+            "data_basis": "hot_snapshot_database",
+            "chart_kind": "line",
+            "items": [
+                {
+                    "label": f"{item.captured_at[:16]} · {item.platform}",
+                    "value": item.heat_value,
+                    "rank": item.rank,
+                    "title": item.title,
+                }
+                for item in hot_points
+            ],
+        }

@@ -1,9 +1,15 @@
+import json
+import zipfile
+from functools import partial
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from yuqing.app.main import create_app
 from yuqing.services.public_interest import PublicInterestDecision
+from yuqing.storage.models import EvidenceCreate
+from yuqing.storage.snapshots import SnapshotStore
 
 
 class ImmediateOrchestrator:
@@ -36,6 +42,28 @@ class ClosingOrchestrator(ImmediateOrchestrator):
 
     async def aclose(self):
         type(self).closed = True
+
+
+class FixturePdfExporter:
+    def __init__(self):
+        self.html = ""
+
+    async def export(self, html: str, target: Path) -> Path:
+        self.html = html
+        await __import__("asyncio").to_thread(
+            target.write_bytes, b"%PDF-1.4\nfixture PDF with citations\n%%EOF"
+        )
+        return target
+
+
+def test_health_loads_v15_history_tools_without_definition_warnings(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=ImmediateOrchestrator)
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["version"] == "0.2.0"
+    assert response.json()["agent_definitions"]["warnings"] == []
 
 
 def test_create_list_detail_and_replay_done_task_without_duplicate_terminal_event(
@@ -215,6 +243,101 @@ def test_background_job_closes_per_task_resources(runtime_dir: Path):
     assert ClosingOrchestrator.closed is True
 
 
+def test_pdf_and_evidence_package_exports_preserve_report_and_sanitized_citations(
+    runtime_dir: Path,
+):
+    pdf = FixturePdfExporter()
+    app = create_app(
+        runtime_dir=runtime_dir,
+        orchestrator_factory=IdleOrchestrator,
+        pdf_exporter=pdf,
+    )
+    with TestClient(app) as client:
+        task_id = client.post("/api/tasks", json={"event_query": "交付导出"}).json()["task_id"]
+        snapshot_store = SnapshotStore(runtime_dir / "snapshots")
+        evidence = client.portal.call(
+            client.app.state.database.add_evidence,
+            EvidenceCreate(
+                task_id=task_id,
+                url="https://example.com/source",
+                title="公开来源",
+                snippet="公开关键句",
+                source_name="示例来源",
+                source_tier=3,
+            ),
+        )
+        snapshot_path, digest = snapshot_store.save(
+            task_id, evidence.pk, "<script>alert(1)</script><p>公开关键句</p>"
+        )
+        client.portal.call(
+            partial(
+                client.app.state.database.update_evidence_fetched,
+                task_id,
+                evidence.local_id,
+                content_text="公开关键句",
+                snapshot_path=snapshot_path,
+                content_sha256=digest,
+            )
+        )
+        ir = {
+            "schema_version": "0.2",
+            "min_reader_minor": 2,
+            "report_id": "r_delivery",
+            "task": {"task_id": task_id, "event_query": "交付导出"},
+            "metrics": {},
+            "blocks": [
+                {
+                    "block_id": "h",
+                    "type": "report_header",
+                    "section": "00",
+                    "event_title": "交付导出",
+                    "in_brief": True,
+                },
+                {
+                    "block_id": "e",
+                    "type": "evidence_appendix",
+                    "section": "09",
+                    "items": [
+                        {
+                            "evidence_ref": evidence.local_id,
+                            "title": "公开来源",
+                            "url": "https://example.com/source",
+                            "fetch_status": "fetched",
+                            "snapshot_pk": evidence.pk,
+                            "content_sha256": digest,
+                            "citations": [],
+                        }
+                    ],
+                    "in_brief": False,
+                },
+            ],
+        }
+        client.portal.call(
+            client.app.state.database.save_report,
+            task_id,
+            "r_delivery",
+            ir,
+            str(runtime_dir / "reports" / "r_delivery.html"),
+            {},
+        )
+
+        pdf_response = client.get("/api/reports/r_delivery/pdf")
+        package_response = client.get("/api/reports/r_delivery/evidence-package")
+
+    assert pdf_response.status_code == 200
+    assert pdf_response.headers["content-type"] == "application/pdf"
+    assert "E001" in pdf.html and "公开来源" in pdf.html
+    with zipfile.ZipFile(BytesIO(package_response.content)) as archive:
+        assert set(archive.namelist()) == {"report.html", "manifest.json", "snapshots/E001.html"}
+        manifest = json.loads(archive.read("manifest.json"))
+        report_html = archive.read("report.html").decode()
+        snapshot_html = archive.read("snapshots/E001.html").decode()
+    assert manifest["evidence"][0]["content_sha256"] == digest
+    assert 'href="snapshots/E001.html"' in report_html
+    assert "公开关键句" in snapshot_html
+    assert "<script" not in snapshot_html
+
+
 def test_resume_claim_is_single_flight(runtime_dir: Path):
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
     with TestClient(app) as client:
@@ -254,3 +377,112 @@ def test_pause_stop_and_delete_follow_task_state_contract(runtime_dir: Path):
     assert stopped.status_code == 202 and stopped.json()["will_generate_report"] is True
     assert deleted.status_code == 200
     assert deleted.json()["deleted"]["events"] >= 2
+
+
+def test_demo_mode_is_read_only_rate_limited_and_takedown_hides_report(runtime_dir: Path):
+    app = create_app(
+        runtime_dir=runtime_dir,
+        orchestrator_factory=ImmediateOrchestrator,
+        demo_mode=True,
+    )
+    with TestClient(app) as client:
+        readonly = client.put("/api/config", json={"search": {"provider_order": []}})
+        ids = [
+            client.post("/api/tasks", json={"event_query": f"演示事件 {index}"})
+            for index in range(4)
+        ]
+        task_id = ids[0].json()["task_id"]
+        ir = {
+            "schema_version": "0.2",
+            "min_reader_minor": 2,
+            "report_id": "r_takedown",
+            "task": {"task_id": task_id, "event_query": "演示事件"},
+            "metrics": {},
+            "blocks": [],
+        }
+        client.portal.call(
+            client.app.state.database.save_report,
+            task_id,
+            "r_takedown",
+            ir,
+            str(runtime_dir / "reports" / "r_takedown.html"),
+            {},
+        )
+        takedown = client.post(
+            "/api/reports/r_takedown/takedown", params={"reason": "来源方申请复核删除"}
+        )
+        hidden = client.get("/api/reports/r_takedown/html")
+        data_status = client.get("/api/data/status")
+
+    assert readonly.status_code == 403
+    assert readonly.json()["error"]["code"] == "DEMO_READ_ONLY"
+    assert [item.status_code for item in ids] == [202, 202, 202, 429]
+    assert takedown.status_code == 202
+    assert hidden.status_code == 451
+    assert hidden.json()["error"]["code"] == "REPORT_UNDER_REVIEW"
+    assert data_status.json()["demo_mode"] is True
+    assert data_status.json()["historical_events"] == 0
+
+
+def test_demo_mode_limits_concurrent_tasks(runtime_dir: Path):
+    app = create_app(
+        runtime_dir=runtime_dir,
+        orchestrator_factory=IdleOrchestrator,
+        demo_mode=True,
+    )
+    with TestClient(app) as client:
+        first = client.post("/api/tasks", json={"event_query": "并发演示事件一"})
+        second = client.post("/api/tasks", json={"event_query": "并发演示事件二"})
+
+    assert first.status_code == 202
+    assert second.status_code == 429
+    assert second.json()["error"]["code"] == "DEMO_CONCURRENCY_LIMIT"
+
+
+def test_demo_resources_are_private_to_browser_session(runtime_dir: Path):
+    app = create_app(
+        runtime_dir=runtime_dir,
+        orchestrator_factory=ImmediateOrchestrator,
+        demo_mode=True,
+    )
+    with TestClient(app) as owner:
+        created = owner.post("/api/tasks", json={"event_query": "会话私有报告"})
+        task_id = created.json()["task_id"]
+        assert owner.get(f"/api/tasks/{task_id}").status_code == 200
+        owner.portal.call(
+            owner.app.state.database.save_report,
+            task_id,
+            "r_private",
+            {"schema_version": "0.2", "report_id": "r_private", "blocks": []},
+            str(runtime_dir / "reports" / "r_private.html"),
+            {},
+        )
+        owner.cookies.clear()
+        detail = owner.get(f"/api/tasks/{task_id}")
+        listing = owner.get("/api/tasks")
+        takedown = owner.post(
+            "/api/reports/r_private/takedown", params={"reason": "陌生会话无权下架"}
+        )
+
+    assert detail.status_code == 404
+    assert detail.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+    assert listing.json()["items"] == []
+    assert takedown.status_code == 404
+
+
+def test_unknown_report_ir_returns_explicit_compatibility_error(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
+    with TestClient(app) as client:
+        task_id = client.post("/api/tasks", json={"event_query": "未知 IR"}).json()["task_id"]
+        client.portal.call(
+            client.app.state.database.save_report,
+            task_id,
+            "r_unknown_ir",
+            {"schema_version": "9.0", "report_id": "r_unknown_ir", "blocks": []},
+            str(runtime_dir / "reports" / "r_unknown_ir.html"),
+            {},
+        )
+        response = client.get(f"/api/tasks/{task_id}/report")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "REPORT_IR_UNSUPPORTED"

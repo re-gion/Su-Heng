@@ -1,0 +1,23 @@
+.data-depth {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) 1.3fr;
+  gap: 26px;
+  margin-top: 24px;
+  padding: 22px;
+  color: #eaf2f3;
+  background: #102937;
+  border-left: 8px solid var(--teal);
+}
+
+.data-depth h2 { margin: 7px 0; }
+.data-depth p { margin: 0; color: #b9cbd2; line-height: 1.6; }
+.data-depth dl { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; margin: 0; background: #52717f; }
+.data-depth dl div { padding: 14px; background: #173847; }
+.data-depth dt { color: #9fc3c8; font-size: 11px; }
+.data-depth dd { margin: 6px 0 0; font: 700 22px/1.2 Bahnschrift, Consolas, sans-serif; }
+.text-button:disabled { color: #8da1ab; background: transparent; }
+
+@media (max-width: 880px) {
+  .data-depth { grid-template-columns: 1fr; }
+  .data-depth dl { grid-template-columns: 1fr 1fr; }
+}

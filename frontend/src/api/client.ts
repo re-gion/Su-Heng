@@ -15,6 +15,22 @@ export type TaskListItem = {
   report_id: string | null
 }
 
+export type DataStatus = {
+  demo_mode: boolean
+  assets: number
+  historical_events: number
+  hot_snapshots: number
+  hot_coverage: { from: string | null; to: string | null }
+  scheduler: { configured: boolean; last_run: string | null; last_result: unknown }
+  report_ttl_hours: number | null
+}
+
+export async function getDataStatus(): Promise<DataStatus> {
+  const response = await fetch('/api/data/status')
+  if (!response.ok) throw new Error('无法读取本地数据层状态')
+  return response.json() as Promise<DataStatus>
+}
+
 export async function createTask(eventQuery: string, depth = 'standard', userNote = '', timeFrom = '', timeTo = ''): Promise<CreatedTask> {
   const response = await fetch('/api/tasks', {
     method: 'POST',
