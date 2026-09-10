@@ -23,7 +23,7 @@ from yuqing.core.comments import adapter_for_url
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.builtin import BuiltinFetchProvider
 from yuqing.core.llm.factory import LLMClientFactory
-from yuqing.core.llm.gateway import LLMGateway
+from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message
 from yuqing.core.search.chain import SearchChain
 from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 from yuqing.core.search.providers import (
@@ -474,7 +474,11 @@ def create_app(
             await events.emit(
                 task_id,
                 "error",
-                {"code": "INTERNAL_ERROR", "message": str(exc), "recoverable": True},
+                {
+                    "code": "INTERNAL_ERROR",
+                    "message": sanitize_upstream_message(exc),
+                    "recoverable": True,
+                },
             )
             await events.emit_task_status(task_id, status="failed", phase="finished", progress=100)
         finally:

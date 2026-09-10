@@ -7,6 +7,7 @@ from pathlib import Path
 from yuqing.agents.runtime import InvestigationAgent, SearchQuery
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
+from yuqing.core.llm.gateway import sanitize_upstream_message
 from yuqing.core.search.base import SearchParams, SearchProvider
 from yuqing.services.comment_plugin import (
     CommentCandidateInput,
@@ -591,9 +592,7 @@ class V1Orchestrator:
                     )
                     continue
                 results.append({"agent": name, "status": "failed"})
-                text = (
-                    f"{name} 运行失败（{type(exc).__name__}: {str(exc)[:180]}），其余 Agent 继续。"
-                )
+                text = f"{name} 运行失败（{sanitize_upstream_message(exc)}），其余 Agent 继续。"
                 self._limitations.append(text)
                 await self.events.emit(
                     task_id,

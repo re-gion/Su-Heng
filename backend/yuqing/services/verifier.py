@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
+from yuqing.core.llm.gateway import sanitize_upstream_message
 from yuqing.services.verification import EntityEvidence, decide_badge, merge_stances
 from yuqing.storage.db import Database
 from yuqing.storage.models import ClaimRecord, EvidenceRecord
@@ -57,7 +58,7 @@ class ClaimVerifierService:
                     claim.pk,
                     evidence.pk,
                     relation="not_mentioned",
-                    reason=f"核验失败：{exc}",
+                    reason=f"核验失败：{sanitize_upstream_message(exc)}",
                     cited_sentence="",
                     cited_verified=False,
                 )

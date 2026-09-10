@@ -2,8 +2,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from httpx import Request, Response
+from openai import InternalServerError
 
-from yuqing.core.llm.gateway import LLMGateway
+from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message
 
 
 class FlakyCompletions:
@@ -19,6 +21,34 @@ class FlakyCompletions:
         )
 
 
+class Gateway504Completions:
+    """前 N-1 次返回带 HTML 错误页的 504，最后一次成功，模拟上游网关抖动。"""
+
+    def __init__(self, failures: int = 2):
+        self.failures = failures
+        self.calls = 0
+
+    async def create(self, **_kwargs):
+        self.calls += 1
+        if self.calls <= self.failures:
+            response = Response(
+                504,
+                request=Request("POST", "https://relay.example/v1/chat/completions"),
+                text="<html><head><title>504 Gateway Time-out</title></head></html>",
+            )
+            raise InternalServerError(
+                f"Error code: 504 - {response.text}", response=response, body=response.text
+            )
+        return SimpleNamespace(
+            usage=SimpleNamespace(total_tokens=3),
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"reply":"OK"}'), finish_reason="stop"
+                )
+            ],
+        )
+
+
 class StaticCompletions:
     def __init__(self, content: str):
         self.content = content
@@ -27,6 +57,41 @@ class StaticCompletions:
         return SimpleNamespace(
             usage=SimpleNamespace(total_tokens=3),
             choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))],
+        )
+
+
+class TruncatedThenOkCompletions:
+    """前 N-1 次响应模拟推理模型把预算耗尽（finish=length），最后一次返回完整 JSON。"""
+
+    def __init__(self, min_calls: int = 2):
+        self.min_calls = min_calls
+        self.calls: list[int] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs["max_tokens"])
+        if len(self.calls) < self.min_calls:
+            content = ""
+            finish = "length"
+        else:
+            content = '{"reply":"OK"}'
+            finish = "stop"
+        return SimpleNamespace(
+            usage=SimpleNamespace(total_tokens=3),
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish)
+            ],
+        )
+
+
+class AlwaysTruncatedCompletions:
+    def __init__(self):
+        self.calls: list[int] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs["max_tokens"])
+        return SimpleNamespace(
+            usage=SimpleNamespace(total_tokens=3),
+            choices=[SimpleNamespace(message=SimpleNamespace(content=""), finish_reason="length")],
         )
 
 
@@ -90,3 +155,75 @@ async def test_token_budget_rejects_call_before_external_request():
         await gateway.complete_json("analyst_a", "system", "user", max_tokens=100)
 
     assert factory.completions.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_length_truncation_grows_max_tokens_and_retries_once():
+    factory = FakeFactory()
+    factory.client.chat.completions = TruncatedThenOkCompletions()
+    gateway = LLMGateway(factory)
+
+    result = await gateway.complete_json("analyst_a", "system", "user", max_tokens=300)
+
+    assert result == {"reply": "OK"}
+    assert factory.client.chat.completions.calls == [300, 1200]
+    assert gateway.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_length_retry_is_capped_at_8192_tokens():
+    factory = FakeFactory()
+    factory.client.chat.completions = AlwaysTruncatedCompletions()
+    gateway = LLMGateway(factory)
+
+    result = await gateway.complete_json("analyst_a", "system", "user", max_tokens=6000)
+
+    assert factory.client.chat.completions.calls == [6000, 8192]
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_tiny_budget_grows_through_multiple_steps():
+    factory = FakeFactory()
+    factory.client.chat.completions = TruncatedThenOkCompletions(min_calls=3)
+    gateway = LLMGateway(factory)
+
+    result = await gateway.complete_json("analyst_a", "system", "user", max_tokens=32)
+
+    assert result == {"reply": "OK"}
+    assert factory.client.chat.completions.calls == [32, 128, 512]
+    assert gateway.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_upstream_504_is_retried_and_survives_transient_gateway_errors():
+    factory = FakeFactory()
+    factory.client.chat.completions = Gateway504Completions(failures=2)
+    gateway = LLMGateway(factory)
+
+    result = await gateway.complete_json("analyst_a", "system", "user")
+
+    assert result == {"reply": "OK"}
+    assert factory.client.chat.completions.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_upstream_504_exhausting_retries_raises_sanitized_error():
+    factory = FakeFactory()
+    factory.client.chat.completions = Gateway504Completions(failures=99)
+    gateway = LLMGateway(factory)
+
+    with pytest.raises(InternalServerError) as exc_info:
+        await gateway.complete_json("analyst_a", "system", "user")
+
+    message = sanitize_upstream_message(exc_info.value)
+    assert "504" in message
+    assert "<html" not in message.lower()
+
+
+def test_sanitize_keeps_non_upstream_exception_detail():
+    class AppBug(RuntimeError):
+        pass
+
+    exc = AppBug("claim 预算状态错乱：pk=3")
+    assert sanitize_upstream_message(exc) == "AppBug: claim 预算状态错乱：pk=3"
