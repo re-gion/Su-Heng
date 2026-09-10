@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -43,29 +44,45 @@ class ChromiumPdfExporter:
                 return str(candidate)
         raise RuntimeError("未找到 Chromium/Edge；请设置 YUQING_PDF_BROWSER")
 
+    async def _export_with_playwright(self, browser: str, html: str, target: Path) -> None:
+        from playwright.async_api import async_playwright
+
+        async with asyncio.timeout(90), async_playwright() as playwright:
+            instance = await playwright.chromium.launch(
+                executable_path=browser,
+                headless=True,
+            )
+            try:
+                page = await instance.new_page()
+                await page.set_content(html, wait_until="load")
+                await page.emulate_media(media="print")
+                await page.pdf(
+                    path=str(target),
+                    format="A4",
+                    print_background=True,
+                    prefer_css_page_size=True,
+                )
+            finally:
+                await instance.close()
+
+    def _export_in_worker(self, browser: str, html: str, target: Path) -> None:
+        if sys.platform == "win32" and hasattr(asyncio, "ProactorEventLoop"):
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._export_with_playwright(browser, html, target))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
     async def export(self, html: str, target: Path) -> Path:
         browser = await asyncio.to_thread(self._resolve_browser)
         await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         try:
-            from playwright.async_api import async_playwright
-
-            async with asyncio.timeout(90), async_playwright() as playwright:
-                instance = await playwright.chromium.launch(
-                    executable_path=browser,
-                    headless=True,
-                )
-                try:
-                    page = await instance.new_page()
-                    await page.set_content(html, wait_until="load")
-                    await page.emulate_media(media="print")
-                    await page.pdf(
-                        path=str(target),
-                        format="A4",
-                        print_background=True,
-                        prefer_css_page_size=True,
-                    )
-                finally:
-                    await instance.close()
+            await asyncio.to_thread(self._export_in_worker, browser, html, target)
             if not await asyncio.to_thread(target.is_file):
                 raise RuntimeError("浏览器未生成 PDF 文件")
             return target
@@ -73,10 +90,13 @@ class ChromiumPdfExporter:
             raise RuntimeError("浏览器 PDF 导出超时") from error
         except ImportError as error:
             raise RuntimeError("Playwright 未安装，无法导出 PDF") from error
+        except NotImplementedError as error:
+            raise RuntimeError("当前事件循环不支持浏览器子进程，无法导出 PDF") from error
         except RuntimeError:
             raise
         except Exception as error:
-            raise RuntimeError(f"浏览器 PDF 导出失败：{str(error)[-500:]}") from error
+            detail = str(error).strip() or type(error).__name__
+            raise RuntimeError(f"浏览器 PDF 导出失败：{detail[-500:]}") from error
 
 
 class EvidencePackageBuilder:

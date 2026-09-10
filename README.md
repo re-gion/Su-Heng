@@ -1,82 +1,134 @@
-# 舆情专报 Agent（V2 国际信源与评论深挖）
+# 舆情专报 Agent
 
-V2 在 V1.5 数据纵深之上加入中英文国际信源闭环，以及默认关闭、逐帖确认的登录态评论插件。外文原文始终是核验依据；评论只作为确认帖子的脱敏样本，不外推为整体民意。
+> 版本 0.3.0 · 公开预览版 · Apache-2.0
 
-## 十分钟启动（Windows PowerShell）
+舆情专报 Agent 是一套可自部署的公开信息研究工具。输入事件名称和关注范围后，系统会组织多路调查、保存证据、逐条核验关键陈述，并生成能够回到来源核查的 HTML 专报。
 
-要求 Python 3.11+、Node.js 20+。无需 MySQL、Docker 或浏览器服务。
+项目面向研究者、媒体与传播从业者、学生，以及需要核验公开信息的个人用户。它强调证据可追溯和结论边界，不替代记者、研究人员或事实核查人员的专业判断。
+
+## 为什么使用它
+
+- **结论可回查**：重要陈述绑定证据，报告中的引用可以回到原文链接或清洗后的本地快照。
+- **核验过程可见**：关键陈述按“已证实、待核验、争议、已证伪”标记，并展示来源与核验依据。
+- **调查过程可恢复**：分析事件通过 SSE 实时呈现；任务可以暂停、续跑，或提前停止并基于已有材料生成报告。
+- **模型与搜索服务可替换**：七个 LLM 角色支持 OpenAI-compatible 接口；搜索支持 LangSearch、智谱、百度千帆、Tavily 和 Serper，并按顺序降级。
+- **报告可带走**：输出速览版和完整版 HTML，也可导出 PDF 与包含清洗证据快照的 ZIP 证据包。
+- **数据边界明确**：默认只处理公开材料；图表只统计本次证据库，不用搜索结果数冒充真实声量。
+
+## 工作流程
+
+```mermaid
+flowchart LR
+    A[输入事件与调查范围] --> B[公共性门禁]
+    B --> C[事实调查]
+    B --> D[媒体传播分析]
+    B --> E[历史事件对照]
+    C --> F[证据库与论坛黑板]
+    D --> F
+    E --> F
+    F --> G[主持人检查缺口]
+    G --> H[逐条核验关键陈述]
+    H --> I[报告 IR + 确定性渲染]
+    I --> J[HTML / PDF / 证据包]
+```
+
+快速模式只运行事实调查；标准和深入模式会启用三路调查。系统先保存证据，再允许陈述引用证据；报告 Agent 负责组织表达，徽章、正文、引用卡片等权威字段由程序从数据库回填。
+
+## 适用范围
+
+适合：
+
+- 围绕公共事件整理时间线、关键事实和争议点；
+- 比较中文与英文公开信源；
+- 为研究、采编或课程项目制作带来源的初步专报；
+- 在本地保留报告、结构化证据和已清洗快照。
+
+不适合：
+
+- 针对可识别普通个人、未成年人或私人指控开展调查；
+- 代替商业舆情平台进行全网实时监控或总体民意测量；
+- 在无人复核的情况下作出事实裁决、风险决策或公开指控；
+- 预测舆情走势，或输出没有可靠样本基础的情感百分比。
+
+## 快速开始
+
+运行一次完整任务至少需要：
+
+- 一组 OpenAI-compatible 模型配置；
+- 一个搜索 Provider 的 API Key；
+- Docker，或 Python 3.11+ 与 Node.js 20+。
+
+### Docker 演示模式
+
+这是体验核心流程最短的路径：
 
 ```powershell
 Copy-Item .env.example .env
-# 编辑 .env：至少填写 DEFAULT_API_KEY 与一个搜索 Key（推荐 LANGSEARCH_API_KEY）
+# 编辑 .env，至少填写 DEFAULT_API_KEY 和一个搜索 API Key
+docker compose -f compose.demo.yml up --build -d
+```
+
+打开 <http://127.0.0.1:8080>。
+
+演示模式按浏览器会话限制任务数量和并发，禁止在线修改密钥，定期清理报告，并强制关闭登录态评论插件。停止服务：
+
+```powershell
+docker compose -f compose.demo.yml down
+```
+
+### 本地运行（Windows PowerShell）
+
+本地模式支持设置页配置、任务历史和实验性评论插件：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，至少填写 DEFAULT_API_KEY 和一个搜索 API Key
 
 cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 
-cd ..\frontend
-npm install
+cd frontend
+npm ci
 npm run build
 
-cd ..\backend
-.\.venv\Scripts\python.exe -m uvicorn yuqing.app.main:app --host 127.0.0.1 --port 8000
-```
-
-打开 `http://127.0.0.1:8000`。开发前端可在 `frontend` 运行 `npm run dev`，`/api` 会代理到 8000 端口。
-
-## 怎么使用
-
-1. 输入事件名称，可补充时间范围和特别关注点，选择快速 / 标准 / 深入档。快速档只启用事实调查 Agent；标准与深入档启用三路调查。
-2. 观察三个调查席、论坛原始发言、主持人缺口评审、证据台账与预算条。
-3. 分析完成后打开 HTML 专报，在速览 / 完整版之间切换，按徽章筛选并点击引用回看证据卡。
-4. 任务异常中断后，从历史任务点“续跑”；运行中可暂停，或“停止并出报告”。
-5. 右上角进入配置中枢，配置七个 LLM 角色和搜索降级链，并逐项测试连接。
-6. 报告页可直接下载 PDF 和证据包；ZIP 内包含报告、manifest 与去脚本后的证据快照，链接可离线回看。
-
-## 导入历史数据与采集热榜
-
-通用导入器支持 JSON、JSONL、CSV，仅保留事件名、时间、摘要、结局、性质、五维标签、来源链接等白名单字段，并记录数据资产来源和权利说明：
-
-```powershell
 cd backend
-.\.venv\Scripts\yuqing-import-dataset.exe --file .\events.jsonl `
-  --slug public-events --name "公开舆情事件集" `
-  --source-url "https://example.org/dataset" --license-label "CC-BY-4.0" `
-  --rights-note "已核对再分发条件" --redistribution allowed
+.\.venv\Scripts\python.exe -m uvicorn yuqing.app.main:app `
+  --host 127.0.0.1 --port 8000 --reload
+
+cd frontend
+npm run dev
 ```
 
-微博热搜历史仓库可按日期一键导入。该仓库代码采用 MIT，但热榜内容的再利用权利仍需部署者自行核对，因此命令要求显式确认：
+打开 <http://127.0.0.1:8000>。Linux 或 macOS 可使用同样的目录顺序，并将虚拟环境解释器路径替换为 `.venv/bin/python`。
 
-```powershell
-cd backend
-.\.venv\Scripts\yuqing-import-weibo-hot-history.exe `
-  --from 2024-05-20 --to 2024-05-22 --acknowledge-upstream-rights
+开发前端时，在 `frontend/` 运行 `npm run dev`，访问 <http://127.0.0.1:5173>；Vite 会把 `/api` 代理到 8000 端口。
+
+## 第一次使用
+
+1. 打开配置中枢，检查模型角色与搜索 Provider；连接测试只有返回有效语义结果才算成功。
+2. 输入公共事件名称，可补充时间范围、信源范围、语言和关注点。
+3. 选择快速、标准或深入模式。模型与搜索调用会产生费用，建议先用快速模式熟悉流程。
+4. 在调查席、论坛、证据台账和预算条中观察进度。任务中断后可从历史记录续跑。
+5. 分析完成后查看速览版或完整版报告，并按核验状态筛选关键陈述。
+6. 需要归档或复核时，下载 PDF 和证据包。
+
+## 配置
+
+复制 [`.env.example`](.env.example) 后，通常只需填写以下两类配置：
+
+```dotenv
+DEFAULT_API_KEY=your-model-key
+DEFAULT_BASE_URL=https://api.example.com/v1
+DEFAULT_MODEL=your-model
+
+LANGSEARCH_API_KEY=your-search-key
+SEARCH_PROVIDER_ORDER=langsearch,zhipu,qianfan,tavily,serper
 ```
 
-配置 `YUQING_HOTLIST_URLS` 后，应用会定时采集 DailyHotApi 兼容源；也可单次执行 `yuqing-collect-hotlist`。只有数据库实际覆盖到目标事件时，报告才画热度曲线，不用搜索结果数冒充热度。
+七个模型角色分别是 `ANALYST_A`、`ANALYST_B`、`ANALYST_C`、`MODERATOR`、`VERIFIER`、`REPORTER` 和 `UTILITY`。某个角色需要独立模型时，使用 `LLM_<ROLE>_API_KEY`、`LLM_<ROLE>_BASE_URL`、`LLM_<ROLE>_MODEL` 覆盖默认值。
 
-## 演示部署
-
-```powershell
-Copy-Item .env.example .env
-# 填写模型与搜索 Key
-docker compose -f compose.demo.yml up --build -d
-```
-
-打开 `http://127.0.0.1:8080`。演示模式默认禁用在线改 Key，按 HttpOnly 浏览器会话限制每日任务数和同时运行数，任务、报告及下架操作同样按会话隔离，并按 TTL 清理。公网部署仍应在 Caddy 前增加 HTTPS、正式身份认证、受控出口和运维监控。
-
-## 配置规则
-
-- `DEFAULT_API_KEY / BASE_URL / MODEL`：七个角色的默认三元组。
-- `LLM_<ROLE>_*`：按字段覆盖；角色为 `ANALYST_A/B/C`、`MODERATOR`、`VERIFIER`、`REPORTER`、`UTILITY`。
-- `SEARCH_PROVIDER_ORDER`：搜索顺序；支持 LangSearch、智谱、百度千帆、Tavily、Serper。未配置 Key 的项自动跳过，失败会熔断并降级。
-- `YUQING_HOTLIST_URLS / PLATFORMS / INTERVAL_SECONDS`：热榜数据源、平台名和采集周期。
-- `YUQING_DEMO_*`：演示站只读、并发/每日额度、会话 Cookie 与报告 TTL；启用 HTTPS 时设置 `YUQING_DEMO_COOKIE_SECURE=true`，生产内网使用时保持 `YUQING_DEMO_MODE=false`。
-- `YUQING_PDF_BROWSER`：可选的 Edge/Chromium 可执行文件；Windows 会自动发现 Edge，镜像已内置 Chromium。
-- `YUQING_COMMENT_PLUGIN_ENABLED=true`：仅在本机启用智能选帖与登录态评论采集；Docker/Demo 强制关闭。
-- `YUQING_COMMENT_BROWSER`：可选的 Chrome/Edge 路径；登录态只保存在 `data/browser-profiles/`。
-- 设置页写入本地 SQLite，优先级高于 `.env`，不会反写 `.env`；所有密钥只返回脱敏值。
-- 只使用一组默认模型也能完成任务，但报告会如实标记模型同源造成的核验独立性限制。
+设置页写入本地 SQLite，优先级高于 `.env`，不会反写 `.env`；API 返回密钥时只提供脱敏值。完整变量、搜索服务和数据源说明见 [搜索与数据源配置指南](docs/方案包/04-搜索与数据源配置指南.md)。
 
 连接诊断：
 
@@ -87,9 +139,63 @@ cd backend
 .\.venv\Scripts\python.exe -m yuqing.scripts.search_probe "测试事件" --fetch-first
 ```
 
-语义探针必须返回 `reply=OK` 才算 LLM 可用；仅 HTTP 成功不算。搜索探针还会验证内网 URL 被 SSRF 防线拒绝。
+LLM 探针必须得到 `reply=OK`；只有 HTTP 请求成功并不代表模型语义可用。
 
-## 质量与验证
+## 可选数据能力
+
+系统默认通过公开网页检索完成调查，也可以导入有明确来源与使用权说明的历史数据：
+
+```powershell
+cd backend
+.\.venv\Scripts\yuqing-import-dataset.exe --file .\events.jsonl `
+  --slug public-events --name "公开舆情事件集" `
+  --source-url "https://example.org/dataset" --license-label "CC-BY-4.0" `
+  --rights-note "已核对再分发条件" --redistribution allowed
+```
+
+通用导入器支持 JSON、JSONL 和 CSV。配置 `YUQING_HOTLIST_URLS` 后，系统也可以定时采集 DailyHotApi 兼容源。只有本地数据实际覆盖目标事件时，报告才会使用相应的历史或热度信息。
+
+### 实验性评论插件
+
+本地模式可以显式开启 `YUQING_COMMENT_PLUGIN_ENABLED=true`，并为微博、哔哩哔哩、知乎、小红书、抖音、快手和百度贴吧保存独立浏览器登录态。该插件：
+
+- 默认关闭，且在 Docker 与 Demo 模式中不可用；
+- 只允许本机同源访问；
+- 要求用户确认候选帖子后才采集评论；
+- 只把评论作为已确认帖子的脱敏样本，不外推为平台或整体民意。
+
+不同平台会调整页面结构和登录限制，发布前的自动测试不能替代真实账号逐平台验收。使用方法与风险边界见 [评论插件与国际信源使用指南](docs/V2-评论插件与国际信源使用指南.md)。
+
+## 数据、安全与可信边界
+
+- 系统生成的是带证据的研究草稿，不是事实裁决。真实事件仍需人工抽查来源、上下文和时效。
+- 核验状态描述当前证据对陈述的支持关系，不代表来源永远正确，也不代表后续不会出现新证据。
+- 报告中的数量和图表只反映本次证据库，不能解释为全网绝对声量或总体民意。
+- 外文原文是核验依据；机器译文只帮助阅读。中文和英文具备完整检索流程，其他语言按可用信源尽力处理。
+- 网页正文、评论和导入材料一律视为不受信数据，不能作为系统指令。内置抓取会拒绝本机和内网目标；公网生产环境仍应使用受控出口代理进一步降低 DNS rebinding 等风险。
+- 公网部署需要 HTTPS、正式身份认证、访问控制、限流、监控和备份。`compose.demo.yml` 是受限演示配置，不是生产安全基线。
+- 历史数据、热榜内容和评论的采集与再分发责任由部署者承担；请核对平台条款、数据许可、个人信息和所在地法律要求。
+
+## 项目状态
+
+当前版本为 **0.3.0 公开预览版**。
+
+核心本地流程已实现，包括多 Agent 调查、证据与陈述存储、论坛协作、交叉核验、任务控制、报告 IR 校验与渲染、PDF 与证据包导出。评论插件属于实验性能力；真实登录、页面变动与账号风控需要部署者逐平台验证。公网生产部署也需要在演示配置之外自行完成安全加固。
+
+## 文档导航
+
+| 文档 | 适合读者 | 内容 |
+| --- | --- | --- |
+| [产品 SPEC](docs/方案包/01-产品SPEC.md) | 产品、研究与设计人员 | 产品目标、用户旅程、报告规格和合规边界 |
+| [系统架构设计](docs/方案包/02-系统架构设计.md) | 开发者 | 分层、Agent 编排、事件协议、存储和故障恢复 |
+| [核心契约](docs/方案包/05-核心契约.md) | 开发者与测试人员 | Agent、报告 IR、API 和核验规则 |
+| [搜索与数据源配置指南](docs/方案包/04-搜索与数据源配置指南.md) | 部署者 | 模型、搜索服务、热榜和历史数据配置 |
+| [评论插件与国际信源使用指南](docs/V2-评论插件与国际信源使用指南.md) | 本地高级用户 | 登录态评论采集、多语言与风险说明 |
+| [实施路线图](docs/方案包/03-实施路线图.md) | 维护者 | 开发阶段、历史决策和后续工作 |
+
+方案包形成于开发规划阶段，其中部分版本叙事和候选方案具有历史性质。判断当前已实现行为时，以代码、数据库约束和自动化测试为准；发现文档与实现不一致时，请提交 Issue。
+
+## 开发与验证
 
 ```powershell
 cd backend
@@ -104,19 +210,14 @@ npm run typecheck
 npm run build
 ```
 
-离线回归覆盖存储条件不变量、SSE 无缺无重、论坛恢复、三 Agent 故障隔离、主持人结构降级、搜索链熔断、任务控制、核验决策表、历史数据溯源、热榜去重、IR 迁移、PDF/证据包和演示治理。
+更具体的仓库结构、改动规则和验证要求见 [`AGENTS.md`](AGENTS.md)。
 
-## 诚实边界
+## 反馈与贡献
 
-- V2 默认仍只处理公开材料；评论插件必须主动开启并逐帖确认，不做舆情走向预测，不输出无来源的情感百分比。
-- 中英文支持完整检索与外部模型核验；其他语种为 best-effort。外文证据保留原文，机器译文只用于阅读。
-- 创建任务前会由 `utility` 角色执行公共性门禁；针对可识别普通个人或未成年人的私人指控会拒绝创建任务。
-- 报告图表只统计本次证据库，不代表全网绝对声量；样本不足会降级为文字并进入局限性声明。
-- 本地历史库只是辅助证据，未命中时仍以公开网页检索为主；导入者必须自行确认数据许可、个人信息和再分发边界。
-- HTML 自包含且离线可打开；PDF 与 HTML 共用同一份报告 IR，证据包仅收录已清洗快照，不包含密钥和数据库。
-- 真实事件的事实准确性仍需人工抽检；自动测试能保证引用闭包和合同，不能替代采编判断。
-- 原文抓取已阻断直接解析到内网/本机的 URL；DNS rebinding 的校验-连接绑定仍需在生产部署用受控 egress 抓取代理进一步加固。
+请通过本仓库的 Issue 提交缺陷、功能建议和一般问题。提交前请移除 API Key、登录 Cookie、个人信息、原始数据库和未脱敏评论。
 
-详细产品、架构与契约见 [方案包](docs/方案包/README.md)。
+安全漏洞不宜在公开 Issue 中披露。项目正式托管后仍需补充 `SECURITY.md` 与私密报告渠道；在该渠道建立前，请不要公开可被直接利用的细节。
 
-评论登录、多语言与风险边界见 [V2 使用指南](docs/V2-评论插件与国际信源使用指南.md)。
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE)。第三方数据、网页内容和用户导入材料不因本项目许可证而自动获得 Apache-2.0 授权，其使用仍受各自来源条款约束。

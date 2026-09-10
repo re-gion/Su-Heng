@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import threading
 import uuid
 from collections.abc import Callable
 from datetime import datetime
@@ -108,8 +109,7 @@ class PlaywrightCommentCollector:
 
     def __init__(self, profile_dir: Path):
         self.profile_dir = Path(profile_dir)
-        self._playwright: Any | None = None
-        self._contexts: dict[str, Any] = {}
+        self._sessions: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _browser_path() -> str | None:
@@ -123,55 +123,125 @@ class PlaywrightCommentCollector:
         )
         return next((item for item in candidates if item and Path(item).is_file()), None)
 
-    async def _context(self, platform: str):
-        if platform in self._contexts:
-            return self._contexts[platform]
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError as exc:
-            raise RuntimeError("Playwright 未安装；请重新安装 V2 后端依赖") from exc
-        if self._playwright is None:
-            self._playwright = await async_playwright().start()
-        executable = self._browser_path()
-        if not executable:
-            raise RuntimeError("未找到 Chrome/Edge；可设置 YUQING_COMMENT_BROWSER")
-        target = self.profile_dir / platform
-        await asyncio.to_thread(target.mkdir, parents=True, exist_ok=True)
-        context = await self._playwright.chromium.launch_persistent_context(
-            str(target),
-            executable_path=executable,
-            headless=False,
-            viewport={"width": 1360, "height": 900},
-            locale="zh-CN",
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        self._contexts[platform] = context
-        return context
+    def _ensure_session(self, platform: str) -> dict[str, Any]:
+        session = self._sessions.get(platform)
+        if session is not None:
+            return session
+        ready = threading.Event()
+        session = {"ready": ready}
+        self._sessions[platform] = session
+
+        def worker() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            session["loop"] = loop
+
+            async def bootstrap() -> None:
+                try:
+                    from playwright.async_api import async_playwright
+                except ImportError as exc:  # pragma: no cover - dependency probe
+                    raise RuntimeError("Playwright 未安装；请重新安装 V2 后端依赖") from exc
+                playwright = await async_playwright().start()
+                session["playwright"] = playwright
+                executable = self._browser_path()
+                if not executable:
+                    raise RuntimeError("未找到 Chrome/Edge；可设置 YUQING_COMMENT_BROWSER")
+                target = self.profile_dir / platform
+                await asyncio.to_thread(target.mkdir, parents=True, exist_ok=True)
+                context = await playwright.chromium.launch_persistent_context(
+                    str(target),
+                    executable_path=executable,
+                    headless=False,
+                    viewport={"width": 1360, "height": 900},
+                    locale="zh-CN",
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                session["context"] = context
+
+            try:
+                loop.run_until_complete(bootstrap())
+                session["started"] = True
+                ready.set()
+                loop.run_forever()
+            except Exception as exc:  # pragma: no cover - surfaced to caller
+                session["error"] = exc
+                ready.set()
+            finally:
+                ready.set()
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+                asyncio.set_event_loop(None)
+                loop.close()
+
+        session["thread"] = threading.Thread(target=worker, daemon=True)
+        session["thread"].start()
+        return session
+
+    async def _wait_session(self, platform: str) -> dict[str, Any]:
+        session = self._ensure_session(platform)
+        await asyncio.to_thread(session["ready"].wait)
+        error = session.get("error")
+        if error is not None:
+            self._sessions.pop(platform, None)
+            raise RuntimeError(str(error)) from error
+        return session
+
+    async def _run_on_session(self, platform: str, coro_factory):
+        session = await self._wait_session(platform)
+        loop = session["loop"]
+        future = asyncio.run_coroutine_threadsafe(coro_factory(session["context"]), loop)
+        return await asyncio.wrap_future(future)
 
     async def open_login(self, adapter: SocialPlatformAdapter) -> None:
-        context = await self._context(adapter.platform)
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(adapter.definition.home_url, wait_until="domcontentloaded", timeout=45000)
-        await page.bring_to_front()
+        async def op(context):
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(
+                adapter.definition.home_url, wait_until="domcontentloaded", timeout=45000
+            )
+            await page.bring_to_front()
+
+        await self._run_on_session(adapter.platform, op)
 
     async def close_platform(self, platform: str) -> None:
-        context = self._contexts.pop(platform, None)
-        if context is not None:
-            await context.close()
+        session = self._sessions.pop(platform, None)
+        if session is None:
+            return
+        loop = session.get("loop")
+        context = session.get("context")
+        playwright = session.get("playwright")
+        thread = session.get("thread")
+        if loop is not None and loop.is_running():
+
+            async def shutdown() -> None:
+                if context is not None:
+                    await context.close()
+                if playwright is not None:
+                    await playwright.stop()
+
+            try:
+                await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(shutdown(), loop))
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread.is_alive():
+            await asyncio.to_thread(thread.join, 5)
 
     def is_open(self, platform: str) -> bool:
-        return platform in self._contexts
+        session = self._sessions.get(platform)
+        thread = session.get("thread") if session else None
+        return bool(session and session.get("started") and thread and thread.is_alive())
 
     async def has_login(self, platform: str) -> bool:
-        context = await self._context(platform)
-        return bool(await context.cookies())
+        return bool(await self._run_on_session(platform, lambda context: context.cookies()))
 
     async def aclose(self) -> None:
-        for platform in list(self._contexts):
+        for platform in list(self._sessions):
             await self.close_platform(platform)
-        if self._playwright is not None:
-            await self._playwright.stop()
-            self._playwright = None
 
     @staticmethod
     def merge_comment_batch(
@@ -205,85 +275,87 @@ class PlaywrightCommentCollector:
         stop_requested: Callable[[], bool],
     ) -> CollectedPost:
         adapter = adapter_for_url(candidate.url)
-        context = await self._context(adapter.platform)
-        if not await context.cookies():
-            raise RuntimeError("COMMENT_LOGIN_REQUIRED")
-        page = await context.new_page()
-        payloads: list[Any] = []
 
-        async def capture(response) -> None:
-            content_type = response.headers.get("content-type", "")
-            url = response.url.lower()
-            if "json" not in content_type or not any(
-                token in url for token in ("comment", "reply", "feed", "note")
-            ):
-                return
-            try:
-                payloads.append(await response.json())
-            except Exception:
-                return
-
-        page.on("response", capture)
-        try:
-            await page.goto(candidate.url, wait_until="domcontentloaded", timeout=45000)
-            await page.wait_for_timeout(2000)
-            body = (await page.locator("body").inner_text()).lower()
-            if any(marker in body for marker in ("请先登录", "登录后查看", "扫码登录")):
+        async def op(context):
+            if not await context.cookies():
                 raise RuntimeError("COMMENT_LOGIN_REQUIRED")
-            if any(marker in body for marker in ("验证码", "安全验证", "访问频繁")):
-                raise RuntimeError("COMMENT_RISK_CONTROLLED")
-            comments: list[CollectedComment] = []
-            seen: set[str] = set()
-            roots: dict[str, str] = {}
-            replies_per_root: dict[str, int] = {}
-            for _page_index in range(20):
-                if stop_requested() or len(comments) >= limit:
-                    break
-                await page.mouse.wheel(0, 2200)
-                for label in ("展开更多回复", "查看更多回复", "展开", "更多评论"):
-                    try:
-                        locator = page.get_by_text(label, exact=False)
-                        for index in range(min(await locator.count(), 5)):
-                            await locator.nth(index).click(timeout=500)
-                    except Exception:
-                        continue
-                await page.wait_for_timeout(2000)
-                for payload in payloads:
-                    self.merge_comment_batch(
-                        comments,
-                        adapter.extract_comments(payload, limit=limit),
-                        seen=seen,
-                        roots=roots,
-                        replies_per_root=replies_per_root,
-                        limit=limit,
-                    )
-                payloads.clear()
-                if len(comments) >= limit:
-                    break
-            if not comments:
-                # DOM 仅作降级：使用可见评论文本，生成页面内稳定哈希，不读取作者。
-                for selector in (
-                    "[class*='comment'] [class*='content']",
-                    "[data-e2e*='comment']",
-                    ".CommentItemV2-content",
+            page = await context.new_page()
+            payloads: list[Any] = []
+
+            async def capture(response) -> None:
+                content_type = response.headers.get("content-type", "")
+                url = response.url.lower()
+                if "json" not in content_type or not any(
+                    token in url for token in ("comment", "reply", "feed", "note")
                 ):
-                    locator = page.locator(selector)
-                    for index in range(min(await locator.count(), limit)):
-                        text = (await locator.nth(index).inner_text()).strip()
-                        if len(text) < 2:
-                            continue
-                        native_id = hashlib.sha256(
-                            f"{selector}:{index}:{text}".encode()
-                        ).hexdigest()[:20]
-                        comments.append(CollectedComment(native_id=native_id, text=text[:4000]))
-                    if comments:
+                    return
+                try:
+                    payloads.append(await response.json())
+                except Exception:
+                    return
+
+            page.on("response", capture)
+            try:
+                await page.goto(candidate.url, wait_until="domcontentloaded", timeout=45000)
+                await page.wait_for_timeout(2000)
+                body = (await page.locator("body").inner_text()).lower()
+                if any(marker in body for marker in ("请先登录", "登录后查看", "扫码登录")):
+                    raise RuntimeError("COMMENT_LOGIN_REQUIRED")
+                if any(marker in body for marker in ("验证码", "安全验证", "访问频繁")):
+                    raise RuntimeError("COMMENT_RISK_CONTROLLED")
+                comments: list[CollectedComment] = []
+                seen: set[str] = set()
+                roots: dict[str, str] = {}
+                replies_per_root: dict[str, int] = {}
+                for _page_index in range(20):
+                    if stop_requested() or len(comments) >= limit:
                         break
-            return CollectedPost(
-                comments=comments[:limit],
-                sampling_method="平台默认可见顺序；响应解析优先、DOM 降级；本次未切换排序",
-            )
-        finally:
-            await page.close()
+                    await page.mouse.wheel(0, 2200)
+                    for label in ("展开更多回复", "查看更多回复", "展开", "更多评论"):
+                        try:
+                            locator = page.get_by_text(label, exact=False)
+                            for index in range(min(await locator.count(), 5)):
+                                await locator.nth(index).click(timeout=500)
+                        except Exception:
+                            continue
+                    await page.wait_for_timeout(2000)
+                    for payload in payloads:
+                        self.merge_comment_batch(
+                            comments,
+                            adapter.extract_comments(payload, limit=limit),
+                            seen=seen,
+                            roots=roots,
+                            replies_per_root=replies_per_root,
+                            limit=limit,
+                        )
+                    payloads.clear()
+                    if len(comments) >= limit:
+                        break
+                if not comments:
+                    for selector in (
+                        "[class*='comment'] [class*='content']",
+                        "[data-e2e*='comment']",
+                        ".CommentItemV2-content",
+                    ):
+                        locator = page.locator(selector)
+                        for index in range(min(await locator.count(), limit)):
+                            text = (await locator.nth(index).inner_text()).strip()
+                            if len(text) < 2:
+                                continue
+                            native_id = hashlib.sha256(
+                                f"{selector}:{index}:{text}".encode()
+                            ).hexdigest()[:20]
+                            comments.append(CollectedComment(native_id=native_id, text=text[:4000]))
+                        if comments:
+                            break
+                return CollectedPost(
+                    comments=comments[:limit],
+                    sampling_method="平台默认可见顺序；响应解析优先、DOM 降级；本次未切换排序",
+                )
+            finally:
+                await page.close()
+
+        return await self._run_on_session(adapter.platform, op)
 
 
 def _terms(value: str) -> set[str]:

@@ -6,6 +6,7 @@ from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection
 from yuqing.core.events import EventBus
 from yuqing.core.search.base import SearchResult
 from yuqing.core.search.fixture import FixtureSearchProvider
+from yuqing.services.comment_plugin import CommentPluginService
 from yuqing.services.historical_data import (
     DatasetAssetInput,
     HistoricalDataService,
@@ -68,8 +69,62 @@ class FixtureVerifier:
 
 
 class FailFetcher:
+    def __init__(self):
+        self.calls = 0
+
     async def fetch(self, url):
+        self.calls += 1
         raise RuntimeError("不影响 snippet 核验")
+
+
+class MultiEvidenceAgent(NamedAgent):
+    async def summarize(self, event_query, evidence):
+        return [
+            GeneratedClaim(
+                text=f"{event_query}已有两个独立公开来源报道。",
+                evidence_ids=[item.local_id for item in evidence],
+            )
+        ]
+
+
+class TwoRoundAgent(MultiEvidenceAgent):
+    def __init__(self):
+        super().__init__("fact_investigator")
+        self.summary_calls = 0
+
+    async def plan(self, event_query):
+        return InvestigationPlan(queries=["首轮检索"])
+
+    async def summarize(self, event_query, evidence):
+        self.summary_calls += 1
+        return [
+            GeneratedClaim(
+                text=f"第 {self.summary_calls} 轮新增事实。",
+                evidence_ids=[evidence[0].local_id],
+            )
+        ]
+
+    async def reflect(self, event_query, claims):
+        should_continue = self.summary_calls == 1
+        return Reflection(
+            new_key_findings=[claims[-1].text],
+            remaining_gaps=["仍需第二轮"] if should_continue else [],
+            next_queries=["第二轮补充检索"] if should_continue else [],
+            should_continue=should_continue,
+            reason="继续补证" if should_continue else "达到增益终点",
+        )
+
+
+class MustNotRunVerifier:
+    model_name = "must-not-run"
+
+    async def verify(self, claim, evidence):
+        raise AssertionError("verified 检查点后不应重复核验")
+
+
+class MustNotRunAgent(NamedAgent):
+    async def plan(self, event_query):
+        raise AssertionError("investigated 检查点后不应重复调查")
 
 
 @pytest.mark.asyncio
@@ -118,11 +173,12 @@ async def test_three_agents_isolate_failure_and_still_publish_full_report(runtim
         ]
     )
     history_agent = NamedAgent("history_insight")
+    fetcher = FailFetcher()
     orchestrator = V1Orchestrator(
         database,
         EventBus(database),
         search=search,
-        fetcher=FailFetcher(),
+        fetcher=fetcher,
         snapshots=SnapshotStore(runtime_dir / "snapshots"),
         agents={
             "fact_investigator": NamedAgent("fact_investigator"),
@@ -156,6 +212,7 @@ async def test_three_agents_isolate_failure_and_still_publish_full_report(runtim
     assert "本地历史库命中" in history_agent.plan_inputs[0]
     assert report_row is not None and report is not None
     assert len(__import__("json").loads(report["ir_json"])["blocks"]) >= 10
+    assert fetcher.calls == 1
     await database.close()
 
 
@@ -203,3 +260,205 @@ async def test_quick_depth_runs_only_fact_investigator(runtime_dir):
     ]
     assert skipped == ["media_propagation", "history_insight"]
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_restart_after_investigation_resumes_and_publishes_report(runtime_dir):
+    database = Database(runtime_dir / "restart.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(
+            event_query="重启续跑事件",
+            depth="quick",
+            source_languages=["zh"],
+            comment_mode="smart",
+        )
+    )
+    search = FixtureSearchProvider(
+        [
+            SearchResult(
+                url="https://www.xinhuanet.com/restart",
+                title="媒体甲报道",
+                snippet="媒体甲确认重启续跑事件已有公开报道。",
+                source_name="媒体甲",
+                provider="fixture",
+                published_at=datetime(2026, 8, 12),
+            ),
+            SearchResult(
+                url="https://www.people.com.cn/restart",
+                title="媒体乙报道",
+                snippet="媒体乙确认重启续跑事件已有公开报道。",
+                source_name="媒体乙",
+                provider="fixture",
+                published_at=datetime(2026, 8, 12),
+            ),
+        ]
+    )
+    comment_plugin = CommentPluginService(database, runtime_dir / "plugin", enabled=True)
+    interrupted = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": MultiEvidenceAgent("fact_investigator")},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        comment_plugin=comment_plugin,
+        max_outer_rounds=1,
+        max_inner_rounds=1,
+    )
+
+    await interrupted.run_task(task.id)
+    assert (await database.get_task(task.id)).status == "paused"
+    assert (await database.latest_checkpoint(task.id))["phase"] == "comment_selection"
+    await database.close()
+
+    restarted = Database(runtime_dir / "restart.db")
+    await restarted.initialize()
+    resumed_plugin = CommentPluginService(restarted, runtime_dir / "plugin", enabled=True)
+    assert await resumed_plugin.claim_selection(task.id, [], next_phase="comment_analysis")
+    await restarted.save_checkpoint(
+        task.id,
+        "comments:ready",
+        {"phase": "comments_ready", "completed": 0, "failed": 0},
+    )
+    resumed = V1Orchestrator(
+        restarted,
+        EventBus(restarted),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": MustNotRunAgent("fact_investigator")},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        comment_plugin=resumed_plugin,
+        max_outer_rounds=1,
+        max_inner_rounds=1,
+    )
+
+    await resumed.resume_task(task.id)
+
+    report = await restarted.get_report_for_task(task.id)
+    events = await resumed.events.history(task.id)
+    html = (runtime_dir / "reports" / f"{report['id']}.html").read_text(encoding="utf-8")
+    assert (await restarted.get_task(task.id)).status == "done"
+    assert [event.seq for event in events] == list(range(1, len(events) + 1))
+    assert "已证实" in html
+    assert "原文抓取失败" in html
+    assert 'href="#evidence-E001"' in html
+    await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_agent_reflection_can_drive_a_second_inner_round(runtime_dir):
+    database = Database(runtime_dir / "rounds.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="两轮事件", depth="quick", source_languages=["zh"])
+    )
+    search = FixtureSearchProvider(
+        [
+            SearchResult(
+                url="https://source.example/item",
+                title="固定证据",
+                snippet="用于验证两轮循环。",
+                source_name="固定来源",
+                provider="fixture",
+            )
+        ]
+    )
+    agent = TwoRoundAgent()
+    orchestrator = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": agent},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        max_outer_rounds=1,
+        max_inner_rounds=2,
+    )
+
+    await orchestrator.run_task(task.id)
+
+    decisions = [
+        event.data["decision"]
+        for event in await orchestrator.events.history(task.id)
+        if event.event == "loop.round" and event.data.get("scope") == "inner"
+    ]
+    assert [claim.text for claim in await database.list_claims(task.id)] == [
+        "第 1 轮新增事实。",
+        "第 2 轮新增事实。",
+    ]
+    assert decisions == ["continue", "stop"]
+    assert search.calls == 2
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_resume_from_verified_checkpoint_only_builds_report(runtime_dir):
+    database = Database(runtime_dir / "verified-resume.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="核验后续跑", depth="quick", source_languages=["zh"])
+    )
+    search = FixtureSearchProvider(
+        [
+            SearchResult(
+                url="https://www.xinhuanet.com/verified",
+                title="已核验来源",
+                snippet="核验后续跑已有公开证据。",
+                source_name="新华社",
+                provider="fixture",
+            )
+        ]
+    )
+    blocked_reports = runtime_dir / "blocked-reports"
+    blocked_reports.write_text("阻止首次报告写入", encoding="utf-8")
+    first = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": MultiEvidenceAgent("fact_investigator")},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=blocked_reports,
+        max_outer_rounds=1,
+        max_inner_rounds=1,
+    )
+
+    with pytest.raises(FileExistsError):
+        await first.run_task(task.id)
+    assert (await database.latest_checkpoint(task.id))["phase"] == "verified"
+    await database.close()
+
+    restarted = Database(runtime_dir / "verified-resume.db")
+    await restarted.initialize()
+    assert await restarted.mark_orphaned_tasks() == 1
+    resumed = V1Orchestrator(
+        restarted,
+        EventBus(restarted),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": MustNotRunAgent("fact_investigator")},
+        moderator=ReleaseModerator(),
+        verifier=MustNotRunVerifier(),
+        reports_dir=runtime_dir / "reports",
+        max_outer_rounds=1,
+        max_inner_rounds=1,
+    )
+
+    await resumed.resume_task(task.id)
+
+    assert (await restarted.get_task(task.id)).status == "done"
+    assert await restarted.get_report_for_task(task.id) is not None
+    await restarted.close()

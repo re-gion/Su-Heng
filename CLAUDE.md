@@ -1,5 +1,5 @@
-# CLAUDE.md
-
-本仓库的 agent 配置统一维护在 `AGENTS.md`（Claude Code 与 Codex 共用一份，避免两处漂移）。Claude 专属的补充说明可以直接加在本文件里。
+# Claude Code 项目指引
 
 @AGENTS.md
+
+`AGENTS.md` 是本仓库供编码 Agent 共用的指令源。Claude Code 专属规则只有在无法由其他 Agent 复用时才写入本文件，避免两份工程约束发生漂移。

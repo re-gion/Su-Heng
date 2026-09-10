@@ -517,23 +517,18 @@ async def test_v2_report_keeps_foreign_original_separate_from_machine_translatio
     ).build(task.id)
     appendix = next(block for block in report["blocks"] if block["type"] == "evidence_appendix")
     card = next(item for item in appendix["items"] if item["evidence_ref"] == evidence.local_id)
-    timeline = next(block for block in report["blocks"] if block["type"] == "timeline")
+    timeline = next(block for block in report["blocks"] if block.get("chart_kind") == "timeline")
     html = render_html(report, view="full")
 
-    assert report["schema_version"] == "0.3"
+    assert report["schema_version"] == "0.4"
     assert report["language_coverage"]["complete"] == ["en"]
     assert report["language_coverage"]["missing"] == ["zh"]
     assert card["original_excerpt"] == "CrowdStrike says a fix has been deployed."
     assert card["machine_translation_zh"] == "CrowdStrike 表示已部署修复。"
     assert "机器翻译（中文，仅供阅读，不参与逐字核验）" in html
     assert "CrowdStrike says a fix has been deployed." in html
-    assert timeline["nodes"] == [
-        {
-            "date": "2024-07-19T00:00:00+00:00",
-            "text": "CrowdStrike update",
-            "evidence_refs": [evidence.local_id],
-        }
-    ]
+    assert timeline["items"] == []
+    assert timeline["fallback_text"] == "被引用材料缺少可用发布日期，无法构建可靠的纠偏时间线。"
     assert unrelated.local_id not in str(timeline)
     await database.close()
 

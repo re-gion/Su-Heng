@@ -9,6 +9,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from yuqing.core.llm.factory import LLMClientFactory
 from yuqing.core.llm.roles import LLMRole
+from yuqing.core.text_safety import repair_unicode_scalars
 
 
 class LLMGateway:
@@ -66,7 +67,7 @@ class LLMGateway:
         if response.usage:
             self.tokens_used += response.usage.total_tokens
         content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        return repair_unicode_scalars(json.loads(content))
 
     async def ping(self, role: LLMRole) -> tuple[str, int]:
         before = self.tokens_used

@@ -12,9 +12,18 @@ groups:
     domains:
       - xinhuanet.com
       - people.com.cn
+      - cctv.com
+      - cnr.cn
+      - jcrb.com
       - caixin.com
       - thepaper.cn
       - yicai.com
+  - tier: 3
+    role: independent
+    domains:
+      - jwview.com
+      - dayoo.com
+      - hsw.cn
   - tier: 3
     role: syndicated
     domains:

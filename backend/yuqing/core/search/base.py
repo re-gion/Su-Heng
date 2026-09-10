@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from yuqing.core.text_safety import repair_unicode_scalars
 
 
 class SearchParams(BaseModel):
@@ -26,6 +28,11 @@ class SearchResult(BaseModel):
     provider: str
     lang: str = "zh"
     raw: dict[str, Any] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def repair_provider_unicode(cls, value: Any) -> Any:
+        return repair_unicode_scalars(value)
 
 
 class SearchProvider(Protocol):

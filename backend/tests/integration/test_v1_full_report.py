@@ -87,9 +87,27 @@ async def test_full_report_has_ten_sections_real_charts_and_offline_interactions
     assert report_id
     assert sections == {f"{number:02d}" for number in range(10)}
     assert len(charts) == 3
+    assert {block["chart_kind"] for block in charts} == {"funnel", "matrix", "timeline"}
+    assert {
+        item["label"]
+        for item in next(
+            block for block in report["blocks"] if block.get("block_id") == "b_00_kpi"
+        )["items"]
+    } == {
+        "已证实陈述",
+        "待核验陈述",
+        "已取得原文",
+        "实际引用材料",
+    }
+    assert any(block["type"] == "data_quality" for block in report["blocks"])
     assert 'data-view="brief"' in html
     assert "data-badge-filter" in html
+    assert 'class="report-toc"' in html
+    assert 'aria-current="location"' in html
+    assert ":hover" in html
+    assert ":focus-visible" in html
     assert "IntersectionObserver" in html
+    assert "搜索摘要（非原文）" in html
     assert '<link rel="icon" href="data:,">' in html
     assert "https://cdn." not in html
     assert report["metrics"]["key_claims_candidate"] == 1
@@ -97,13 +115,13 @@ async def test_full_report_has_ten_sections_real_charts_and_offline_interactions
     assert report["metrics"]["evidence_total"] == 3
     assert report["metrics"]["independent_publishers"] == 3
     assert report["metrics"]["time_span_days"] == 2
-    source_chart = next(
-        block for block in report["blocks"] if block.get("block_id") == "b_04_platform_chart"
+    funnel = next(
+        block for block in report["blocks"] if block.get("block_id") == "b_04_evidence_funnel"
     )
-    assert source_chart["title"] == "来源主体分布"
-    assert {item["label"] for item in source_chart["items"]} == {
-        "主管部门",
-        "背景来源",
-        "另一来源",
-    }
+    assert funnel["title"] == "证据获取漏斗"
+    assert funnel["items"][0] == {"label": "去重检索材料", "value": 3}
+    matrix = next(
+        block for block in report["blocks"] if block.get("block_id") == "b_04_verification_matrix"
+    )
+    assert matrix["items"][0]["claim_ref"] == "C001"
     await database.close()

@@ -1,7 +1,11 @@
+import json
+
+import httpx
 import pytest
 
 from yuqing.core.search.base import SearchParams, SearchResult
 from yuqing.core.search.chain import SearchChain, SearchChainExhausted
+from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 
 
 class Provider:
@@ -18,6 +22,87 @@ class Provider:
         if self.error:
             raise self.error
         return self.result
+
+
+class SequenceClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def post(self, *args, **kwargs):
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
+@pytest.mark.asyncio
+async def test_langsearch_limiter_enforces_minute_window(monkeypatch):
+    now = 100.0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr("yuqing.core.search.langsearch.time.monotonic", lambda: now)
+    monkeypatch.setattr("yuqing.core.search.langsearch.asyncio.sleep", fake_sleep)
+    limiter = LangSearchLimiter(0, max_calls_per_minute=2)
+
+    await limiter.acquire()
+    await limiter.acquire()
+    await limiter.acquire()
+
+    assert sleeps == [pytest.approx(60.0)]
+
+
+@pytest.mark.asyncio
+async def test_langsearch_429_honors_retry_after_and_retries(monkeypatch):
+    now = 100.0
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr("yuqing.core.search.langsearch.time.monotonic", lambda: now)
+    monkeypatch.setattr("yuqing.core.search.langsearch.asyncio.sleep", fake_sleep)
+    request = httpx.Request("POST", "https://api.langsearch.com/v1/web-search")
+    client = SequenceClient(
+        [
+            httpx.Response(429, headers={"Retry-After": "2"}, request=request),
+            httpx.Response(
+                200,
+                json={"data": {"webPages": {"value": []}}},
+                request=request,
+            ),
+        ]
+    )
+    provider = LangSearchProvider(
+        "secret",
+        client=client,
+        limiter=LangSearchLimiter(0, max_calls_per_minute=10),
+    )
+
+    assert await provider.search(SearchParams(query="限流恢复")) == []
+    assert client.calls == 2
+    assert sleeps == [pytest.approx(2.0)]
+
+
+def test_search_result_repairs_lone_surrogates_from_provider_payload():
+    result = SearchResult(
+        url="https://example.com/report",
+        title="传播标题\ud83d",
+        snippet="传播摘要\udc00",
+        provider="fixture",
+        raw={"nested": ["保留合法字符😀", "替换非法字符\ud83d"]},
+    )
+
+    assert json.dumps(result.model_dump(), ensure_ascii=False).encode("utf-8")
+    assert result.title == "传播标题�"
+    assert result.snippet == "传播摘要�"
+    assert result.raw == {"nested": ["保留合法字符😀", "替换非法字符�"]}
 
 
 @pytest.mark.asyncio

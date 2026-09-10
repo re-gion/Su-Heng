@@ -4,7 +4,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
-from yuqing.storage.models import ClaimRecord, EvidenceRecord
+from yuqing.storage.models import ClaimRecord, EvidenceRecord, StatementKind
 
 
 class SearchQuery(BaseModel):
@@ -27,7 +27,7 @@ class InvestigationPlan(BaseModel):
 
 class GeneratedClaim(BaseModel):
     text: str = Field(min_length=1)
-    statement_kind: str = "fact"
+    statement_kind: StatementKind = "fact"
     rumor_text: str | None = None
     correction_text: str | None = None
     evidence_ids: list[str] = Field(min_length=1, max_length=4)

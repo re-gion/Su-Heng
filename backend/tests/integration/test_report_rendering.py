@@ -107,6 +107,13 @@ def test_reference_fixture_passes_contract_and_renders_clickable_citations():
     assert f'href="#evidence-{evidence_ref}"' in html
     assert f'id="evidence-{evidence_ref}"' in html
     assert "原文未取得" in html
+    assert 'class="report-toc"' in html
+    assert 'data-section-target="report-section-03"' in html
+    assert "--report-width:1120px" in html
+    assert "grid-template-columns:minmax(0,1fr) minmax(0,var(--report-width))" in html
+    assert "main{grid-column:2;grid-row:1" in html
+    assert "prefers-reduced-motion" in html
+    assert "matchMedia('(max-width:900px)')" in html
 
 
 def test_compatible_new_minor_uses_unknown_block_fallback():
@@ -128,9 +135,31 @@ def test_compatible_new_minor_uses_unknown_block_fallback():
     assert "新版板块的兼容摘要" in html
 
 
+def test_funnel_renders_zero_as_zero_instead_of_blank():
+    report = load_fixture()
+    report["schema_version"] = "0.4"
+    report["min_reader_minor"] = 4
+    report["blocks"].append(
+        {
+            "block_id": "b_funnel_zero",
+            "type": "chart",
+            "section": "04",
+            "in_brief": False,
+            "title": "证据获取漏斗",
+            "chart_kind": "funnel",
+            "data_basis": "evidence_database",
+            "items": [{"label": "已取得原文", "value": 0}],
+        }
+    )
+
+    html = render_html(validate_report(report).report)
+
+    assert "已取得原文</span><strong>0</strong>" in html
+
+
 @pytest.mark.parametrize(
     ("schema_version", "min_reader_minor"),
-    [("0.4", 4), ("1.0", 0)],
+    [("0.5", 5), ("1.0", 0)],
 )
 def test_incompatible_ir_versions_fail_clearly(schema_version, min_reader_minor):
     report = load_fixture()
@@ -159,8 +188,8 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
 
     migrated = migrate_report(report)
 
-    assert migrated["schema_version"] == "0.3"
-    assert migrated["min_reader_minor"] == 3
+    assert migrated["schema_version"] == "0.4"
+    assert migrated["min_reader_minor"] == 4
     card = next(
         card
         for block in migrated["blocks"]
@@ -171,7 +200,19 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
     assert card["comparison"] == "旧版对照内容"
     assert card["evidence_refs"] == ["E001"]
     assert card["provenance"] == "历史报告迁移"
-    assert migrated["migration_history"] == ["0.1->0.2", "0.2->0.3"]
+    assert migrated["migration_history"] == ["0.1->0.2", "0.2->0.3", "0.3->0.4"]
+
+
+def test_v03_report_migrates_to_reader_that_understands_analytical_blocks():
+    report = load_fixture()
+    report["schema_version"] = "0.3"
+    report["min_reader_minor"] = 3
+
+    migrated = migrate_report(report)
+
+    assert migrated["schema_version"] == "0.4"
+    assert migrated["min_reader_minor"] == 4
+    assert migrated["migration_history"] == ["0.3->0.4"]
 
 
 def test_unknown_report_ir_is_rejected_instead_of_silently_rendered():

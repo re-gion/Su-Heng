@@ -9,6 +9,9 @@
 frontend/dist
 data
 output
+tmp
+tmp-runtime
+.scratch
 playwright
 *.db
 *.log

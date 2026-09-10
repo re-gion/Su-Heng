@@ -11,9 +11,28 @@ class FetchError(RuntimeError):
     pass
 
 
+def _looks_like_access_challenge(value: str) -> bool:
+    sample = value[:12000].lower()
+    return any(
+        marker in sample
+        for marker in (
+            "请完成验证码",
+            "安全验证",
+            "登录后继续",
+            "sign in to continue",
+            "verify you are human",
+            "captcha",
+        )
+    )
+
+
 class BuiltinFetchProvider:
     def __init__(
-        self, *, client: httpx.AsyncClient | None = None, max_bytes: int = 5 * 1024 * 1024
+        self,
+        *,
+        client: httpx.AsyncClient | None = None,
+        max_bytes: int = 5 * 1024 * 1024,
+        allow_proxy_fake_ip: bool = False,
     ):
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(30, connect=10),
@@ -21,16 +40,20 @@ class BuiltinFetchProvider:
             follow_redirects=False,
         )
         self.max_bytes = max_bytes
+        self.allow_proxy_fake_ip = allow_proxy_fake_ip
 
     async def fetch(self, url: str) -> FetchResult:
-        current = validate_public_url(url)
+        current = validate_public_url(url, allow_proxy_fake_ip=self.allow_proxy_fake_ip)
         for _ in range(6):
             async with self.client.stream("GET", current) as response:
                 if response.is_redirect:
                     target = response.headers.get("location")
                     if not target:
                         raise FetchError("重定向缺少 Location")
-                    current = validate_public_url(str(response.url.join(target)))
+                    current = validate_public_url(
+                        str(response.url.join(target)),
+                        allow_proxy_fake_ip=self.allow_proxy_fake_ip,
+                    )
                     continue
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
@@ -49,6 +72,8 @@ class BuiltinFetchProvider:
                     if len(payload) > self.max_bytes:
                         raise FetchError("页面超过 5MB 上限")
                 html = bytes(payload).decode(response.encoding or "utf-8", errors="replace")
+                if _looks_like_access_challenge(html):
+                    raise FetchError("页面要求登录或人机验证，系统不会尝试绕过")
                 text = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
                 if not text.strip():
                     raise FetchError("未能抽取有效正文")

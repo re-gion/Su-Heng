@@ -128,6 +128,22 @@ export async function listTasks(): Promise<TaskListItem[]> {
   return ((await response.json()) as { items: TaskListItem[] }).items
 }
 
+export type TaskDetail = {
+  task_id: string
+  event_query: string
+  status: string
+  phase: string
+  resumable: boolean
+  comment_selection_required: boolean
+  report_id: string | null
+}
+
+export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
+  const response = await fetch(`/api/tasks/${taskId}`)
+  if (!response.ok) throw new Error('无法读取任务详情')
+  return response.json() as Promise<TaskDetail>
+}
+
 export async function resumeTask(taskId: string): Promise<void> {
   const response = await fetch(`/api/tasks/${taskId}/resume`, { method: 'POST' })
   if (!response.ok) {

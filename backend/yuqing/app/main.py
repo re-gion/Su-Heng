@@ -112,7 +112,13 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         known_tools=KNOWN_AGENT_TOOLS,
         skills_directory=skills_dir,
     )
-    fetcher = BuiltinFetchProvider()
+    allow_proxy_fake_ip = os.environ.get("YUQING_FETCH_ALLOW_PROXY_FAKE_IP", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    fetcher = BuiltinFetchProvider(allow_proxy_fake_ip=allow_proxy_fake_ip)
     provider_types = {
         "langsearch": LangSearchProvider,
         "zhipu": ZhipuSearchProvider,
@@ -404,9 +410,10 @@ def create_app(
     def local_plugin_request(request: Request) -> bool:
         host = (request.url.hostname or "").lower()
         client_host = (request.client.host if request.client else "").lower()
-        if host not in {"127.0.0.1", "localhost", "::1", "testserver"}:
+        loopback_hosts = {"127.0.0.1", "localhost", "::1", "testserver", "testclient"}
+        if host not in loopback_hosts:
             return False
-        if client_host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+        if client_host not in loopback_hosts:
             return False
         origin = request.headers.get("origin")
         if not origin:
@@ -414,7 +421,7 @@ def create_app(
         from urllib.parse import urlsplit
 
         parsed = urlsplit(origin)
-        return (parsed.hostname or "").lower() == host
+        return (parsed.hostname or "").lower() in loopback_hosts
 
     def comment_plugin_access_error(request: Request):
         if is_demo or in_container:

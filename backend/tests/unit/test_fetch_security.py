@@ -34,3 +34,25 @@ def test_normal_public_https_url_is_allowed():
         resolver=lambda _: [ipaddress.ip_address("93.184.216.34")],
     )
     assert result == "https://example.com/report"
+
+
+def test_proxy_fake_ip_requires_explicit_opt_in_for_hostname():
+    def resolver(_):
+        return [ipaddress.ip_address("198.18.0.39")]
+
+    with pytest.raises(UnsafeUrlError, match="代理 Fake-IP"):
+        validate_public_url("https://news.cctv.com/report", resolver=resolver)
+
+    assert (
+        validate_public_url(
+            "https://news.cctv.com/report",
+            resolver=resolver,
+            allow_proxy_fake_ip=True,
+        )
+        == "https://news.cctv.com/report"
+    )
+
+
+def test_proxy_fake_ip_opt_in_never_allows_literal_reserved_address():
+    with pytest.raises(UnsafeUrlError):
+        validate_public_url("http://198.18.0.39/report", allow_proxy_fake_ip=True)

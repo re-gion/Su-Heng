@@ -140,34 +140,69 @@ class FullReportBuilder:
                 }
             )
 
-        cited_evidence_ids = {evidence_id for claim in claims for evidence_id in claim.evidence_ids}
-        dated = sorted(
-            (
-                item
-                for item in evidence
-                if item.published_at and item.local_id in cited_evidence_ids
-            ),
-            key=lambda item: item.published_at or "",
-        )
+        fact_items = by_type["fact_check_table"]["items"]
+        rendered_claim_ids = {item["claim_ref"] for item in fact_items}
+        rendered_claims = [claim for claim in claims if claim.local_id in rendered_claim_ids]
+        cited_evidence_ids = {
+            citation["evidence_ref"]
+            for item in fact_items
+            for citation in item.get("citations", [])
+        }
+        relation_rows = {
+            claim.local_id: await self.database.claim_evidence_rows(claim.pk)
+            for claim in rendered_claims
+        }
+        timeline_sources: dict[str, dict[str, Any]] = {}
+        for claim in rendered_claims:
+            if claim.agent == "history_insight":
+                continue
+            for row in relation_rows[claim.local_id]:
+                if not row["published_at"] or row["evidence_id"] not in cited_evidence_ids:
+                    continue
+                entry = timeline_sources.setdefault(
+                    row["evidence_id"],
+                    {
+                        "date": row["published_at"],
+                        "text": row["title"],
+                        "source_name": row["source_name"] or row["publisher_entity"],
+                        "evidence_refs": [row["evidence_id"]],
+                        "claim_refs": [],
+                        "relations": Counter(),
+                    },
+                )
+                entry["claim_refs"].append(claim.local_id)
+                entry["relations"][row["relation"] or "unverified"] += 1
+        timeline_items = []
+        for item in sorted(timeline_sources.values(), key=lambda value: value["date"])[:16]:
+            item["claim_refs"] = sorted(set(item["claim_refs"]))
+            item["relations"] = dict(item["relations"])
+            timeline_items.append(item)
         timeline = {
-            "block_id": "b_02_timeline",
-            "type": "timeline",
+            "block_id": "b_02_correction_timeline",
+            "type": "chart",
             "section": "02",
             "in_brief": False,
-            "title": "事件时间线",
-            "nodes": [
-                {
-                    "date": item.published_at,
-                    "text": item.title,
-                    "evidence_refs": [item.local_id],
-                }
-                for item in dated[:12]
-            ],
-            "fallback_text": "公开材料缺少可用发布日期，无法构建可靠时间线。"
-            if not dated
+            "title": "事件纠偏时间线",
+            "data_basis": "claim_evidence_database",
+            "chart_kind": "timeline",
+            "items": timeline_items,
+            "fallback_text": "被引用材料缺少可用发布日期，无法构建可靠的纠偏时间线。"
+            if not timeline_items
             else None,
+            "note": "仅按关键陈述实际引用材料排序；关系表示材料相对陈述的核验方向，不代表全网声量。",
         }
 
+        total_claims = len(fact_items)
+        verified_claims = sum(item["badge"] == "verified" for item in fact_items)
+        unverified_claims = sum(item["badge"] == "unverified" for item in fact_items)
+        cited_records = [
+            evidence_by_id[evidence_id]
+            for evidence_id in sorted(cited_evidence_ids)
+            if evidence_id in evidence_by_id
+        ]
+        cited_attempted = sum(item.fetch_status != "discovered" for item in cited_records)
+        cited_fetched = sum(item.fetch_status == "fetched" for item in cited_records)
+        report["metrics"]["cited_evidence_total"] = len(cited_records)
         kpis = {
             "block_id": "b_00_kpi",
             "type": "kpi_grid",
@@ -175,27 +210,155 @@ class FullReportBuilder:
             "in_brief": True,
             "data_basis": "evidence_database",
             "items": [
-                {"label": "证据", "value": len(evidence)},
-                {"label": "重要陈述", "value": len(claims)},
-                {"label": "独立发布主体", "value": report["metrics"]["independent_publishers"]},
-                {"label": "引用覆盖率", "value": f"{report['metrics']['citation_coverage']:.0%}"},
-                {"label": "未加权核验通过率", "value": f"{report['metrics']['verified_rate']:.0%}"},
                 {
-                    "label": "信源加权通过率",
-                    "value": f"{report['metrics']['weighted_verified_rate']:.0%}",
+                    "label": "已证实陈述",
+                    "value": f"{verified_claims} / {total_claims}",
+                    "note": "描述核验结论，不代表系统运行成功率",
+                    "tone": "verified" if verified_claims else "neutral",
                 },
                 {
-                    "label": "候选 / 拦截",
-                    "value": f"{report['metrics']['key_claims_candidate']} / {report['metrics']['key_claims_rejected']}",
+                    "label": "待核验陈述",
+                    "value": f"{unverified_claims} / {total_claims}",
+                    "note": "需要更多独立支持或一手材料",
+                    "tone": "warning" if unverified_claims else "neutral",
+                },
+                {
+                    "label": "已取得原文",
+                    "value": f"{report['metrics']['evidence_fetched']} / {len(evidence)}",
+                    "note": "其余材料仅有搜索摘要或抓取失败",
+                    "tone": "verified" if report["metrics"]["evidence_fetched"] else "warning",
+                },
+                {
+                    "label": "实际引用材料",
+                    "value": f"{len(cited_records)} / {len(evidence)}",
+                    "note": "未引用材料不参与关键陈述结论",
+                    "tone": "neutral",
                 },
             ],
+        }
+        evidence_funnel = {
+            "block_id": "b_04_evidence_funnel",
+            "type": "chart",
+            "section": "04",
+            "in_brief": False,
+            "title": "证据获取漏斗",
+            "data_basis": "evidence_database",
+            "chart_kind": "funnel",
+            "items": [
+                {"label": "去重检索材料", "value": len(evidence)},
+                {"label": "实际引用材料", "value": len(cited_records)},
+                {"label": "引用材料已尝试取原文", "value": cited_attempted},
+                {"label": "引用材料已存原文", "value": cited_fetched},
+            ],
+            "note": "漏斗只衡量证据获取完整度，不把检索数量当作事件声量。",
+        }
+        fact_by_id = {item["claim_ref"]: item for item in fact_items}
+        matrix_items = []
+        for claim in rendered_claims:
+            relations = Counter(
+                (row["relation"] or "unverified")
+                for row in relation_rows[claim.local_id]
+                if row["evidence_id"] in cited_evidence_ids
+            )
+            fact = fact_by_id[claim.local_id]
+            matrix_items.append(
+                {
+                    "claim_ref": claim.local_id,
+                    "text": claim.text,
+                    "badge": fact["badge"],
+                    "independent_sources": fact.get("independent_sources", 0),
+                    "relations": dict(relations),
+                }
+            )
+        verification_matrix = {
+            "block_id": "b_04_verification_matrix",
+            "type": "chart",
+            "section": "04",
+            "in_brief": False,
+            "title": "关键陈述—信源核验矩阵",
+            "data_basis": "claim_evidence_database",
+            "chart_kind": "matrix",
+            "items": matrix_items,
+            "note": "同源转载按发布主体归并；部分支持和未提及不计为独立支持。",
         }
         hot_points = await self.historical_data.hotlist_query(
             task.event_query,
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
-        propagation = self._propagation_blocks(evidence, by_type["limitations"], hot_points)
+        propagation = [evidence_funnel, verification_matrix]
+        numeric_hot_points = [item for item in hot_points if item.heat_value is not None]
+        if hot_points and not numeric_hot_points:
+            by_type["limitations"]["items"].append(
+                {
+                    "id": "L15",
+                    "category": "热榜热度",
+                    "text": "热榜命中记录缺少可比较的数值热度，未绘制热度曲线。",
+                }
+            )
+        if numeric_hot_points:
+            propagation.append(self._hot_chart(numeric_hot_points))
+
+        role_labels = {
+            "authority": "裁判性权威",
+            "party": "事件当事方",
+            "independent": "独立采编",
+            "syndicated": "转载",
+            "unknown": "未分类",
+        }
+        role_distribution = Counter(
+            role_labels.get(item.source_role, item.source_role) for item in evidence
+        )
+        date_distribution = Counter(
+            item.published_at[:10] if item.published_at else "日期未知" for item in evidence
+        )
+        publisher_distribution = Counter(
+            item.publisher_entity or item.source_name or item.source_domain for item in evidence
+        )
+        data_quality = {
+            "block_id": "b_09_data_quality",
+            "type": "data_quality",
+            "section": "09",
+            "in_brief": False,
+            "title": "核验方法与数据质量",
+            "summary": [
+                {"label": "未分类信源", "value": role_distribution.get("未分类", 0)},
+                {"label": "缺少发布日期", "value": date_distribution.get("日期未知", 0)},
+                {
+                    "label": "原文抓取失败",
+                    "value": sum(item.fetch_status == "fetch_failed" for item in evidence),
+                },
+                {"label": "未被关键陈述引用", "value": len(evidence) - len(cited_records)},
+            ],
+            "verification_method": {
+                "verified_rate": report["metrics"]["verified_rate"],
+                "weighted_verified_rate": report["metrics"]["weighted_verified_rate"],
+                "weight_scheme": report["metrics"]["weight_scheme"],
+            },
+            "distributions": [
+                {
+                    "title": "检索材料日期分布",
+                    "items": [
+                        {"label": label, "value": value}
+                        for label, value in sorted(date_distribution.items())
+                    ],
+                },
+                {
+                    "title": "检索材料信源类型",
+                    "items": [
+                        {"label": label, "value": value}
+                        for label, value in sorted(role_distribution.items())
+                    ],
+                },
+                {
+                    "title": "检索材料来源主体（前 12）",
+                    "items": [
+                        {"label": label, "value": value}
+                        for label, value in publisher_distribution.most_common(12)
+                    ],
+                },
+            ],
+        }
         summaries = [message for message in forum if message.type == "summary"]
         viewpoint = {
             "block_id": "b_05_viewpoints",
@@ -361,6 +524,7 @@ class FullReportBuilder:
             history,
             recommendations,
             by_type["limitations"],
+            data_quality,
             by_type["evidence_appendix"],
         ]
         validated = validate_report(report).report

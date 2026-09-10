@@ -3,8 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = "0.3"
-CURRENT_READER_MINOR = 3
+CURRENT_SCHEMA_VERSION = "0.4"
+CURRENT_READER_MINOR = 4
 
 
 class UnsupportedReportVersion(ValueError):
@@ -18,7 +18,7 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
     version = str(value.get("schema_version") or "")
     if version == CURRENT_SCHEMA_VERSION:
         return value
-    if version not in {"0.1", "0.2"}:
+    if version not in {"0.1", "0.2", "0.3"}:
         raise UnsupportedReportVersion(f"不支持报告 IR {version or 'unknown'}")
     history = list(value.get("migration_history") or [])
     if version == "0.1":
@@ -30,14 +30,19 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
                 card.setdefault("dimensions", {})
         if "0.1->0.2" not in history:
             history.append("0.1->0.2")
-    for block in value.get("blocks", []):
-        if block.get("type") == "evidence_appendix":
-            for item in block.get("items", []):
-                item.setdefault("kind", "web")
-                item.setdefault("lang", "zh")
+        version = "0.2"
+    if version == "0.2":
+        for block in value.get("blocks", []):
+            if block.get("type") == "evidence_appendix":
+                for item in block.get("items", []):
+                    item.setdefault("kind", "web")
+                    item.setdefault("lang", "zh")
+        if "0.2->0.3" not in history:
+            history.append("0.2->0.3")
+        version = "0.3"
+    if version == "0.3" and "0.3->0.4" not in history:
+        history.append("0.3->0.4")
     value["schema_version"] = CURRENT_SCHEMA_VERSION
     value["min_reader_minor"] = CURRENT_READER_MINOR
-    if "0.2->0.3" not in history:
-        history.append("0.2->0.3")
     value["migration_history"] = history
     return value

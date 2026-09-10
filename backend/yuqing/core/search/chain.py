@@ -75,7 +75,9 @@ class SearchChain:
             if self._is_open(provider.name):
                 continue
             first_attempted = first_attempted or provider.name
-            attempts = 2 if len(eligible) == 1 else 1
+            attempts = (
+                2 if len(eligible) == 1 and not getattr(provider, "retry_managed", False) else 1
+            )
             last_error: Exception | None = None
             for attempt in range(attempts):
                 try:

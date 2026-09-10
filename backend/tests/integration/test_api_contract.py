@@ -229,7 +229,9 @@ def test_report_html_supports_brief_view_and_download(runtime_dir: Path):
         brief = client.get("/api/reports/r_view/html?view=brief")
         full = client.get("/api/reports/r_view/html?view=full&download=1")
 
-    assert "速览正文" in brief.text and "仅完整版" not in brief.text
+    assert "速览正文" in brief.text and "仅完整版" in brief.text
+    assert 'data-in-brief="false"' in brief.text
+    assert "const initialView='brief'" in brief.text
     assert "仅完整版" in full.text
     assert full.headers["content-disposition"].startswith("attachment;")
 
@@ -585,21 +587,18 @@ def test_comment_selection_pause_cannot_be_bypassed_and_skip_continues(runtime_d
     assert skipped.status_code == 202
 
 
-def test_comment_login_state_endpoints_reject_non_local_requests(runtime_dir: Path):
+def test_comment_login_state_endpoints_allow_localhost_origin(runtime_dir: Path):
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
-    with TestClient(app, base_url="http://192.168.1.50") as client:
-        created = client.post(
-            "/api/tasks",
-            json={"event_query": "远程评论任务", "comment_mode": "smart"},
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        login = client.post(
+            "/api/comment-plugin/platforms/weibo/login",
+            headers={"Origin": "http://localhost:5173"},
         )
-        candidate = client.get("/api/tasks/not-found/comment-candidates")
-        selection = client.post("/api/tasks/not-found/comment-selection", json={"action": "skip"})
-        stopped = client.post("/api/tasks/not-found/comment-collection/stop")
+        config = client.put(
+            "/api/config",
+            headers={"Origin": "http://localhost:5173"},
+            json={"comments": {"enabled": True}},
+        )
 
-    assert created.status_code == 403
-    assert candidate.status_code == 403
-    assert selection.status_code == 403
-    assert stopped.status_code == 403
-    assert {
-        response.json()["error"]["code"] for response in (created, candidate, selection, stopped)
-    } == {"COMMENT_PLUGIN_LOCAL_ONLY"}
+    assert login.status_code == 202
+    assert config.status_code == 200

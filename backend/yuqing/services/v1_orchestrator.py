@@ -403,12 +403,14 @@ class V1Orchestrator:
                     },
                 )
                 for record in records:
-                    if record.fetch_status != "fetched" and not await self._reserve_tool("fetch"):
-                        self._limitations.append(
-                            f"全局原文抓取已达 {self._fetch_calls} 次上限，剩余材料保留摘要。"
-                        )
-                        break
-                    updated = await self.evidence.fetch_one(record)
+                    updated = record
+                    if record.fetch_status == "discovered":
+                        if not await self._reserve_tool("fetch"):
+                            self._limitations.append(
+                                f"全局原文抓取已达 {self._fetch_calls} 次上限，剩余材料保留摘要。"
+                            )
+                            break
+                        updated = await self.evidence.fetch_one(record)
                     await self.events.emit(
                         task_id,
                         "evidence.added",
@@ -613,11 +615,13 @@ class V1Orchestrator:
             len(await self.database.list_claims(task_id)),
         )
         if review.degraded:
-            self._limitations.append(review.reason)
-            self._limitations.extend(
-                f"主持人降级放行时仍未解决：{item}" for item in review.unresolved_critical
-            )
+            limitations = [review.reason] + [
+                f"主持人评审降级时仍未解决：{item}" for item in review.unresolved_critical
+            ]
+            self._limitations.extend(item for item in limitations if item not in self._limitations)
         payload = review.model_dump(mode="json")
+        if review.diagnostics:
+            payload["diagnostics"] = review.diagnostics
         await self.events.emit(task_id, "host.review", payload)
         await self._post(
             board,

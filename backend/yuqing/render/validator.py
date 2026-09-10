@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from yuqing.render.ir_migrations import CURRENT_READER_MINOR
+
 
 class ReportValidationError(ValueError):
     def __init__(self, errors: list[str]):
@@ -42,7 +44,7 @@ def _walk(value: Any):
 
 
 def _version_compatible(
-    report: dict[str, Any], reader_major: int = 0, reader_minor: int = 3
+    report: dict[str, Any], reader_major: int = 0, reader_minor: int = CURRENT_READER_MINOR
 ) -> bool:
     try:
         major, _minor = (int(part) for part in report["schema_version"].split(".", 1))
