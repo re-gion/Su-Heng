@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -31,6 +31,7 @@ class GeneratedClaim(BaseModel):
     rumor_text: str | None = None
     correction_text: str | None = None
     evidence_ids: list[str] = Field(min_length=1, max_length=4)
+    analysis_data: dict[str, Any] = Field(default_factory=dict)
 
 
 class Reflection(BaseModel):

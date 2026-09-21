@@ -462,7 +462,7 @@ async def test_stop_is_persisted_and_partial_collection_cannot_be_marked_complet
 
 @pytest.mark.asyncio
 async def test_v2_report_keeps_foreign_original_separate_from_machine_translation(
-    runtime_dir: Path,
+    runtime_dir: Path, claim_limits: dict[str, int]
 ):
     class Translator:
         async def translate_to_chinese(self, text: str, source_lang: str) -> str:
@@ -509,7 +509,8 @@ async def test_v2_report_keeps_foreign_original_separate_from_machine_translatio
             text="CrowdStrike says a fix has been deployed.",
             agent="fact_investigator",
             evidence_ids=[evidence.local_id],
-        )
+        ),
+        **claim_limits,
     )
 
     _, report, _ = await FullReportBuilder(
@@ -520,7 +521,7 @@ async def test_v2_report_keeps_foreign_original_separate_from_machine_translatio
     timeline = next(block for block in report["blocks"] if block.get("chart_kind") == "timeline")
     html = render_html(report, view="full")
 
-    assert report["schema_version"] == "0.4"
+    assert report["schema_version"] == "0.5"
     assert report["language_coverage"]["complete"] == ["en"]
     assert report["language_coverage"]["missing"] == ["zh"]
     assert card["original_excerpt"] == "CrowdStrike says a fix has been deployed."
@@ -535,7 +536,7 @@ async def test_v2_report_keeps_foreign_original_separate_from_machine_translatio
 
 @pytest.mark.asyncio
 async def test_report_rejects_untraceable_paraphrase_instead_of_failing_whole_report(
-    runtime_dir: Path,
+    runtime_dir: Path, claim_limits: dict[str, int]
 ):
     database = Database(runtime_dir / "report-rejection.db")
     await database.initialize()
@@ -558,7 +559,8 @@ async def test_report_rejects_untraceable_paraphrase_instead_of_failing_whole_re
             text="目标陈述成立。",
             agent="fact_investigator",
             evidence_ids=[evidence.local_id],
-        )
+        ),
+        **claim_limits,
     )
 
     _, report, _ = await BriefReportBuilder(database, runtime_dir / "reports").build(task.id)

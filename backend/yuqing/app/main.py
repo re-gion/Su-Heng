@@ -38,15 +38,22 @@ from yuqing.render.ir_migrations import (
     UnsupportedReportVersion,
     migrate_report,
 )
+from yuqing.services.budget import (
+    DEFAULT_BUDGET_TABLE,
+    parse_budget_overrides,
+    resolve_budget_table,
+)
 from yuqing.services.comment_plugin import (
     CommentPluginService,
     OpenAICandidateEvaluator,
     PlaywrightCommentCollector,
+    PlaywrightPublicCandidateDiscoverer,
 )
 from yuqing.services.configuration import ConfigService
 from yuqing.services.governance import ReportRetentionService
 from yuqing.services.historical_data import HistoricalDataService
 from yuqing.services.hotlist import DailyHotCollector
+from yuqing.services.investigation_scope import is_topic_discovery_query
 from yuqing.services.moderation import OpenAIModerator
 from yuqing.services.openai_verifier import OpenAIEvidenceVerifier
 from yuqing.services.public_interest import (
@@ -151,6 +158,7 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         }
         environ = dict(os.environ)
         environ.update(stored)
+        budgets = resolve_budget_table(parse_budget_overrides(environ.get("BUDGET_OVERRIDES")))
         llm_factory = LLMClientFactory(environ)
         gateway = LLMGateway(llm_factory)
         order = [
@@ -207,6 +215,7 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             closeables=[llm_factory, *(provider.client for provider in providers)],
             max_outer_rounds=3,
             max_inner_rounds=max(by_name[name].max_inner_rounds for name in agents),
+            budgets=budgets,
         )
 
     async def close_resources() -> None:
@@ -279,6 +288,9 @@ def create_app(
         app.state.pdf_exporter = pdf_exporter or ChromiumPdfExporter()
         app.state.delivery = EvidencePackageBuilder(database, SnapshotStore(data_dir / "snapshots"))
         resolved = await ConfigService(database).resolved_environ()
+        app.state.budgets = resolve_budget_table(
+            parse_budget_overrides(resolved.get("BUDGET_OVERRIDES"))
+        )
         effective_comment_enabled = (
             not is_demo
             and not in_container
@@ -287,7 +299,12 @@ def create_app(
         )
         comment_collector = PlaywrightCommentCollector(data_dir / "browser-profiles")
         app.state.comment_plugin = CommentPluginService(
-            database, data_dir, enabled=effective_comment_enabled, collector=comment_collector
+            database,
+            data_dir,
+            enabled=effective_comment_enabled,
+            collector=comment_collector,
+            discoverer=PlaywrightPublicCandidateDiscoverer(),
+            budgets=app.state.budgets,
         )
         app.state.demo_mode = is_demo
         app.state.demo_slots = asyncio.Semaphore(demo_concurrency_limit) if is_demo else None
@@ -575,6 +592,16 @@ def create_app(
                 request.app.state.comment_plugin.enabled = (
                     requested and not is_demo and not in_container
                 )
+            if "budget" in payload:
+                # 评论插件是常驻实例，预算改了要立刻同步；orchestrator 每次跑任务
+                # 重新装配，会自己读到新值。
+                budgets = resolve_budget_table(
+                    parse_budget_overrides(
+                        (await ConfigService(database).resolved_environ()).get("BUDGET_OVERRIDES")
+                    )
+                )
+                request.app.state.budgets = budgets
+                request.app.state.comment_plugin.budgets = budgets
             return updated
         except ValueError as exc:
             return error_response("CONFIG_INVALID", str(exc), 422, recoverable=True)
@@ -714,6 +741,13 @@ def create_app(
                     429,
                     recoverable=True,
                 )
+        payload = payload.model_copy(
+            update={
+                "request_kind": "topic_discovery"
+                if is_topic_discovery_query(payload.event_query)
+                else "event"
+            }
+        )
         task = await database.create_task(payload)
         if is_demo:
             assert demo_session is not None
@@ -788,9 +822,12 @@ def create_app(
         access_error = comment_plugin_access_error(request)
         if access_error is not None:
             return access_error
+        database, _ = services(request)
         task = await existing_task(task_id, request)
         plugin: CommentPluginService = request.app.state.comment_plugin
+        effective_budgets = getattr(request.app.state, "budgets", DEFAULT_BUDGET_TABLE)
         candidates = await plugin.list_candidates(task.id)
+        checkpoint = await database.checkpoint(task.id, "comments:selection") or {}
         statuses = {item["platform"]: item for item in plugin.platform_status()}
         return {
             "task_id": task.id,
@@ -803,11 +840,77 @@ def create_app(
                 for item in candidates
             ],
             "budgets": {
-                "quick": {"posts": 2, "comments_per_post": 100},
-                "standard": {"posts": 5, "comments_per_post": 200},
-                "deep": {"posts": 8, "comments_per_post": 300},
-            }[task.depth],
+                "posts": effective_budgets[task.depth].comment_posts,
+                "comments_per_post": effective_budgets[task.depth].comments_per_post,
+            },
+            "query": checkpoint.get("query"),
+            "discovery_attempts": checkpoint.get("discovery_attempts", []),
+            "manual_entry_allowed": True,
         }
+
+    @app.get("/api/tasks/{task_id}/topic-candidates")
+    async def topic_candidates(task_id: str, request: Request):
+        database, _ = services(request)
+        task = await existing_task(task_id, request)
+        checkpoint = await database.checkpoint(task_id, "topic:selection")
+        if checkpoint is None:
+            return error_response(
+                "TOPIC_SELECTION_NOT_READY", "任务当前没有待选择的具体事件。", 409
+            )
+        return {
+            "task_id": task.id,
+            "phase": task.phase,
+            "original_query": task.event_query,
+            "items": checkpoint.get("candidates", []),
+            "manual_entry_allowed": True,
+        }
+
+    @app.post("/api/tasks/{task_id}/topic-selection", status_code=202)
+    async def select_topic(
+        task_id: str, request: Request, background: BackgroundTasks, payload: dict[str, Any]
+    ):
+        database, _ = services(request)
+        task = await existing_task(task_id, request)
+        if task.status != "paused" or task.phase != "topic_selection":
+            return error_response(
+                "TOPIC_SELECTION_NOT_READY", "任务当前不在具体事件选择阶段。", 409
+            )
+        checkpoint = await database.checkpoint(task_id, "topic:selection") or {}
+        candidate_id = str(payload.get("candidate_id") or "")
+        manual_query = str(payload.get("event_query") or "").strip()
+        selected = next(
+            (
+                str(item.get("query") or item.get("title") or "").strip()
+                for item in checkpoint.get("candidates", [])
+                if str(item.get("id")) == candidate_id
+            ),
+            "",
+        )
+        resolved_query = selected or manual_query
+        if not resolved_query or len(resolved_query) > 200:
+            return error_response(
+                "TOPIC_SELECTION_INVALID", "请选择候选事件，或填写 1—200 字的具体事件。", 422
+            )
+        if not selected and is_topic_discovery_query(resolved_query):
+            return error_response(
+                "TOPIC_SELECTION_TOO_BROAD", "填写的仍是宽泛主题，请补充具体事件或争议点。", 422
+            )
+        claimed = await database.claim_task_status(task_id, ("paused",), "running", "resuming")
+        if not claimed:
+            return error_response("TOPIC_SELECTION_CONFLICT", "任务已被其他请求处理。", 409)
+        await database.set_resolved_event_query(task_id, resolved_query)
+        await database.save_checkpoint(
+            task_id,
+            "topic:selected",
+            {
+                "phase": "outer",
+                "next_outer_round": 1,
+                "original_query": task.event_query,
+                "resolved_event_query": resolved_query,
+            },
+        )
+        background.add_task(run_safely, request, task_id, resume=True)
+        return {"task_id": task_id, "status": "running", "resolved_event_query": resolved_query}
 
     async def continue_after_comment_selection(
         request: Request, task_id: str, candidate_ids: list[str]
@@ -960,6 +1063,7 @@ def create_app(
                 {
                     "task_id": task.id,
                     "event_query": task.event_query,
+                    "resolved_event_query": task.resolved_event_query,
                     "status": task.status,
                     "phase": task.phase,
                     "depth": task.depth,
@@ -967,9 +1071,10 @@ def create_app(
                     "resumable": (
                         task.status in {"paused", "failed"}
                         and checkpoint is not None
-                        and task.phase != "comment_selection"
+                        and task.phase not in {"comment_selection", "topic_selection"}
                     ),
                     "comment_selection_required": task.phase == "comment_selection",
+                    "topic_selection_required": task.phase == "topic_selection",
                     "report_id": report["id"] if report else None,
                     "created_at": task.created_at,
                     "updated_at": task.updated_at,
@@ -996,11 +1101,14 @@ def create_app(
         return {
             "task_id": task_id,
             "event_query": row["event_query"],
+            "resolved_event_query": row["resolved_event_query"],
             "status": row["status"],
             "phase": row["phase"],
             "progress": {
                 "outer_round": row["outer_round"],
-                "max_outer_rounds": {"quick": 1, "standard": 2, "deep": 3}[row["depth"]],
+                "max_outer_rounds": getattr(request.app.state, "budgets", DEFAULT_BUDGET_TABLE)[
+                    row["depth"]
+                ].outer_rounds,
                 "agents": [],
             },
             "metrics": {
@@ -1014,9 +1122,10 @@ def create_app(
             "resumable": (
                 row["status"] in {"paused", "failed"}
                 and checkpoint is not None
-                and row["phase"] != "comment_selection"
+                and row["phase"] not in {"comment_selection", "topic_selection"}
             ),
             "comment_selection_required": row["phase"] == "comment_selection",
+            "topic_selection_required": row["phase"] == "topic_selection",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1030,12 +1139,17 @@ def create_app(
                 "TASK_NOT_FOUND", "任务不存在。", 404, details={"task_id": task_id}
             )
         checkpoint = await database.latest_checkpoint(task_id)
-        if task.phase == "comment_selection" or (
-            checkpoint and checkpoint.get("phase") == "comment_selection"
+        if task.phase in {"comment_selection", "topic_selection"} or (
+            checkpoint and checkpoint.get("phase") in {"comment_selection", "topic_selection"}
         ):
+            topic_pending = task.phase == "topic_selection" or (
+                checkpoint and checkpoint.get("phase") == "topic_selection"
+            )
             return error_response(
-                "COMMENT_SELECTION_REQUIRED",
-                "请先确认候选帖子或选择跳过评论采集。",
+                "TOPIC_SELECTION_REQUIRED" if topic_pending else "COMMENT_SELECTION_REQUIRED",
+                "请先选择一个具体事件。"
+                if topic_pending
+                else "请先确认候选帖子或选择跳过评论采集。",
                 409,
                 recoverable=True,
             )

@@ -587,6 +587,51 @@ def test_comment_selection_pause_cannot_be_bypassed_and_skip_continues(runtime_d
     assert skipped.status_code == 202
 
 
+def test_broad_topic_requires_concrete_event_selection_before_investigation(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=ImmediateOrchestrator)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"event_query": "武汉大学舆情"})
+        task_id = created.json()["task_id"]
+        connection = sqlite3.connect(runtime_dir / "yuqing.db")
+        connection.execute(
+            "UPDATE task SET status='paused',phase='topic_selection' WHERE id=?", (task_id,)
+        )
+        payload = json.dumps(
+            {
+                "phase": "topic_selection",
+                "candidates": [
+                    {
+                        "id": "tc_1",
+                        "title": "武汉大学图书馆事件及校方回应",
+                        "query": "武汉大学图书馆事件及校方回应",
+                        "url": "https://www.whu.edu.cn/example",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        connection.execute(
+            """INSERT INTO task_state(task_id,step_key,kind,status,replay,payload,result_ref,created_at,updated_at)
+               VALUES(?, 'topic:selection','round_checkpoint','settled','safe',?,?,
+               '2026-01-01','2026-01-01')""",
+            (task_id, payload, payload),
+        )
+        connection.commit()
+        connection.close()
+
+        blocked = client.post(f"/api/tasks/{task_id}/resume")
+        candidates = client.get(f"/api/tasks/{task_id}/topic-candidates")
+        selected = client.post(
+            f"/api/tasks/{task_id}/topic-selection", json={"candidate_id": "tc_1"}
+        )
+
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "TOPIC_SELECTION_REQUIRED"
+    assert candidates.json()["items"][0]["title"] == "武汉大学图书馆事件及校方回应"
+    assert selected.status_code == 202
+    assert selected.json()["resolved_event_query"] == "武汉大学图书馆事件及校方回应"
+
+
 def test_comment_login_state_endpoints_allow_localhost_origin(runtime_dir: Path):
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=IdleOrchestrator)
     with TestClient(app, base_url="http://127.0.0.1") as client:

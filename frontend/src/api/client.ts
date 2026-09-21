@@ -10,10 +10,12 @@ type ErrorEnvelope = { error?: { message?: string } }
 export type TaskListItem = {
   task_id: string
   event_query: string
+  resolved_event_query: string | null
   status: string
   phase: string
   resumable: boolean
   comment_selection_required: boolean
+  topic_selection_required: boolean
   report_id: string | null
 }
 
@@ -79,6 +81,8 @@ export const pauseTask = (taskId: string) => mutation(`/api/tasks/${taskId}/paus
 export const stopTask = (taskId: string) => mutation(`/api/tasks/${taskId}/stop`, 'POST', { reason: 'user_stop' })
 export const deleteTask = (taskId: string) => mutation(`/api/tasks/${taskId}`, 'DELETE')
 
+export type BudgetTable = Record<string, Record<string, number>>
+
 export type PublicConfig = {
   llm: {
     default: { api_key: string | null; base_url: string; model: string }
@@ -86,12 +90,22 @@ export type PublicConfig = {
   }
   search: { provider_order: string[]; keys: Record<string, string | null> }
   comments: { enabled: boolean }
+  budget: {
+    overrides: BudgetTable
+    effective: BudgetTable
+    defaults: BudgetTable
+    fields: string[]
+    depths: string[]
+    source: string
+  }
 }
 
 export type CommentPlatformStatus = { platform: string; profile_present: boolean; browser_open: boolean }
 export type CommentPluginStatus = { enabled: boolean; available: boolean; demo_mode: boolean; container: boolean; platforms: CommentPlatformStatus[]; risk_notice: string }
 export type CommentCandidate = { id: string; url: string; platform: string; title: string; snippet: string | null; score: number; score_breakdown: Record<string, number>; reasons: string[]; selection_mode: string; status: string; login_profile_present: boolean }
-export type CommentCandidates = { task_id: string; phase: string; items: CommentCandidate[]; budgets: { posts: number; comments_per_post: number } }
+export type CommentCandidates = { task_id: string; phase: string; items: CommentCandidate[]; budgets: { posts: number; comments_per_post: number }; query?: string | null; discovery_attempts: { platform: string; status: 'found' | 'empty' | 'failed'; count: number; error?: string | null }[]; manual_entry_allowed: boolean }
+export type TopicCandidate = { id: string; title: string; query: string; source_name: string; url: string; published_at: string | null; date_status: string }
+export type TopicCandidates = { task_id: string; phase: string; original_query: string; items: TopicCandidate[]; manual_entry_allowed: boolean }
 
 export async function getCommentPluginStatus(): Promise<CommentPluginStatus> {
   const response = await fetch('/api/comment-plugin/status')
@@ -107,6 +121,12 @@ export async function getCommentCandidates(taskId: string): Promise<CommentCandi
 }
 export const submitCommentSelection = (taskId: string, payload: { action: 'approve' | 'skip'; candidate_ids?: string[]; urls?: string[] }) => mutation(`/api/tasks/${taskId}/comment-selection`, 'POST', payload)
 export const stopCommentCollection = (taskId: string) => mutation(`/api/tasks/${taskId}/comment-collection/stop`)
+export async function getTopicCandidates(taskId: string): Promise<TopicCandidates> {
+  const response = await fetch(`/api/tasks/${taskId}/topic-candidates`)
+  if (!response.ok) throw new Error('无法读取具体事件候选')
+  return response.json() as Promise<TopicCandidates>
+}
+export const submitTopicSelection = (taskId: string, payload: { candidate_id?: string; event_query?: string }) => mutation(`/api/tasks/${taskId}/topic-selection`, 'POST', payload)
 
 export async function getConfig(): Promise<PublicConfig> {
   const response = await fetch('/api/config')
@@ -131,10 +151,12 @@ export async function listTasks(): Promise<TaskListItem[]> {
 export type TaskDetail = {
   task_id: string
   event_query: string
+  resolved_event_query: string | null
   status: string
   phase: string
   resumable: boolean
   comment_selection_required: boolean
+  topic_selection_required: boolean
   report_id: string | null
 }
 

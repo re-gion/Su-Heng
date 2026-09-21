@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,7 +7,7 @@ from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection
 from yuqing.core.events import EventBus
 from yuqing.core.search.base import SearchResult
 from yuqing.core.search.fixture import FixtureSearchProvider
-from yuqing.services.comment_plugin import CommentPluginService
+from yuqing.services.comment_plugin import CommentCandidateInput, CommentPluginService
 from yuqing.services.historical_data import (
     DatasetAssetInput,
     HistoricalDataService,
@@ -125,6 +126,87 @@ class MustNotRunVerifier:
 class MustNotRunAgent(NamedAgent):
     async def plan(self, event_query):
         raise AssertionError("investigated 检查点后不应重复调查")
+
+
+class PreciseCandidateEvaluator:
+    async def refine_query(self, event_query, context):
+        return "武汉大学图书馆事件"
+
+    async def evaluate(self, event_query, candidates):
+        assert event_query == "武汉大学图书馆事件"
+        return {
+            item.url: {"relevance": 0.9, "controversy": 0.4, "information_gain": 0.8}
+            for item in candidates
+        }
+
+
+class PublicCandidateFixture:
+    def __init__(self):
+        self.query = ""
+        self.platforms: list[str] = []
+
+    async def discover(self, query, platforms, *, limit_per_platform=3):
+        self.query = query
+        self.platforms = platforms
+        return [
+            CommentCandidateInput(
+                url="https://www.bilibili.com/video/BV1xx411c7mD",
+                title="武汉大学图书馆事件梳理",
+                snippet="公开讨论与事件时间线",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_topic_discovery_persists_utility_usage_and_config_snapshot(runtime_dir):
+    database = Database(runtime_dir / "topic-usage.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(
+            event_query="武汉大学舆情",
+            request_kind="topic_discovery",
+            source_scope="domestic",
+            source_languages=["zh"],
+        )
+    )
+    search = FixtureSearchProvider(
+        [
+            SearchResult(
+                url="https://www.whu.edu.cn/example",
+                title="武汉大学发布图书馆事件情况说明",
+                snippet="武汉大学发布情况说明。",
+                provider="fixture",
+                lang="zh",
+            )
+        ]
+    )
+    usage = SimpleNamespace(tokens_used=37, calls=2, token_limit=0)
+    orchestrator = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        usage=usage,
+        models_used={"utility": "fixture|utility"},
+    )
+
+    await orchestrator.run_task(task.id)
+
+    updated = await database.get_task(task.id)
+    events = await orchestrator.events.history(task.id)
+    assert updated is not None
+    assert updated.status == "paused"
+    assert updated.phase == "topic_selection"
+    assert updated.tokens_used == 37
+    assert "fixture|utility" in (updated.config_snapshot or "")
+    budget = next(event for event in events if event.event == "budget.update")
+    assert budget.data["calls"] == 2
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -272,6 +354,7 @@ async def test_v1_restart_after_investigation_resumes_and_publishes_report(runti
             depth="quick",
             source_languages=["zh"],
             comment_mode="smart",
+            comment_urls=["https://www.bilibili.com/video/BV1xx411c7mD"],
         )
     )
     search = FixtureSearchProvider(
@@ -349,7 +432,119 @@ async def test_v1_restart_after_investigation_resumes_and_publishes_report(runti
     assert "已证实" in html
     assert "原文抓取失败" in html
     assert 'href="#evidence-E001"' in html
+    phases = [event.data.get("phase") for event in events if event.event == "task.status"]
+    assert "verifying" in phases
+    assert "reporting" in phases
     await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_smart_comment_discovery_uses_refined_query_and_public_platform_search(
+    runtime_dir,
+):
+    database = Database(runtime_dir / "candidate-discovery.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="武汉大学舆情", depth="standard", comment_mode="smart")
+    )
+    discoverer = PublicCandidateFixture()
+    evaluator = PreciseCandidateEvaluator()
+    plugin = CommentPluginService(
+        database,
+        runtime_dir / "plugin",
+        enabled=True,
+        discoverer=discoverer,
+        evaluator=evaluator,
+    )
+    orchestrator = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=FixtureSearchProvider(
+            [
+                SearchResult(
+                    url="https://en.wikipedia.org/wiki/Wuhan_University",
+                    title="无关站外结果",
+                    snippet="不应进入评论候选",
+                    provider="fixture",
+                )
+            ]
+        ),
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": NamedAgent("fact_investigator")},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        comment_plugin=plugin,
+        comment_evaluator=evaluator,
+    )
+
+    discovery = await orchestrator._prepare_comment_candidates(task, task.event_query)
+
+    candidates = await plugin.list_candidates(task.id)
+    assert discovery["candidate_count"] == 1
+    assert discoverer.query == "武汉大学图书馆事件"
+    assert "bilibili" in discoverer.platforms
+    assert [(item.platform, item.title) for item in candidates] == [
+        ("bilibili", "武汉大学图书馆事件梳理")
+    ]
+    status = [
+        event
+        for event in await orchestrator.events.history(task.id)
+        if event.event == "agent.status"
+    ][-1]
+    assert status.data["query"] == "武汉大学图书馆事件"
+    assert status.data["platforms"] == ["bilibili"]
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_smart_comment_mode_with_no_candidates_pauses_for_manual_input(runtime_dir):
+    database = Database(runtime_dir / "empty-candidates.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="没有平台帖的事件", depth="quick", comment_mode="smart")
+    )
+    search = FixtureSearchProvider(
+        [
+            SearchResult(
+                url="https://www.gov.cn/notice",
+                title="权威公开材料",
+                snippet="该事件有公开材料，但不是社交平台帖子。",
+                provider="fixture",
+            )
+        ]
+    )
+    orchestrator = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": NamedAgent("fact_investigator")},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        comment_plugin=CommentPluginService(database, runtime_dir / "plugin", enabled=True),
+        max_outer_rounds=1,
+        max_inner_rounds=1,
+    )
+
+    await orchestrator.run_task(task.id)
+
+    saved = await database.get_task(task.id)
+    events = await orchestrator.events.history(task.id)
+    assert saved is not None and saved.status == "paused"
+    assert saved.phase == "comment_selection"
+    assert any(
+        event.event == "warning" and event.data.get("code") == "COMMENT_CANDIDATES_EMPTY"
+        for event in events
+    )
+    assert any(
+        event.event == "task.status" and event.data.get("phase") == "comment_selection"
+        for event in events
+    )
+    await database.close()
 
 
 @pytest.mark.asyncio

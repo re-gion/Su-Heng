@@ -78,6 +78,8 @@ class Database:
         connection.executescript(schema)
         task_columns = {row[1] for row in connection.execute("PRAGMA table_info(task)").fetchall()}
         task_migrations = {
+            "resolved_event_query": "TEXT",
+            "request_kind": "TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery'))",
             "source_scope": "TEXT NOT NULL DEFAULT 'auto' CHECK (source_scope IN ('auto','domestic','global'))",
             "source_languages": 'TEXT NOT NULL DEFAULT \'["zh","en"]\'',
             "comment_mode": "TEXT NOT NULL DEFAULT 'off' CHECK (comment_mode IN ('off','smart','manual','hybrid'))",
@@ -93,6 +95,13 @@ class Database:
             connection.execute(
                 "ALTER TABLE evidence ADD COLUMN kind TEXT NOT NULL DEFAULT 'web' "
                 "CHECK (kind IN ('web','local_dataset','social_comments'))"
+            )
+        claim_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(claim)").fetchall()
+        }
+        if "analysis_data" not in claim_columns:
+            connection.execute(
+                "ALTER TABLE claim ADD COLUMN analysis_data TEXT NOT NULL DEFAULT '{}'"
             )
         connection.execute("DROP INDEX IF EXISTS ux_evidence_task_url")
         connection.execute(
@@ -169,12 +178,14 @@ class Database:
         task_id = f"t_{datetime.now():%Y%m%d}_{uuid.uuid4().hex[:8]}"
         await self.execute_write(
             """INSERT INTO task(
-                 id,event_query,user_note,time_range_from,time_range_to,depth,source_scope,
+                 id,event_query,resolved_event_query,request_kind,user_note,time_range_from,time_range_to,depth,source_scope,
                  source_languages,comment_mode,comment_urls,status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
             (
                 task_id,
                 data.event_query,
+                None,
+                data.request_kind,
                 data.user_note,
                 data.time_range_from,
                 data.time_range_to,
@@ -201,6 +212,12 @@ class Database:
         value["source_languages"] = json.loads(value.get("source_languages") or "[]")
         value["comment_urls"] = json.loads(value.get("comment_urls") or "[]")
         return TaskRecord.model_validate(value)
+
+    async def set_resolved_event_query(self, task_id: str, value: str) -> None:
+        await self.execute_write(
+            "UPDATE task SET resolved_event_query=?,updated_at=? WHERE id=?",
+            (value.strip(), now_iso(), task_id),
+        )
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
         rows = await self.fetch_all(
@@ -455,7 +472,20 @@ class Database:
         )
         return [self._evidence_record(row) for row in rows]
 
-    async def add_claim(self, data: ClaimCreate) -> ClaimRecord:
+    async def add_claim(
+        self,
+        data: ClaimCreate,
+        *,
+        max_claims: int,
+        max_evidence_per_claim: int,
+    ) -> ClaimRecord:
+        """写入 claim 并做上限校验。
+
+        上限由调用方注入而非在此查表：storage 是最底层，读不到配置系统，
+        把分档表写死在这里会让"改配置"无法生效。校验放在同一事务内是为了
+        原子性——三个调查 Agent 并发写 claim 时，事务外的预检查会互相越界。
+        """
+
         def operation(connection: sqlite3.Connection) -> str:
             task_row = connection.execute(
                 "SELECT depth,status FROM task WHERE id=?", (data.task_id,)
@@ -464,9 +494,8 @@ class Database:
                 raise ValueError("task not found")
             if task_row[1] in {"stopping", "done"}:
                 raise RuntimeError("task investigation is sealed")
-            max_evidence = {"quick": 3, "standard": 4, "deep": 6}[task_row[0]]
-            if len(data.evidence_ids) > max_evidence:
-                raise ValueError(f"当前深度单条 claim 最多绑定 {max_evidence} 条证据")
+            if len(data.evidence_ids) > max_evidence_per_claim:
+                raise ValueError(f"当前深度单条 claim 最多绑定 {max_evidence_per_claim} 条证据")
             existing_claim = connection.execute(
                 "SELECT local_id FROM claim WHERE task_id=? AND text=?", (data.task_id, data.text)
             ).fetchone()
@@ -482,15 +511,14 @@ class Database:
             count = connection.execute(
                 "SELECT COUNT(*) FROM claim WHERE task_id=?", (data.task_id,)
             ).fetchone()[0]
-            max_claims = {"quick": 15, "standard": 40, "deep": 70}[task_row[0]]
             if count >= max_claims:
                 raise ValueError(f"任务 claim 总数已达当前深度上限 {max_claims}")
             local_id = f"C{count + 1:03d}"
             claim_pk = uuid.uuid4().hex
             connection.execute(
                 """INSERT INTO claim(pk,task_id,local_id,text,statement_kind,rumor_text,correction_text,
-                   agent,round,section,is_editorial,is_key,is_key_reason,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   agent,round,section,is_editorial,is_key,is_key_reason,analysis_data,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     claim_pk,
                     data.task_id,
@@ -505,6 +533,7 @@ class Database:
                     int(data.is_editorial),
                     int(data.is_key),
                     data.is_key_reason,
+                    json.dumps(data.analysis_data, ensure_ascii=False),
                     now_iso(),
                 ),
             )
@@ -559,6 +588,7 @@ class Database:
         )
         values = dict(row)
         values["evidence_ids"] = [item["local_id"] for item in evidence_rows]
+        values["analysis_data"] = json.loads(values.get("analysis_data") or "{}")
         return ClaimRecord.model_validate(values)
 
     async def list_claims(self, task_id: str) -> list[ClaimRecord]:
@@ -576,13 +606,31 @@ class Database:
         content_text: str,
         snapshot_path: str,
         content_sha256: str,
+        published_at: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         def operation(connection: sqlite3.Connection) -> None:
             self._assert_investigation_open(connection, task_id)
+            existing = connection.execute(
+                "SELECT extra FROM evidence WHERE task_id=? AND local_id=?",
+                (task_id, local_id),
+            ).fetchone()
+            merged_extra = json.loads(existing[0]) if existing and existing[0] else {}
+            merged_extra.update(extra or {})
             connection.execute(
                 """UPDATE evidence SET fetch_status='fetched', fetched_at=?, content_text=?,
-                   snapshot_path=?, content_sha256=? WHERE task_id=? AND local_id=?""",
-                (now_iso(), content_text, snapshot_path, content_sha256, task_id, local_id),
+                   snapshot_path=?, content_sha256=?, published_at=COALESCE(?,published_at), extra=?
+                   WHERE task_id=? AND local_id=?""",
+                (
+                    now_iso(),
+                    content_text,
+                    snapshot_path,
+                    content_sha256,
+                    published_at,
+                    json.dumps(merged_extra, ensure_ascii=False) if merged_extra else None,
+                    task_id,
+                    local_id,
+                ),
             )
 
         await self.write(operation)
@@ -590,9 +638,15 @@ class Database:
     async def update_evidence_failed(self, task_id: str, local_id: str, reason: str) -> None:
         def operation(connection: sqlite3.Connection) -> None:
             self._assert_investigation_open(connection, task_id)
+            existing = connection.execute(
+                "SELECT extra FROM evidence WHERE task_id=? AND local_id=?",
+                (task_id, local_id),
+            ).fetchone()
+            merged_extra = json.loads(existing[0]) if existing and existing[0] else {}
+            merged_extra["fetch_error"] = reason
             connection.execute(
                 "UPDATE evidence SET fetch_status='fetch_failed', extra=? WHERE task_id=? AND local_id=?",
-                (json.dumps({"fetch_error": reason}, ensure_ascii=False), task_id, local_id),
+                (json.dumps(merged_extra, ensure_ascii=False), task_id, local_id),
             )
 
         await self.write(operation)
@@ -684,6 +738,13 @@ class Database:
         row = await self.fetch_one(
             "SELECT result_ref FROM task_state WHERE task_id=? AND kind='round_checkpoint' AND status='settled' ORDER BY id DESC LIMIT 1",
             (task_id,),
+        )
+        return json.loads(row["result_ref"]) if row else None
+
+    async def checkpoint(self, task_id: str, step_key: str) -> dict[str, Any] | None:
+        row = await self.fetch_one(
+            "SELECT result_ref FROM task_state WHERE task_id=? AND step_key=? AND kind='round_checkpoint' AND status='settled'",
+            (task_id, step_key),
         )
         return json.loads(row["result_ref"]) if row else None
 

@@ -6,10 +6,12 @@ import {
   getDataStatus,
   getCommentPluginStatus,
   getCommentCandidates,
+  getTopicCandidates,
   getTaskDetail,
   openCommentLogin,
   clearCommentProfile,
   submitCommentSelection,
+  submitTopicSelection,
   stopCommentCollection,
   listTasks,
   pauseTask,
@@ -17,11 +19,13 @@ import {
   stopTask,
   testConfig,
   updateConfig,
+  type BudgetTable,
   type PublicConfig,
   type DataStatus,
   type TaskListItem,
   type CommentPluginStatus,
   type CommentCandidates,
+  type TopicCandidates,
   type TaskDetail,
 } from './api/client'
 import { useTaskStream } from './events/useTaskStream'
@@ -41,6 +45,28 @@ const phaseLabels: Record<string, string> = {
   summarizing: '生成证据化陈述', verifying: '逐条交叉核验', reporting: '编排完整专报',
   finished: '分析完成', pausing: '正在停到安全点', stopping: '封存证据并出报告', skipped: '快速模式未启用',
   comment_selection: '等待确认高价值帖子', comment_collection: '采集确认帖子的评论', comment_analysis: '分析脱敏评论样本', awaiting_selection: '候选帖子待确认',
+  topic_discovery: '发现具体事件', topic_selection: '等待选择具体事件', scope_empty: '本轮没有合格材料',
+}
+
+// 设置页只提交"改动过的"预算字段：留空表示沿用默认，清空某格表示删掉那条覆盖。
+// 直接整体覆盖会让用户没重新填写的既有覆盖被静默抹掉。
+function mergeBudgetOverrides(base: BudgetTable, draft: Record<string, string>, depths: string[], fields: string[]): BudgetTable {
+  const overrides: BudgetTable = Object.fromEntries(Object.entries(base).map(([depth, values]) => [depth, { ...values }]))
+  for (const depth of depths) {
+    for (const field of fields) {
+      const raw = draft[`budget.${depth}.${field}`]
+      if (raw === undefined) continue
+      const table = overrides[depth] ?? {}
+      overrides[depth] = table
+      const trimmed = raw.trim()
+      if (trimmed === '') delete table[field]
+      else if (Number(trimmed) > 0) table[field] = Number(trimmed)
+    }
+  }
+  for (const depth of Object.keys(overrides)) {
+    if (!Object.keys(overrides[depth]).length) delete overrides[depth]
+  }
+  return overrides
 }
 
 function Settings({ onClose }: { onClose: () => void }) {
@@ -49,6 +75,7 @@ function Settings({ onClose }: { onClose: () => void }) {
   const [notice, setNotice] = useState('')
   const [providerOrder, setProviderOrder] = useState<string[]>([])
   const [commentStatus, setCommentStatus] = useState<CommentPluginStatus | null>(null)
+  const [resetBudgets, setResetBudgets] = useState(false)
   useEffect(() => { void getConfig().then((value) => { setConfig(value); setProviderOrder(value.search.provider_order) }).catch((error) => setNotice(String(error))) }, [])
   useEffect(() => { void getCommentPluginStatus().then(setCommentStatus).catch(() => setCommentStatus(null)) }, [])
   if (!config) return <main className="settings-page"><p>{notice || '正在读取配置…'}</p></main>
@@ -63,9 +90,11 @@ function Settings({ onClose }: { onClose: () => void }) {
       if (Object.keys(values).length) rolePayload[role] = values
     }
     const searchKeys = Object.fromEntries(Object.keys(currentConfig.search.keys).flatMap((name) => draft[`search.${name}`] ? [[name, draft[`search.${name}`]]] : []))
+    const budgetTouched = resetBudgets || Object.keys(draft).some((key) => key.startsWith('budget.'))
+    const budgetOverrides = resetBudgets ? {} : mergeBudgetOverrides(currentConfig.budget.overrides, draft, currentConfig.budget.depths, currentConfig.budget.fields)
     try {
-      const updated = await updateConfig({ llm: { roles: rolePayload }, search: { keys: searchKeys, provider_order: providerOrder }, comments: { enabled: draft['comments.enabled'] ? draft['comments.enabled'] === 'true' : currentConfig.comments.enabled } })
-      setConfig(updated); setProviderOrder(updated.search.provider_order); setDraft({}); setNotice('已保存。新配置会用于下一次任务。')
+      const updated = await updateConfig({ llm: { roles: rolePayload }, search: { keys: searchKeys, provider_order: providerOrder }, comments: { enabled: draft['comments.enabled'] ? draft['comments.enabled'] === 'true' : currentConfig.comments.enabled }, ...(budgetTouched ? { budget: { overrides: budgetOverrides } } : {}) })
+      setConfig(updated); setProviderOrder(updated.search.provider_order); setDraft({}); setResetBudgets(false); setNotice('已保存。新配置会用于下一次任务。')
     } catch (error) { setNotice(error instanceof Error ? error.message : '保存失败') }
   }
   async function test(kind: 'llm' | 'search', name: string) {
@@ -90,6 +119,12 @@ function Settings({ onClose }: { onClose: () => void }) {
         </article>)}</div>
       </section>
       <section><h2>搜索降级链</h2><div className="provider-order" aria-label="搜索优先级">{providerOrder.map((name, index) => <span key={name}><strong>{index + 1}. {name}</strong><button type="button" disabled={index === 0} onClick={() => setProviderOrder((order) => { const next = [...order]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}>↑</button><button type="button" disabled={index === providerOrder.length - 1} onClick={() => setProviderOrder((order) => { const next = [...order]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}>↓</button></span>)}</div><div className="search-config-grid">{Object.entries(currentConfig.search.keys).map(([name, masked]) => <label key={name}><span>{name}<button type="button" onClick={() => void test('search', name)}>测试</button></span><input type="password" value={draft[`search.${name}`] ?? ''} onChange={(event) => set(`search.${name}`, event.target.value)} placeholder={masked ?? '未配置'} /></label>)}</div></section>
+      <section><h2>调查深度预算</h2><p className="muted">留空沿用当前有效值，清空某一格即删除该条覆盖（取值来源：{currentConfig.budget.source === 'config' ? '配置表' : '默认值'}）。核验额度必须随 claim 上限同比例调整——实测约 2.4 条核验关系/条 claim，额度不足时超出的陈述会被整条跳过并强制标为待核验。<button type="button" className="quiet" onClick={() => { setResetBudgets(true); setDraft((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith('budget.')))) }}>全部恢复默认</button></p>
+        <div className="budget-grid">{currentConfig.budget.depths.map((depth) => <article key={depth}>
+          <header><strong>{depth}</strong><small>{Object.keys(currentConfig.budget.overrides[depth] ?? {}).length ? `已覆盖 ${Object.keys(currentConfig.budget.overrides[depth]).length} 项` : '默认'}</small></header>
+          {currentConfig.budget.fields.map((field) => <label key={field}>{field}<input type="number" min={1} value={draft[`budget.${depth}.${field}`] ?? ''} onChange={(event) => set(`budget.${depth}.${field}`, event.target.value)} placeholder={String(currentConfig.budget.effective[depth]?.[field] ?? '')} /></label>)}
+        </article>)}</div>
+      </section>
       <section><h2>登录态评论插件</h2><p className="muted">仅限本机使用。登录信息留在专用浏览器 profile，不写入数据库或报告。</p><label className="toggle-row"><input type="checkbox" checked={(draft['comments.enabled'] ? draft['comments.enabled'] === 'true' : currentConfig.comments.enabled)} disabled={!commentStatus?.available} onChange={(event) => set('comments.enabled', String(event.target.checked))} />启用智能选帖与登录态评论采集</label><p className="muted">{commentStatus?.risk_notice}</p><div className="platform-login-grid">{commentStatus?.platforms.map((item) => <article key={item.platform}><strong>{item.platform}</strong><small>{item.browser_open ? '登录浏览器已打开' : item.profile_present ? '已有本地 profile' : '尚未登录'}</small><button type="button" disabled={!commentStatus.available || !currentConfig.comments.enabled} onClick={() => void openCommentLogin(item.platform).then(() => setNotice(`${item.platform} 登录浏览器已打开`)).catch((error) => setNotice(String(error)))}>打开登录浏览器</button><button type="button" className="quiet" disabled={!item.profile_present} onClick={() => { if (confirm(`确定清除 ${item.platform} 的专用浏览器登录数据？`)) void clearCommentProfile(item.platform).then(() => getCommentPluginStatus().then(setCommentStatus)) }}>清除登录</button></article>)}</div></section>
       <div className="settings-save"><button>保存配置</button><span>{notice}</span></div>
     </form>
@@ -111,9 +146,12 @@ function App() {
   const [commentMode, setCommentMode] = useState<'off' | 'smart' | 'manual' | 'hybrid'>('off')
   const [commentUrls, setCommentUrls] = useState('')
   const [commentCandidates, setCommentCandidates] = useState<CommentCandidates | null>(null)
+  const [topicCandidates, setTopicCandidates] = useState<TopicCandidates | null>(null)
   const [taskDetail, setTaskDetail] = useState<TaskDetail | null>(null)
   const [selectedCandidates, setSelectedCandidates] = useState<string[]>([])
   const [supplementalCommentUrls, setSupplementalCommentUrls] = useState('')
+  const [selectedTopic, setSelectedTopic] = useState('')
+  const [manualTopic, setManualTopic] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
   const [tasks, setTasks] = useState<TaskListItem[]>([])
@@ -129,6 +167,11 @@ function App() {
     void getTaskDetail(taskId).then(setTaskDetail).catch(() => setTaskDetail(null))
   }, [taskId, streamRevision])
   useEffect(() => { if (taskId && stream.phase === 'comment_selection') void getCommentCandidates(taskId).then((value) => { setCommentCandidates(value); setSelectedCandidates(value.items.slice(0, value.budgets.posts).map((item) => item.id)) }).catch(() => setCommentCandidates(null)); else setCommentCandidates(null) }, [taskId, stream.phase])
+  useEffect(() => {
+    const phase = taskDetail?.phase ?? stream.phase
+    if (taskId && phase === 'topic_selection') void getTopicCandidates(taskId).then((value) => { setTopicCandidates(value); setSelectedTopic(value.items[0]?.id ?? '') }).catch(() => setTopicCandidates(null))
+    else setTopicCandidates(null)
+  }, [taskId, taskDetail?.phase, stream.phase])
 
   function selectTask(id: string) { history.replaceState(null, '', `?task=${encodeURIComponent(id)}`); setTaskId(id); setStreamRevision((value) => value + 1) }
   function clearTask() { history.replaceState(null, '', location.pathname); setTaskId(null); setStreamRevision((value) => value + 1) }
@@ -147,6 +190,7 @@ function App() {
   const detailPhase = taskDetail?.phase ?? stream.phase
   const detailStatus = taskDetail?.status ?? stream.status
   const canCommentSelection = detailPhase === 'comment_selection' && detailStatus === 'paused'
+  const canTopicSelection = detailPhase === 'topic_selection' && detailStatus === 'paused'
   const canStopTask = ['running', 'pausing', 'paused'].includes(detailStatus)
 
   return <>
@@ -162,15 +206,17 @@ function App() {
 
       {dataStatus && <section className="data-depth"><div><span className="section-kicker">DATA / 数据纵深</span><h2>本地辅助层</h2><p>只对已覆盖事件优先命中；没有命中时，历史 Agent 会如实回退搜索。</p></div><dl><div><dt>数据资产</dt><dd>{dataStatus.assets}</dd></div><div><dt>历史事件</dt><dd>{dataStatus.historical_events}</dd></div><div><dt>热榜采集点</dt><dd>{dataStatus.hot_snapshots}</dd></div><div><dt>覆盖截止</dt><dd>{dataStatus.hot_coverage.to?.slice(0, 16) ?? '尚未采集'}</dd></div></dl></section>}
 
-      {tasks.length > 0 && <section className="task-shelf"><span className="section-kicker">历史 / 任务台账</span><div className="task-list">{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.event_query}</strong><small>{item.status} · {item.task_id}</small></button><div className="task-actions">{item.comment_selection_required && <button onClick={() => selectTask(item.task_id)}>确认评论</button>}{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); setTasks(await listTasks()) })}>删除</button>}</div></article>)}</div></section>}
+      {tasks.length > 0 && <section className="task-shelf"><span className="section-kicker">历史 / 任务台账</span><div className="task-list">{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.resolved_event_query ?? item.event_query}</strong><small>{item.status} · {item.task_id}</small></button><div className="task-actions">{item.topic_selection_required && <button onClick={() => selectTask(item.task_id)}>选择事件</button>}{item.comment_selection_required && <button onClick={() => selectTask(item.task_id)}>确认评论</button>}{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); setTasks(await listTasks()) })}>删除</button>}</div></article>)}</div></section>}
 
       {taskId && <>
         <section className="run-console"><div className="run-status"><span className={`status-dot ${stream.status}`} /><div><span className="section-kicker">02 / {stream.status}</span><h2>{phaseLabels[stream.phase] ?? stream.phase}</h2><p className="mono">{taskId} · EVENT {String(stream.lastSeq).padStart(3, '0')}</p></div><div className="run-actions">{stream.status === 'running' && canStopTask && <button onClick={() => void action(() => pauseTask(taskId))}>暂停</button>}{stream.phase === 'comment_collection' && <button onClick={() => void action(() => stopCommentCollection(taskId))}>停止评论采集</button>}{canStopTask && <button onClick={() => void action(async () => { await stopTask(taskId); selectTask(taskId) })}>停止并出报告</button>}{stream.reportUrl && <a className="report-link" href={stream.reportUrl}>打开完整专报 →</a>}</div></div>
           <div className="budget-line"><span style={{ width: `${budgetPercent}%` }} /><small>{stream.budget.tokensUsed.toLocaleString()} / {stream.budget.tokensLimit.toLocaleString() || '—'} tokens · {stream.budget.calls} 次调用</small></div></section>
 
+        {canTopicSelection && topicCandidates && <section className="comment-candidates"><span className="section-kicker">范围确认 / 具体事件</span><h2>先选定这次要深入调查的事件</h2><p>“{topicCandidates.original_query}”是宽泛主题。系统只发现候选，不会把多个事件混成一份报告。</p>{topicCandidates.items.length > 0 ? <div>{topicCandidates.items.map((item) => <label key={item.id} className="candidate-card"><input type="radio" name="topic-candidate" checked={selectedTopic === item.id} onChange={() => { setSelectedTopic(item.id); setManualTopic('') }} /><span><strong>{item.title}</strong><small>{item.source_name} · {item.published_at?.slice(0, 10) ?? '日期待原文确认'} · {item.date_status}</small><a href={item.url} target="_blank" rel="noreferrer">查看候选来源</a></span></label>)}</div> : <p className="degradation">本轮检索未找到可作为具体事件入口的可靠候选；系统没有用导航页或无关结果凑数。请在下方输入要调查的具体事件。</p>}<textarea value={manualTopic} onChange={(event) => { setManualTopic(event.target.value); setSelectedTopic('') }} placeholder="候选不准确时，可填写一个具体事件或争议点" aria-label="具体事件" /><div className="candidate-actions"><button disabled={!selectedTopic && !manualTopic.trim()} onClick={() => void action(async () => { await submitTopicSelection(taskId, selectedTopic ? { candidate_id: selectedTopic } : { event_query: manualTopic.trim() }); selectTask(taskId) })}>确认事件并开始深入调查</button></div></section>}
+
         <section className="agent-rail"><span className="section-kicker">03 / 并行调查席</span><div className="agent-panels">{visibleAgents.map(([key, label, description]) => <article key={key} data-agent={key}><div className="agent-index">{key === 'fact_investigator' ? 'A' : key === 'media_propagation' ? 'B' : key === 'history_insight' ? 'C' : 'D'}</div><h3>{label}</h3><p>{description}</p><strong>{phaseLabels[stream.agents[key]] ?? stream.agents[key] ?? '等待调度'}</strong></article>)}</div></section>
 
-        {canCommentSelection && commentCandidates && <section className="comment-candidates"><span className="section-kicker">V2 / 评论候选确认</span><h2>选择值得进入的评论区</h2><p>最多 {commentCandidates.budgets.posts} 帖，每帖 {commentCandidates.budgets.comments_per_post} 条。确认前系统不会访问登录态内容。</p>{hasCommentCandidates ? <><div>{commentCandidates.items.map((item) => <label key={item.id} className="candidate-card"><input type="checkbox" checked={selectedCandidates.includes(item.id)} disabled={!selectedCandidates.includes(item.id) && selectedCandidates.length >= commentCandidates.budgets.posts} onChange={(event) => setSelectedCandidates((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span><strong>{item.platform} · {item.title}</strong><small>评分 {item.score.toFixed(1)} · {item.reasons.join(' / ')} · {item.login_profile_present ? '已有登录 profile' : '需先登录'}</small><a href={item.url} target="_blank" rel="noreferrer">查看原帖</a></span></label>)}</div>{allowsSupplementalCommentUrls && <textarea value={supplementalCommentUrls} onChange={(event) => setSupplementalCommentUrls(event.target.value)} placeholder="可选：每行补充一个帖子 URL，确认时一并采集" aria-label="补充帖子 URL" />}<div className="candidate-actions"><button disabled={!selectedCandidates.length && !(allowsSupplementalCommentUrls && supplementalCommentUrls.trim())} onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'approve', candidate_ids: selectedCandidates, urls: supplementalCommentUrls.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) }); selectTask(taskId) })}>确认并采集</button><button className="quiet" onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'skip' }); selectTask(taskId) })}>跳过评论，继续报告</button></div></> : <><p className="muted">当前没有可审批的系统候选。你可以直接跳过评论继续报告，或返回调整调查范围后重试。</p><div className="candidate-actions"><button className="quiet" onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'skip' }); selectTask(taskId) })}>跳过评论，继续报告</button></div></>}</section>}
+        {canCommentSelection && commentCandidates && <section className="comment-candidates"><span className="section-kicker">V2 / 评论候选确认</span><h2>选择值得进入的评论区</h2><p>最多 {commentCandidates.budgets.posts} 帖，每帖 {commentCandidates.budgets.comments_per_post} 条。确认前系统不会访问登录态内容。</p>{hasCommentCandidates ? <><div>{commentCandidates.items.map((item) => <label key={item.id} className="candidate-card"><input type="checkbox" checked={selectedCandidates.includes(item.id)} disabled={!selectedCandidates.includes(item.id) && selectedCandidates.length >= commentCandidates.budgets.posts} onChange={(event) => setSelectedCandidates((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span><strong>{item.platform} · {item.title}</strong><small>评分 {item.score.toFixed(1)} · {item.reasons.join(' / ')} · {item.login_profile_present ? '已有登录 profile' : '需先登录'}</small><a href={item.url} target="_blank" rel="noreferrer">查看原帖</a></span></label>)}</div>{allowsSupplementalCommentUrls && <textarea value={supplementalCommentUrls} onChange={(event) => setSupplementalCommentUrls(event.target.value)} placeholder="可选：每行补充一个帖子 URL，确认时一并采集" aria-label="补充帖子 URL" />}<div className="candidate-actions"><button disabled={!selectedCandidates.length && !(allowsSupplementalCommentUrls && supplementalCommentUrls.trim())} onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'approve', candidate_ids: selectedCandidates, urls: supplementalCommentUrls.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) }); selectTask(taskId) })}>确认并采集</button><button className="quiet" onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'skip' }); selectTask(taskId) })}>跳过评论，继续报告</button></div></> : <><p className="muted">系统没有找到达到相关度门槛的帖子。下面保留了逐平台结果；请补充帖子 URL，或明确跳过评论洞察。</p>{commentCandidates.discovery_attempts.length > 0 && <div className="discovery-diagnostics">{commentCandidates.discovery_attempts.map((item, index) => <p key={`${item.platform}-${index}`}><strong>{item.platform}</strong> · {item.status === 'found' ? `发现 ${item.count} 条` : item.status === 'empty' ? '未发现匹配帖子' : '发现失败'}{item.error ? ` · ${item.error}` : ''}</p>)}</div>}<textarea value={supplementalCommentUrls} onChange={(event) => setSupplementalCommentUrls(event.target.value)} placeholder="每行补充一个帖子 URL" aria-label="补充帖子 URL" /><div className="candidate-actions"><button disabled={!supplementalCommentUrls.trim()} onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'approve', urls: supplementalCommentUrls.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) }); selectTask(taskId) })}>使用补充 URL 并采集</button><button className="quiet" onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'skip' }); selectTask(taskId) })}>明确跳过评论，继续报告</button></div></>}</section>}
 
         <section className="collaboration-grid"><article className="forum-board"><span className="section-kicker">04 / 论坛黑板</span><h2>Agent 原始讨论流</h2>{stream.forum.length === 0 ? <p className="muted">等待各调查席发言…</p> : stream.forum.map((item, index) => <div className={`forum-message ${item.type}`} key={`${index}-${item.content}`}><span>R{item.round} · {item.agent}</span><strong>{item.type}</strong><p>{item.content}</p></div>)}</article>
           <article className="host-board"><span className="section-kicker">05 / 主持人评审</span><h2>缺口，不是表演出来的争论</h2>{stream.hostReviews.length === 0 ? <p className="muted">首轮调查汇合后开始评审。</p> : stream.hostReviews.map((review, index) => <div className="host-review" key={`${index}-${review.reason}`}><strong>{review.release ? '放行' : '继续补查'}</strong><p>{review.reason}</p>{review.gaps.map((gap) => <small key={gap.desc}>{gap.priority} · {gap.desc}</small>)}</div>)}</article></section>

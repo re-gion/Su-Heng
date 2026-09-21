@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -8,6 +9,7 @@ from typing import Protocol
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
 from yuqing.render.validator import validate_report
+from yuqing.services.verification import is_attribution_claim, stance_drop_reason
 from yuqing.storage.db import Database
 
 
@@ -34,12 +36,21 @@ class BriefReportBuilder:
         rendered_claims = []
         appendix: dict[str, dict] = {}
         rejection_reasons: dict[str, int] = {}
+        stance_drops: Counter[str] = Counter()
         rejected_citations = 0
         for claim in claims:
             rows = await self.database.claim_evidence_rows(claim.pk)
             citations = []
             states = []
+            attribution = is_attribution_claim(claim.text)
             for row in rows:
+                drop_reason = stance_drop_reason(
+                    relation=row["relation"],
+                    source_role=row["source_role"],
+                    attribution_claim=attribution,
+                )
+                if drop_reason is not None:
+                    stance_drops[drop_reason] += 1
                 note = None
                 if row["fetch_status"] == "discovered":
                     note = "原文未取得"
@@ -104,6 +115,7 @@ class BriefReportBuilder:
             rendered_claims.append(
                 {
                     "claim_ref": claim.local_id,
+                    "origin_agent": claim.agent,
                     "statement_kind": claim.statement_kind,
                     "text": claim.text,
                     "rumor_text": claim.rumor_text,
@@ -111,6 +123,7 @@ class BriefReportBuilder:
                     "badge": claim.badge or "unverified",
                     "verdict": claim.verdict or "not_mentioned",
                     "verification_state": claim.verification_state,
+                    "verify_reason": claim.verify_reason,
                     "independent_sources": claim.independent_sources,
                     "max_source_tier": claim.max_source_tier,
                     "evidence_grade": grade,
@@ -131,6 +144,10 @@ class BriefReportBuilder:
             "key_claims_verification_skipped": sum(
                 item["verification_state"] == "skipped" for item in rendered_claims
             ),
+            "key_claims_verification_incomplete": sum(
+                item["verification_state"] == "incomplete" for item in rendered_claims
+            ),
+            "stance_drops": dict(stance_drops),
             "citation_coverage": 1.0 if total else 0.0,
             "verified_rate": verified / total if total else 0.0,
             "weighted_verified_rate": (
@@ -154,6 +171,9 @@ class BriefReportBuilder:
             "evidence_snippet_only": sum(
                 item["fetch_status"] != "fetched" for item in evidence_items
             ),
+            # independent_publishers 与 time_span_days 是占位值：FullReportBuilder
+            # 会在 metrics.update() 里用全量证据重算并覆盖（含 source_name/source_domain
+            # 兜底），以保证报告里展示的独立信源数与计数口径一致。
             "independent_publishers": len({item["publisher_entity"] for item in evidence_items}),
             "time_span_days": 1,
         }
@@ -175,28 +195,11 @@ class BriefReportBuilder:
                 }
             )
         summary_items = []
-        rejected_summary = 0
-        for item in rendered_claims[:12]:
+        # 摘要逐字回填陈述，不再让模型判断同一句话是否蕴含自身。
+        # 综合报告只选择编号；解释和建议进入独立编辑分析及语义审查。
+        for item in rendered_claims[:6]:
             summary = {"text": item["text"], "claim_ref": item["claim_ref"]}
-            if self.entailment_verifier is not None:
-                try:
-                    supported = await self.entailment_verifier.entails(
-                        item["text"], summary["text"]
-                    )
-                except Exception:
-                    supported = False
-                if not supported:
-                    rejected_summary += 1
-                    continue
             summary_items.append(summary)
-        if rejected_summary:
-            limitations.append(
-                {
-                    "id": "L03",
-                    "category": "摘要语义校验",
-                    "text": f"{rejected_summary} 条摘要句未通过蕴含校验，已从执行摘要移除。",
-                }
-            )
         report = {
             "schema_version": CURRENT_SCHEMA_VERSION,
             "min_reader_minor": CURRENT_READER_MINOR,
@@ -208,6 +211,9 @@ class BriefReportBuilder:
                 "source_scope": task.source_scope,
                 "source_languages": task.source_languages,
                 "comment_mode": task.comment_mode,
+                "time_range_from": task.time_range_from,
+                "time_range_to": task.time_range_to,
+                "user_note": task.user_note,
                 "generated_at": stamp,
             },
             "metrics": metrics,

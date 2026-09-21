@@ -18,8 +18,26 @@ LENGTH_RETRY_MAX_TOKENS = 8192
 
 # 5xx 网关故障常伴随约 60s 等待与 HTML 错误页；三次浅重试撑不过故障窗口，
 # 且错误页原文一旦进入用户可见消息就违反"不暴露上游响应全文"的约定。
-UPSTREAM_RETRY_ATTEMPTS = 5
-UPSTREAM_RETRY_MAX_WAIT = 30
+# 退避序列 2/4/8/16/32 秒累计约 62 秒，覆盖注释所述故障窗口。
+UPSTREAM_RETRY_ATTEMPTS = 6
+UPSTREAM_RETRY_MAX_WAIT = 60
+
+# 上游不可用（可恢复）的异常集合。重试策略与"该不该把这次失败记成材料问题"
+# 共用同一份定义，避免两处判断漂移。
+UPSTREAM_RETRY_EXCEPTIONS = (
+    TimeoutError,
+    ConnectionError,
+    json.JSONDecodeError,
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+    InternalServerError,
+)
+
+
+def is_upstream_failure(exc: BaseException) -> bool:
+    """上游服务/网关故障（换时间重试可能成功），区别于材料本身的语义问题。"""
+    return isinstance(exc, UPSTREAM_RETRY_EXCEPTIONS)
 
 
 def sanitize_upstream_message(exc: BaseException) -> str:
@@ -42,17 +60,7 @@ class LLMGateway:
     @retry(
         stop=stop_after_attempt(UPSTREAM_RETRY_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=2, max=UPSTREAM_RETRY_MAX_WAIT),
-        retry=retry_if_exception_type(
-            (
-                TimeoutError,
-                ConnectionError,
-                json.JSONDecodeError,
-                APIConnectionError,
-                APITimeoutError,
-                RateLimitError,
-                InternalServerError,
-            )
-        ),
+        retry=retry_if_exception_type(UPSTREAM_RETRY_EXCEPTIONS),
         reraise=True,
     )
     async def complete_json(

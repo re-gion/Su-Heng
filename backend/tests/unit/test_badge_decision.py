@@ -115,3 +115,48 @@ def test_syndicated_and_unknown_sources_cannot_manufacture_independent_support()
         verification_complete=True,
     )
     assert decide_badge(inputs).rule == "D11"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "rule", "note"),
+    [
+        # 只拿到"部分支持"：徽章仍是待核验（D11），但结论必须写"部分支持"，
+        # 不能写成"无有效证据"——那会让读过材料的读者以为没人提过这件事。
+        ([EntityEvidence("媒体甲", "independent", 2, "partial")], "D11", "部分支持"),
+        (
+            [
+                EntityEvidence("媒体甲", "independent", 2, "support"),
+                EntityEvidence("媒体乙", "independent", 2, "partial"),
+            ],
+            "D10",
+            "部分支持",
+        ),
+        # 对照：确实没有任何有效立场时，才写"无有效证据"。
+        ([EntityEvidence("媒体甲", "independent", 2, "not_mentioned")], "D11", "无有效证据"),
+        (
+            [EntityEvidence("媒体甲", "independent", 2, "support")],
+            "D10",
+            "单一非权威来源支持",
+        ),
+    ],
+)
+def test_partial_stance_changes_the_card_note_not_the_badge(evidence, rule, note):
+    result = decide_badge(merge_stances(evidence, verification_complete=True))
+
+    assert (result.rule, result.note) == (rule, note)
+    assert result.badge == "unverified"
+
+
+def test_authority_group_is_judged_as_a_whole_after_entity_merging():
+    # 同一采编主体归并后，组内可能混有 authority 站点与门户号。裁判性权威资格
+    # 必须按整组判定，否则会被证据绑定顺序决定，静默丢掉 D8 的单源·官方路径。
+    merged_with_portal_first = merge_stances(
+        [
+            EntityEvidence("同一主体", "syndicated", 3, "support"),
+            EntityEvidence("同一主体", "authority", 1, "support"),
+        ],
+        verification_complete=True,
+    )
+
+    assert merged_with_portal_first.authority_s == 1
+    assert decide_badge(merged_with_portal_first).rule == "D8"

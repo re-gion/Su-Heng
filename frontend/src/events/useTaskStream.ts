@@ -23,7 +23,9 @@ export function useTaskStream(taskId: string | null, revision = 0) {
         return
       }
       dispatch(message)
-      if (message.event === 'task.status' && ['done', 'failed', 'paused'].includes(String(message.data.status))) {
+      // paused 是可恢复的中间态；重放历史事件时其后可能已有 running/report.done。
+      // 只在真正终态关闭，避免旧的评论确认事件截断后续报告事件。
+      if (message.event === 'task.status' && ['done', 'failed'].includes(String(message.data.status))) {
         source.close()
       }
     }

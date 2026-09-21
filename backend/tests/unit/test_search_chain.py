@@ -130,6 +130,61 @@ async def test_search_chain_falls_back_and_exposes_degradation():
 
 
 @pytest.mark.asyncio
+async def test_search_chain_enforces_domain_filter_and_tries_next_provider():
+    primary = Provider(
+        "primary",
+        result=[
+            SearchResult(
+                url="https://en.wikipedia.org/wiki/Unrelated",
+                title="站外结果",
+                snippet="上游忽略了域名过滤",
+                provider="primary",
+            )
+        ],
+    )
+    fallback = Provider(
+        "fallback",
+        result=[
+            SearchResult(
+                url="https://www.bilibili.com/video/BV1xx411c7mD",
+                title="目标平台帖子",
+                snippet="与事件相关",
+                provider="fallback",
+            )
+        ],
+    )
+    chain = SearchChain([primary, fallback])
+
+    results = await chain.search(SearchParams(query="具体事件", include_domains=["bilibili.com"]))
+
+    assert [item.url for item in results] == ["https://www.bilibili.com/video/BV1xx411c7mD"]
+    assert primary.calls == fallback.calls == 1
+    assert chain.last_provider == "fallback"
+    assert chain.last_degraded_from == "primary"
+
+
+@pytest.mark.asyncio
+async def test_search_chain_returns_empty_when_only_provider_ignores_domain_filter():
+    provider = Provider(
+        "only",
+        result=[
+            SearchResult(
+                url="https://example.com/not-a-post",
+                title="站外结果",
+                snippet="不能泄漏到调用方",
+                provider="only",
+            )
+        ],
+    )
+
+    results = await SearchChain([provider]).search(
+        SearchParams(query="事件", include_domains=["weibo.com"])
+    )
+
+    assert results == []
+
+
+@pytest.mark.asyncio
 async def test_search_chain_skips_provider_missing_required_capability():
     incapable = Provider("incapable", result=[])
     incapable.capabilities = set()

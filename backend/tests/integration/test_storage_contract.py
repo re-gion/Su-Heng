@@ -7,7 +7,9 @@ from yuqing.storage.models import ClaimCreate, EvidenceCreate, QuoteCreate, Task
 
 
 @pytest.mark.asyncio
-async def test_two_tasks_get_independent_local_ids_and_invalid_states_are_rejected(runtime_dir):
+async def test_two_tasks_get_independent_local_ids_and_invalid_states_are_rejected(
+    runtime_dir, claim_limits
+):
     database = Database(runtime_dir / "yuqing.db")
     await database.initialize()
 
@@ -37,7 +39,8 @@ async def test_two_tasks_get_independent_local_ids_and_invalid_states_are_reject
             text="事件一已有公开报道。",
             agent="fact_investigator",
             evidence_ids=[first_evidence.local_id],
-        )
+        ),
+        **claim_limits,
     )
 
     assert first_evidence.local_id == "E001"
@@ -80,7 +83,8 @@ async def test_two_tasks_get_independent_local_ids_and_invalid_states_are_reject
                         quote_type="verbatim",
                     )
                 ],
-            )
+            ),
+            **claim_limits,
         )
 
     with pytest.raises(sqlite3.IntegrityError):
@@ -92,7 +96,63 @@ async def test_two_tasks_get_independent_local_ids_and_invalid_states_are_reject
                 correction_text="非法更正",
                 agent="fact_investigator",
                 evidence_ids=[first_evidence.local_id],
-            )
+            ),
+            **claim_limits,
         )
 
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_limits_come_from_the_caller_and_are_enforced(runtime_dir):
+    """上限由调用方注入（storage 读不到配置系统），注入值必须真正生效。"""
+    database = Database(runtime_dir / "limits.db")
+    await database.initialize()
+    task = await database.create_task(TaskCreate(event_query="预算上限", depth="quick"))
+    evidence = [
+        await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url=f"https://news.example.com/{index}",
+                title=f"来源{index}",
+                snippet=f"公开摘要{index}",
+                provider="fixture",
+            )
+        )
+        for index in range(3)
+    ]
+
+    with pytest.raises(ValueError, match="最多绑定 2 条证据"):
+        await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                text="绑定三条证据超出注入上限。",
+                agent="fact_investigator",
+                evidence_ids=[item.local_id for item in evidence],
+            ),
+            max_claims=10,
+            max_evidence_per_claim=2,
+        )
+
+    await database.add_claim(
+        ClaimCreate(
+            task_id=task.id,
+            text="第一条陈述。",
+            agent="fact_investigator",
+            evidence_ids=[evidence[0].local_id],
+        ),
+        max_claims=1,
+        max_evidence_per_claim=2,
+    )
+    with pytest.raises(ValueError, match="上限 1"):
+        await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                text="第二条陈述。",
+                agent="fact_investigator",
+                evidence_ids=[evidence[0].local_id],
+            ),
+            max_claims=1,
+            max_evidence_per_claim=2,
+        )
     await database.close()

@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import Sequence
 from contextvars import ContextVar
+from urllib.parse import urlsplit
 
 from yuqing.core.search.base import SearchParams, SearchProvider, SearchResult
 
@@ -57,9 +58,30 @@ class SearchChain:
             return False
         return True
 
+    @staticmethod
+    def _apply_domain_filters(
+        results: list[SearchResult], params: SearchParams
+    ) -> list[SearchResult]:
+        include = {item.lower().lstrip(".") for item in params.include_domains}
+        exclude = {item.lower().lstrip(".") for item in params.exclude_domains}
+
+        def matches(host: str, domains: set[str]) -> bool:
+            return any(host == domain or host.endswith(f".{domain}") for domain in domains)
+
+        filtered: list[SearchResult] = []
+        for result in results:
+            host = (urlsplit(result.url).hostname or "").lower()
+            if include and not matches(host, include):
+                continue
+            if exclude and matches(host, exclude):
+                continue
+            filtered.append(result)
+        return filtered[: params.top_k]
+
     async def search(self, params: SearchParams) -> list[SearchResult]:
         errors: list[str] = []
         first_attempted: str | None = None
+        last_successful: str | None = None
         required = "freshness" if params.freshness != "noLimit" else None
         eligible = [
             provider
@@ -97,11 +119,23 @@ class SearchChain:
                     self._opened_at[provider.name] = time.monotonic()
                 continue
             self._failures[provider.name] = 0
+            last_successful = provider.name
+            results = self._apply_domain_filters(results, params)
+            # 部分上游把 include_domains 当提示而非约束。域名过滤后为空时，
+            # 继续尝试下一 provider，避免把站外结果误当成目标平台帖子。
+            if (params.include_domains or params.exclude_domains) and not results:
+                continue
             self._last_provider.set(provider.name)
             self._last_degraded_from.set(
                 first_attempted if first_attempted and first_attempted != provider.name else None
             )
             return results
+        if last_successful is not None:
+            self._last_provider.set(last_successful)
+            self._last_degraded_from.set(
+                first_attempted if first_attempted and first_attempted != last_successful else None
+            )
+            return []
         raise SearchChainExhausted(
             "搜索链全部不可用：" + "; ".join(errors or ["无匹配能力的 provider"])
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -8,6 +9,37 @@ from typing import Literal
 Relation = Literal["support", "partial", "contradict", "not_mentioned", "conflict"]
 Badge = Literal["verified", "unverified", "disputed", "refuted"]
 SourceRole = Literal["authority", "party", "independent", "syndicated", "unknown"]
+DropReason = Literal["not_mentioned", "syndicated", "unknown", "party", "unverified"]
+
+# 陈述形如"X 方发布/回应/声明……"时属于归属性陈述：当事方声明可以证实
+# "该方作出过此表述"，因此其 party 证据不再剔除（05 §0.4 当事方规则）。
+ATTRIBUTION_PATTERN = re.compile(r"^.+(发布|回应|声明|表示|称)")
+
+
+def is_attribution_claim(text: str) -> bool:
+    return bool(ATTRIBUTION_PATTERN.match(text))
+
+
+def stance_drop_reason(
+    *,
+    relation: Relation | None,
+    source_role: SourceRole,
+    attribution_claim: bool,
+) -> DropReason | None:
+    """该证据行不参与独立信源计数的原因；参与计数时返回 None。
+
+    merge_stances 用它过滤，报告层用它统计——同一份策略只写一次，
+    否则"哪些证据被丢弃"会在实现与报告之间漂移，而丢弃本身是静默的。
+    """
+    if relation is None:
+        return "unverified"
+    if relation == "not_mentioned":
+        return "not_mentioned"
+    if source_role in {"syndicated", "unknown"}:
+        return source_role
+    if source_role == "party" and not attribution_claim:
+        return "party"
+    return None
 
 
 @dataclass(frozen=True)
@@ -18,6 +50,9 @@ class BadgeInputs:
     authority_s: int
     authority_u: int
     verification_complete: bool
+    # 是否存在只拿到"部分支持"立场的主体（05-核心契约 §4.3 计数表）。
+    # 它不影响徽章颜色，只影响卡片上怎么写结论。
+    has_partial: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,8 +92,10 @@ def decide_badge(value: BadgeInputs) -> BadgeDecision:
     if value.ind_s == 0 and value.ind_u == 0 and value.has_conflict:
         return BadgeDecision("disputed", "D9", "材料内部矛盾")
     if value.ind_s == 1 and value.ind_u == 0 and not value.has_conflict:
-        return BadgeDecision("unverified", "D10", "单一非权威来源支持")
-    return BadgeDecision("unverified", "D11", "无有效证据")
+        return BadgeDecision(
+            "unverified", "D10", "部分支持" if value.has_partial else "单一非权威来源支持"
+        )
+    return BadgeDecision("unverified", "D11", "部分支持" if value.has_partial else "无有效证据")
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -96,16 +133,20 @@ def merge_stances(
 ) -> BadgeInputs:
     grouped: dict[str, list[EntityEvidence]] = defaultdict(list)
     for item in evidence:
-        if item.relation == "not_mentioned":
-            continue
-        if item.source_role in {"syndicated", "unknown"}:
-            continue
-        if item.source_role == "party" and not attribution_claim:
+        if (
+            stance_drop_reason(
+                relation=item.relation,
+                source_role=item.source_role,
+                attribution_claim=attribution_claim,
+            )
+            is not None
+        ):
             continue
         grouped[item.publisher_entity or "unknown"].append(item)
 
     ind_s = ind_u = authority_s = authority_u = 0
     has_conflict = False
+    has_partial = False
     for group in grouped.values():
         if any(item.relation == "conflict" for item in group):
             has_conflict = True
@@ -124,8 +165,16 @@ def merge_stances(
         if stance == "self_conflict":
             has_conflict = True
             continue
-        representative = group[-1]
-        is_authority = representative.source_role == "authority" and representative.source_tier == 1
+        if stance == "partial":
+            # partial 不产生支持/反证计数（D11 有意如此），但必须记下来：
+            # 否则"材料部分支持"与"无有效证据"在卡片上完全同形。
+            has_partial = True
+            continue
+        # 归并到同一采编主体后，组内可能混有不同 tier/role 的站点（同一主体的官网与
+        # 门户号）。只取一条会被证据绑定顺序决定，静默丢掉裁判性权威资格，故按整组判定。
+        is_authority = any(
+            item.source_role == "authority" and item.source_tier == 1 for item in group
+        )
         if stance == "support":
             ind_s += 1
             authority_s += int(is_authority)
@@ -133,4 +182,6 @@ def merge_stances(
             ind_u += 1
             authority_u += int(is_authority)
 
-    return BadgeInputs(ind_s, ind_u, has_conflict, authority_s, authority_u, verification_complete)
+    return BadgeInputs(
+        ind_s, ind_u, has_conflict, authority_s, authority_u, verification_complete, has_partial
+    )

@@ -9,7 +9,8 @@ type Listener = (event: MessageEvent<string>) => void
 class FakeEventSource {
   static instances: FakeEventSource[] = []
   listeners = new Map<string, Listener[]>()
-  close = vi.fn()
+  closed = false
+  close = vi.fn(() => { this.closed = true })
 
   constructor(public url: string) {
     FakeEventSource.instances.push(this)
@@ -22,6 +23,7 @@ class FakeEventSource {
   }
 
   emit(name: string, data: Record<string, unknown>, seq = 1) {
+    if (this.closed) return
     const payload = JSON.stringify({ event: name, task_id: 't1', seq, ts: '2026-08-13', data })
     for (const listener of this.listeners.get(name) ?? []) listener(new MessageEvent(name, { data: payload }))
   }
@@ -38,8 +40,13 @@ function baseFetch(input: RequestInfo | URL, init?: RequestInit) {
   if (path === '/api/tasks/t1') return Promise.resolve(json({ task_id: 't1', event_query: '测试任务', status: 'paused', phase: 'comment_selection', resumable: false, comment_selection_required: true, report_id: null }))
   if (path === '/api/tasks/t-empty') return Promise.resolve(json({ task_id: 't-empty', event_query: '空候选任务', status: 'paused', phase: 'comment_selection', resumable: false, comment_selection_required: true, report_id: null }))
   if (path === '/api/tasks/t-stale') return Promise.resolve(json({ task_id: 't-stale', event_query: '陈旧任务', status: 'done', phase: 'finished', resumable: false, comment_selection_required: false, report_id: 'r1' }))
-  if (path === '/api/tasks/t1/comment-candidates') return Promise.resolve(json({ task_id: 't1', phase: 'comment_selection', budgets: { posts: 2, comments_per_post: 100 }, items: [{ id: 'sc1', url: 'https://weibo.com/123/AbCd', platform: 'weibo', title: '高价值候选', snippet: '事件评论', score: 78.5, score_breakdown: { relevance: 30 }, reasons: ['相关性高'], selection_mode: 'smart', status: 'pending', login_profile_present: false }] }))
-  if (path === '/api/tasks/t-empty/comment-candidates') return Promise.resolve(json({ task_id: 't-empty', phase: 'comment_selection', budgets: { posts: 2, comments_per_post: 100 }, items: [] }))
+  if (path === '/api/tasks/t-topic') return Promise.resolve(json({ task_id: 't-topic', event_query: '武汉大学舆情', resolved_event_query: null, status: 'paused', phase: 'topic_selection', resumable: false, topic_selection_required: true, comment_selection_required: false, report_id: null }))
+  if (path === '/api/tasks/t-topic/topic-candidates') return Promise.resolve(json({ task_id: 't-topic', phase: 'topic_selection', original_query: '武汉大学舆情', manual_entry_allowed: true, items: [{ id: 'tc1', title: '武汉大学图书馆事件及校方回应', query: '武汉大学图书馆事件及校方回应', source_name: '武汉大学', url: 'https://www.whu.edu.cn/example', published_at: '2025-09-20T08:00:00+08:00', date_status: '范围内，待原文复核' }] }))
+  if (path === '/api/tasks/t-topic-empty') return Promise.resolve(json({ task_id: 't-topic-empty', event_query: '武汉大学舆情', resolved_event_query: null, status: 'paused', phase: 'topic_selection', resumable: false, topic_selection_required: true, comment_selection_required: false, report_id: null }))
+  if (path === '/api/tasks/t-topic-empty/topic-candidates') return Promise.resolve(json({ task_id: 't-topic-empty', phase: 'topic_selection', original_query: '武汉大学舆情', manual_entry_allowed: true, items: [] }))
+  if (path === '/api/tasks/t-topic/topic-selection' && init?.method === 'POST') return Promise.resolve(json({ status: 'running', resolved_event_query: '武汉大学图书馆事件及校方回应' }))
+  if (path === '/api/tasks/t1/comment-candidates') return Promise.resolve(json({ task_id: 't1', phase: 'comment_selection', budgets: { posts: 2, comments_per_post: 100 }, discovery_attempts: [], manual_entry_allowed: true, items: [{ id: 'sc1', url: 'https://weibo.com/123/AbCd', platform: 'weibo', title: '高价值候选', snippet: '事件评论', score: 78.5, score_breakdown: { relevance: 30 }, reasons: ['相关性高'], selection_mode: 'smart', status: 'pending', login_profile_present: false }] }))
+  if (path === '/api/tasks/t-empty/comment-candidates') return Promise.resolve(json({ task_id: 't-empty', phase: 'comment_selection', budgets: { posts: 2, comments_per_post: 100 }, discovery_attempts: [{ platform: 'weibo', status: 'failed', count: 0, error: 'TimeoutError' }, { platform: 'bilibili', status: 'empty', count: 0 }], manual_entry_allowed: true, items: [] }))
   if ((path === '/api/tasks/t1/comment-selection' || path === '/api/tasks/t-empty/comment-selection') && init?.method === 'POST') {
     const payload = JSON.parse(String(init.body)) as { action: string }
     return Promise.resolve(payload.action === 'approve' && path === '/api/tasks/t1/comment-selection' ? json({ error: { message: '微博尚未登录' } }, 409) : json({ status: 'running' }))
@@ -72,6 +79,29 @@ describe('V2 task desk', () => {
     expect(screen.getByLabelText('指定帖子 URL')).toBeInTheDocument()
   })
 
+  it('pauses a broad topic until a concrete event is selected', async () => {
+    history.replaceState(null, '', '/?task=t-topic')
+    render(<App />)
+
+    expect(await screen.findByText('先选定这次要深入调查的事件')).toBeInTheDocument()
+    expect(screen.getByText('武汉大学图书馆事件及校方回应')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '确认事件并开始深入调查' }))
+
+    await waitFor(() => {
+      const call = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === '/api/tasks/t-topic/topic-selection')
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call?.[1]?.body)).candidate_id).toBe('tc1')
+    })
+  })
+
+  it('explains empty topic discovery instead of silently showing a blank selector', async () => {
+    history.replaceState(null, '', '/?task=t-topic-empty')
+    render(<App />)
+
+    expect(await screen.findByText(/没有用导航页或无关结果凑数/)).toBeInTheDocument()
+    expect(screen.getByLabelText('具体事件')).toBeInTheDocument()
+  })
+
   it('renders confirmation candidates and the fourth seat, then surfaces missing login and allows skip', async () => {
     history.replaceState(null, '', '/?task=t1')
     render(<App />)
@@ -100,7 +130,10 @@ describe('V2 task desk', () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
 
     act(() => FakeEventSource.instances[0].emit('task.status', { status: 'paused', phase: 'comment_selection', progress: 68 }))
-    act(() => FakeEventSource.instances[0].emit('report.done', { html_url: '/api/reports/r1/html?view=full' }, 2))
+    expect(FakeEventSource.instances[0].close).not.toHaveBeenCalled()
+    act(() => FakeEventSource.instances[0].emit('task.status', { status: 'running', phase: 'reporting', progress: 88 }, 2))
+    act(() => FakeEventSource.instances[0].emit('report.done', { html_url: '/api/reports/r1/html?view=full' }, 3))
+    act(() => FakeEventSource.instances[0].emit('task.status', { status: 'done', phase: 'finished', progress: 100 }, 4))
 
     await waitFor(() => {
       expect(screen.queryByText('选择值得进入的评论区')).not.toBeInTheDocument()
@@ -110,6 +143,7 @@ describe('V2 task desk', () => {
 
     const forbiddenCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/tasks/t-stale/comment-selection') || String(url).includes('/api/tasks/t-stale/stop'))
     expect(forbiddenCalls).toHaveLength(0)
+    expect(FakeEventSource.instances[0].close).toHaveBeenCalledTimes(1)
   })
 
   it('shows an empty state when smart selection finds no candidates', async () => {
@@ -119,8 +153,10 @@ describe('V2 task desk', () => {
 
     act(() => FakeEventSource.instances[0].emit('task.status', { status: 'paused', phase: 'comment_selection', progress: 68 }))
 
-    expect(await screen.findByText('当前没有可审批的系统候选。你可以直接跳过评论继续报告，或返回调整调查范围后重试。')).toBeInTheDocument()
-    expect(screen.queryByLabelText('补充帖子 URL')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '跳过评论，继续报告' })).toBeEnabled()
+    expect(await screen.findByText(/系统没有找到达到相关度门槛的帖子/)).toBeInTheDocument()
+    expect(screen.getByText('发现失败', { exact: false })).toBeInTheDocument()
+    expect(screen.getByText('· TimeoutError', { exact: false })).toBeInTheDocument()
+    expect(screen.getByLabelText('补充帖子 URL')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '明确跳过评论，继续报告' })).toBeEnabled()
   })
 })

@@ -5,6 +5,8 @@ PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS task (
   id TEXT PRIMARY KEY,
   event_query TEXT NOT NULL,
+  resolved_event_query TEXT,
+  request_kind TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery')),
   user_note TEXT,
   time_range_from TEXT,
   time_range_to TEXT,
@@ -122,6 +124,7 @@ CREATE TABLE IF NOT EXISTS claim (
   is_editorial INTEGER NOT NULL DEFAULT 0 CHECK (is_editorial IN (0,1)),
   is_key INTEGER NOT NULL DEFAULT 1 CHECK (is_key IN (0,1)),
   is_key_reason TEXT,
+  analysis_data TEXT NOT NULL DEFAULT '{}',
   badge TEXT CHECK (badge IN ('verified','unverified','disputed','refuted')),
   verdict TEXT CHECK (verdict IN ('support','partial','contradict','not_mentioned','conflict')),
   verify_reason TEXT,

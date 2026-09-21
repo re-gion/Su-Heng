@@ -1,38 +1,230 @@
+# 信源分级表（01-产品SPEC §5.5 的五级语义）
+#
+# 两条硬约束，改动前必读：
+#
+# 1. tier 与 role 是两个正交维度（05-核心契约 §4.3）：
+#    - tier 表示"这家来源一般有多权威"（权重见 report_builder 的 weight_scheme）
+#    - role 表示"它在这件事里是什么角色"
+#    只有 tier==1 且 role==authority 才算裁判性权威，才能走 D8「单源·官方」判绿。
+#    因此 tier1/authority 仅限政府通报、监管公告、生效判决、生效标准文本——
+#    **绝不可把新华社、央视、人民日报这类媒体放进来**，否则单条媒体来源即可判绿，
+#    违反 01 §5.5「信源等级 ≠ 裁判资格」。
+#
+# 2. deny 先于 groups 匹配。它装"无论 tier 多高都不能算独立采编主体"的聚合/转载平台。
+#    这张表只会越写越长，必须与 allow 侧分离，否则表会越写越松、自造伪绿。
+#
+# 域名写法：只登记可注册域。匹配是"精确或后缀"（source_tiers.py::classify），
+# 登记 `com`、`news` 这类过短后缀会误吸无关域名。
+#
+# 实体归并规则（05-核心契约 §0.4）：**同一采编主体的多站点合并；同一集团下的
+# 不同编辑部不合并**。例如中国日报与其亚洲版算一个主体；央视与央广同属中央广播
+# 电视总台但编辑部独立，仍算两个。
+
 default_tier: 4
 default_role: unknown
+
+deny:
+  - tier: 3
+    role: syndicated
+    domains:
+      - sina.com.cn
+      - sina.cn
+      - 163.com
+      - ifeng.com
+      - qq.com
+      - sohu.com
+      - toutiao.com
+      - baijiahao.baidu.com
+      - msn.cn
+      - china.com
+      - guancha.cn
+      - hao123.com
+
 groups:
+  # L1 裁判性权威：政府、监管、司法、生效标准文本。
   - tier: 1
     role: authority
     domains:
       - gov.cn
       - court.gov.cn
       - samr.gov.cn
+      - spp.gov.cn
+      - moj.gov.cn
+      - nhc.gov.cn
+      - moe.gov.cn
+
+  # L2 主流媒体（有采编资质）。权重 0.8。
   - tier: 2
     role: independent
     domains:
+      - news.cn
       - xinhuanet.com
       - people.com.cn
+      - peopledaily.com.cn
       - cctv.com
+      - cctv.cn
       - cnr.cn
+      - cgtn.com
+      - gmw.cn
+      - ce.cn
+      - chinadaily.com.cn
+      - chinadailyasia.com
+      - chinanews.com.cn
+      - chinanews.com
       - jcrb.com
+      - legaldaily.com.cn
       - caixin.com
       - thepaper.cn
       - yicai.com
-  - tier: 3
-    role: independent
-    domains:
-      - jwview.com
+      - jiemian.com
+      - nbd.com.cn
+      - shobserver.com
+      - jfdaily.com
+      - southcn.com
+      - nfnews.com
+      - ycwb.com
       - dayoo.com
       - hsw.cn
-  - tier: 3
-    role: syndicated
-    domains:
-      - sina.com.cn
-      - 163.com
-      - ifeng.com
-      - qq.com
+      - jwview.com
+      - bjnews.com.cn
+      - bjd.com.cn
+      - huanqiu.com
+      - cyol.com
+      - stdaily.com
+      - workercn.cn
+      - china.com.cn
+      - xhby.net
+      - yunnan.cn
+      - qstheory.cn
+
+  # L5 百科/待交叉：可展示，但不可作为独立采编主体计数。权重 0.2。
   - tier: 5
     role: unknown
     domains:
       - wikipedia.org
       - baike.baidu.com
+      - baike.com
+      - grokipedia.com
+
+# 采编主体（05-核心契约 §0.4）：同一主体的多站点归并为同一个 publisher_entity，
+# 使"同集团多站只算一个独立信源"。未登记主体时退化为可注册域（www.163.com 与
+# m.163.com 同归 163.com），这是写进报告的口径承诺。
+entities:
+  - name: 新华社
+    domains:
+      - news.cn
+      - xinhuanet.com
+  - name: 人民日报
+    domains:
+      - people.com.cn
+      - peopledaily.com.cn
+  - name: 中央广播电视总台
+    domains:
+      - cctv.com
+      - cctv.cn
+      - cgtn.com
+  - name: 中央人民广播电台
+    domains:
+      - cnr.cn
+  - name: 中国日报
+    domains:
+      - chinadaily.com.cn
+      - chinadailyasia.com
+  - name: 光明日报
+    domains:
+      - gmw.cn
+  - name: 经济日报
+    domains:
+      - ce.cn
+  - name: 中国新闻网
+    domains:
+      - chinanews.com.cn
+      - chinanews.com
+  - name: 检察日报
+    domains:
+      - jcrb.com
+  - name: 法治日报
+    domains:
+      - legaldaily.com.cn
+  - name: 财新
+    domains:
+      - caixin.com
+  - name: 澎湃新闻
+    domains:
+      - thepaper.cn
+  - name: 第一财经
+    domains:
+      - yicai.com
+  - name: 界面新闻
+    domains:
+      - jiemian.com
+      - jwview.com
+  - name: 每日经济新闻
+    domains:
+      - nbd.com.cn
+  - name: 解放日报
+    domains:
+      - shobserver.com
+      - jfdaily.com
+  - name: 南方报业
+    domains:
+      - southcn.com
+      - nfnews.com
+  - name: 广州日报
+    domains:
+      - dayoo.com
+  - name: 湖北日报
+    domains:
+      - hsw.cn
+  - name: 羊城晚报
+    domains:
+      - ycwb.com
+  - name: 新京报
+    domains:
+      - bjnews.com.cn
+  - name: 北京日报
+    domains:
+      - bjd.com.cn
+  - name: 环球时报
+    domains:
+      - huanqiu.com
+  - name: 中国青年报
+    domains:
+      - cyol.com
+  - name: 科技日报
+    domains:
+      - stdaily.com
+  - name: 工人日报
+    domains:
+      - workercn.cn
+  - name: 中国网
+    domains:
+      - china.com.cn
+  - name: 求是
+    domains:
+      - qstheory.cn
+  - name: 网易
+    domains:
+      - 163.com
+  - name: 新浪
+    domains:
+      - sina.com.cn
+      - sina.cn
+  - name: 腾讯
+    domains:
+      - qq.com
+  - name: 凤凰网
+    domains:
+      - ifeng.com
+  - name: 搜狐
+    domains:
+      - sohu.com
+  - name: 今日头条
+    domains:
+      - toutiao.com
+  - name: 中华网
+    domains:
+      - china.com
+  - name: 观察者网
+    domains:
+      - guancha.cn

@@ -6,7 +6,21 @@ from types import ModuleType
 
 import pytest
 
-from yuqing.services.comment_plugin import PlaywrightCommentCollector
+from yuqing.services.comment_plugin import (
+    CandidateDiscoveryAttempt,
+    OpenAICandidateEvaluator,
+    PlaywrightCommentCollector,
+    PlaywrightPublicCandidateDiscoverer,
+    PublicCandidateDiscovery,
+)
+
+
+class TopicQueryGateway:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def complete_json(self, *args, **kwargs):
+        return self.payload
 
 
 class FakeContext:
@@ -70,6 +84,69 @@ class FakeAsyncPlaywright:
 
     async def start(self):
         return self.playwright
+
+
+def test_public_candidate_search_url_encodes_query_and_targets_platform():
+    url = PlaywrightPublicCandidateDiscoverer.search_url("bilibili", "武汉大学 图书馆事件")
+
+    assert url.startswith("https://search.bilibili.com/all?keyword=")
+    assert "%E6%AD%A6%E6%B1%89%E5%A4%A7%E5%AD%A6%20" in url
+
+
+def test_public_candidate_prefers_event_title_over_thumbnail_metrics():
+    query = "武汉大学图书馆事件"
+
+    assert PlaywrightPublicCandidateDiscoverer.title_score(
+        query, "一个视频了解武汉大学图书馆事件始末"
+    ) > PlaywrightPublicCandidateDiscoverer.title_score(query, "129.5万 5060 11:49")
+
+
+@pytest.mark.asyncio
+async def test_topic_query_expansion_keeps_subject_and_drops_drifted_queries():
+    evaluator = OpenAICandidateEvaluator(
+        TopicQueryGateway(
+            {
+                "queries": [
+                    "武汉大学 图书馆 争议 校方回应",
+                    "武汉大学 2025 舆情 事件",
+                    "其他大学 学术争议",
+                    "武汉大学 图书馆 争议 校方回应",
+                ]
+            }
+        )
+    )
+
+    queries = await evaluator.propose_topic_queries(
+        "武汉大学舆情",
+        date_from="2023-01-01",
+        date_to="2026-01-01",
+        language="zh",
+    )
+
+    assert queries == ["武汉大学 图书馆 争议 校方回应"]
+
+
+@pytest.mark.asyncio
+async def test_public_candidate_discovery_uses_dedicated_worker_loop(monkeypatch):
+    discoverer = PlaywrightPublicCandidateDiscoverer()
+    caller_thread = threading.get_ident()
+    observed: dict[str, object] = {}
+
+    async def fake_discover(query, platforms, *, limit_per_platform):
+        observed["thread"] = threading.get_ident()
+        observed["loop"] = asyncio.get_running_loop()
+        return PublicCandidateDiscovery(
+            attempts=[CandidateDiscoveryAttempt(platform="weibo", status="empty", count=0)]
+        )
+
+    monkeypatch.setattr(discoverer, "_discover_in_loop", fake_discover)
+
+    result = await discoverer.discover("武汉大学图书馆事件", ["weibo"])
+
+    assert observed["thread"] != caller_thread
+    if hasattr(asyncio, "ProactorEventLoop"):
+        assert isinstance(observed["loop"], asyncio.ProactorEventLoop)
+    assert result.attempts[0].status == "empty"
 
 
 @pytest.mark.asyncio

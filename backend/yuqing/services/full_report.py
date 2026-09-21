@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
+from math import isfinite
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,6 +13,13 @@ from yuqing.render.html import render_html
 from yuqing.render.validator import validate_report
 from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
+from yuqing.services.investigation_scope import ReportReleaseAssessment
+from yuqing.services.report_analysis import (
+    assemble_analysis,
+    deduplicate_limitations,
+    event_timeline,
+    report_context,
+)
 from yuqing.services.report_builder import BriefReportBuilder, EntailmentVerifier
 from yuqing.services.translation import Translator
 from yuqing.storage.db import Database
@@ -46,6 +54,7 @@ class FullReportBuilder:
         *,
         forum: Sequence[ForumMessage] = (),
         orchestration_limitations: Sequence[str] = (),
+        diagnostic_only: bool = False,
     ) -> tuple[str, dict[str, Any], str]:
         task = await self.database.get_task(task_id)
         if task is None:
@@ -53,6 +62,14 @@ class FullReportBuilder:
         report_id, report, path = await self.brief.build(task_id)
         evidence = await self.database.list_evidence(task_id)
         claims = await self.database.list_claims(task_id)
+        has_explicit_window = bool(task.time_range_from or task.time_range_to)
+        main_evidence = [
+            item
+            for item in evidence
+            if (item.extra or {}).get("scope_status") in {"main", "foreign_supplement"}
+            or (not has_explicit_window and not (item.extra or {}).get("scope_status"))
+        ]
+        main_evidence_ids = {item.local_id for item in main_evidence}
         by_type = {block["type"]: block for block in report["blocks"]}
         appendix_items = by_type["evidence_appendix"]["items"]
         appendix_ids = {item["evidence_ref"] for item in appendix_items}
@@ -77,6 +94,8 @@ class FullReportBuilder:
                     "kind": item.kind,
                     "lang": item.lang or "unknown",
                     "original_excerpt": (item.content_text or item.snippet or "")[:1200],
+                    "scope_status": (item.extra or {}).get("scope_status", "unclassified"),
+                    "scope_label": (item.extra or {}).get("scope_label"),
                 }
             )
         for appendix in appendix_items:
@@ -85,6 +104,10 @@ class FullReportBuilder:
                 continue
             appendix.setdefault("kind", source.kind)
             appendix.setdefault("lang", source.lang or "unknown")
+            appendix.setdefault(
+                "scope_status", (source.extra or {}).get("scope_status", "unclassified")
+            )
+            appendix.setdefault("scope_label", (source.extra or {}).get("scope_label"))
             appendix.setdefault(
                 "original_excerpt", (source.content_text or source.snippet or "")[:1200]
             )
@@ -112,9 +135,13 @@ class FullReportBuilder:
                 }
             ),
             time_span_days=self._time_span_days(evidence),
+            main_evidence_total=len(main_evidence),
+            background_evidence_total=len(evidence) - len(main_evidence),
         )
         header = by_type["report_header"]
-        header["subtitle"] = "四席协作 · 多语言公开证据与确认评论样本可核验专报"
+        header["event_title"] = task.resolved_event_query or task.event_query
+        report["task"]["original_query"] = task.event_query
+        report["task"]["resolved_event_query"] = task.resolved_event_query
         snapshot = json.loads(task.config_snapshot) if task.config_snapshot else {}
         header["models_used"] = snapshot.get("models_used", {})
 
@@ -140,7 +167,22 @@ class FullReportBuilder:
                 }
             )
 
-        fact_items = by_type["fact_check_table"]["items"]
+        fact_items = [
+            item
+            for item in by_type["fact_check_table"]["items"]
+            if item.get("origin_agent") != "history_insight"
+        ]
+        # 历史对照只进入第 06 章的结构化案例卡；不得混入当前事件事实核查表。
+        by_type["fact_check_table"]["items"] = fact_items
+        primary_fact_items = [
+            item
+            for item in fact_items
+            if item.get("origin_agent") != "history_insight"
+            and any(
+                citation.get("evidence_ref") in main_evidence_ids
+                for citation in item.get("citations", [])
+            )
+        ]
         rendered_claim_ids = {item["claim_ref"] for item in fact_items}
         rendered_claims = [claim for claim in claims if claim.local_id in rendered_claim_ids]
         cited_evidence_ids = {
@@ -157,7 +199,12 @@ class FullReportBuilder:
             if claim.agent == "history_insight":
                 continue
             for row in relation_rows[claim.local_id]:
-                if not row["published_at"] or row["evidence_id"] not in cited_evidence_ids:
+                if (
+                    not row["published_at"]
+                    or row["evidence_id"] not in cited_evidence_ids
+                    or row["evidence_id"] not in main_evidence_ids
+                    or row["relation"] not in {"support", "partial", "contradict", "conflict"}
+                ):
                     continue
                 entry = timeline_sources.setdefault(
                     row["evidence_id"],
@@ -173,7 +220,10 @@ class FullReportBuilder:
                 entry["claim_refs"].append(claim.local_id)
                 entry["relations"][row["relation"] or "unverified"] += 1
         timeline_items = []
-        for item in sorted(timeline_sources.values(), key=lambda value: value["date"])[:16]:
+        dated = sorted(timeline_sources.values(), key=lambda value: value["date"])
+        # 长时段保留首尾，不能只截最早材料而漏掉最新进展。
+        selected_dates = dated if len(dated) <= 12 else dated[:4] + dated[-8:]
+        for item in selected_dates:
             item["claim_refs"] = sorted(set(item["claim_refs"]))
             item["relations"] = dict(item["relations"])
             timeline_items.append(item)
@@ -182,14 +232,14 @@ class FullReportBuilder:
             "type": "chart",
             "section": "02",
             "in_brief": False,
-            "title": "事件纠偏时间线",
+            "title": "关键材料发布脉络",
             "data_basis": "claim_evidence_database",
             "chart_kind": "timeline",
             "items": timeline_items,
             "fallback_text": "被引用材料缺少可用发布日期，无法构建可靠的纠偏时间线。"
             if not timeline_items
             else None,
-            "note": "仅按关键陈述实际引用材料排序；关系表示材料相对陈述的核验方向，不代表全网声量。",
+            "note": "按被引用材料的发布日期排列，不等于事件发生日期或首发时间；仅显示有核验关联的材料，长时段展示首尾节点，不代表全网声量。",
         }
 
         total_claims = len(fact_items)
@@ -203,11 +253,21 @@ class FullReportBuilder:
         cited_attempted = sum(item.fetch_status != "discovered" for item in cited_records)
         cited_fetched = sum(item.fetch_status == "fetched" for item in cited_records)
         report["metrics"]["cited_evidence_total"] = len(cited_records)
+        # "核验未完成"与"核验后没有支持"同属待核验，但成因不同，KPI 上必须说清是哪一种，
+        # 否则一次上游故障会被读成"这批材料没有依据"。
+        incomplete_claims = report["metrics"].get("key_claims_verification_incomplete", 0)
+        skipped_claims = report["metrics"].get("key_claims_verification_skipped", 0)
+        unfinished_claims = incomplete_claims + skipped_claims
+        unverified_note = (
+            f"其中 {unfinished_claims} 条为核验未完成（上游不可用或预算截断），不代表材料无依据"
+            if unfinished_claims
+            else "需要更多独立支持或一手材料"
+        )
         kpis = {
             "block_id": "b_00_kpi",
             "type": "kpi_grid",
-            "section": "00",
-            "in_brief": True,
+            "section": "09",
+            "in_brief": False,
             "data_basis": "evidence_database",
             "items": [
                 {
@@ -219,7 +279,7 @@ class FullReportBuilder:
                 {
                     "label": "待核验陈述",
                     "value": f"{unverified_claims} / {total_claims}",
-                    "note": "需要更多独立支持或一手材料",
+                    "note": unverified_note,
                     "tone": "warning" if unverified_claims else "neutral",
                 },
                 {
@@ -239,7 +299,7 @@ class FullReportBuilder:
         evidence_funnel = {
             "block_id": "b_04_evidence_funnel",
             "type": "chart",
-            "section": "04",
+            "section": "09",
             "in_brief": False,
             "title": "证据获取漏斗",
             "data_basis": "evidence_database",
@@ -273,7 +333,7 @@ class FullReportBuilder:
         verification_matrix = {
             "block_id": "b_04_verification_matrix",
             "type": "chart",
-            "section": "04",
+            "section": "09",
             "in_brief": False,
             "title": "关键陈述—信源核验矩阵",
             "data_basis": "claim_evidence_database",
@@ -286,7 +346,10 @@ class FullReportBuilder:
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
-        propagation = [evidence_funnel, verification_matrix]
+        publication_network, publication_nodes, propagation_edges = self._publication_network(
+            claims, evidence_by_id, main_evidence_ids, by_type["limitations"]
+        )
+        propagation = [publication_network, evidence_funnel, verification_matrix]
         numeric_hot_points = [item for item in hot_points if item.heat_value is not None]
         if hot_points and not numeric_hot_points:
             by_type["limitations"]["items"].append(
@@ -315,6 +378,19 @@ class FullReportBuilder:
         publisher_distribution = Counter(
             item.publisher_entity or item.source_name or item.source_domain for item in evidence
         )
+        # 被丢弃的证据不计入独立信源，但必须让读者看见丢了多少、为什么丢——
+        # 否则 verified_rate 为 0 时无法判断是"证据不支持"还是"来源没被识别"。
+        stance_drops = report["metrics"].get("stance_drops", {})
+        drop_summary = [
+            {"label": label, "value": stance_drops[reason]}
+            for reason, label in (
+                ("unknown", "未识别来源未计入独立信源"),
+                ("syndicated", "转载来源未计入独立信源"),
+                ("party", "当事方声明未计入独立信源"),
+                ("not_mentioned", "材料未提及该陈述"),
+            )
+            if stance_drops.get(reason)
+        ]
         data_quality = {
             "block_id": "b_09_data_quality",
             "type": "data_quality",
@@ -329,6 +405,7 @@ class FullReportBuilder:
                     "value": sum(item.fetch_status == "fetch_failed" for item in evidence),
                 },
                 {"label": "未被关键陈述引用", "value": len(evidence) - len(cited_records)},
+                *drop_summary,
             ],
             "verification_method": {
                 "verified_rate": report["metrics"]["verified_rate"],
@@ -359,24 +436,14 @@ class FullReportBuilder:
                 },
             ],
         }
-        summaries = [message for message in forum if message.type == "summary"]
         viewpoint = {
             "block_id": "b_05_viewpoints",
             "type": "viewpoint_list",
             "section": "05",
             "in_brief": False,
-            "title": "情感与观点",
-            "items": [
-                {
-                    "agent": message.agent,
-                    "text": message.content,
-                    "evidence_refs": [ref for ref in message.refs if ref.startswith("E")],
-                }
-                for message in summaries
-            ],
-            "fallback_text": "当前样本不足以形成可核验的观点分类，不输出情感百分比。"
-            if not summaries
-            else None,
+            "title": "议题分析的数据条件",
+            "items": [],
+            "fallback_text": "尚未形成通过引用检查的综合议题分析；已有事实见核查表，不能从调查席位发言推算公众立场或情感比例。",
         }
         comment_rows = await self.database.fetch_all(
             """SELECT s.platform,c.status,c.collected_count,c.sampling_method,s.url,s.title
@@ -422,7 +489,6 @@ class FullReportBuilder:
             "evidence_counts": dict(evidence_counts),
             "report_language": "zh-CN",
         }
-        history_messages = [message for message in summaries if message.agent == "history_insight"]
         local_history = await self.historical_data.task_matches(task_id)
         local_cards = [
             {
@@ -437,71 +503,42 @@ class FullReportBuilder:
             }
             for item in local_history
         ]
-        search_cards = [
-            {
-                "event_name": "搜索回溯发现",
-                "comparison": message.content,
-                "provenance": "搜索回溯",
-                "evidence_refs": [ref for ref in message.refs if ref.startswith("E")],
-            }
-            for message in history_messages
-            if any(ref.startswith("E") for ref in message.refs)
-        ]
         history = {
             "block_id": "b_06_history",
             "type": "history_compare",
             "section": "06",
             "in_brief": False,
             "title": "历史对照",
-            "cards": local_cards or search_cards,
-            "fallback_text": "本轮未取得带来源的可靠历史对照，不以相似案例推演未来。"
-            if not (local_cards or search_cards)
+            "cards": local_cards,
+            "fallback_text": "未取得通过可比性审查的历史对照；同一事件的重复报道不作为比较案例。"
+            if not local_cards
             else None,
         }
-        recommendation_refs = [item.local_id for item in evidence[:3]]
         recommendations = {
             "block_id": "b_07_recommendations",
-            "type": "recommendation",
+            "type": "text",
             "section": "07",
             "in_brief": False,
             "title": "研判与建议",
-            "is_editorial": True,
-            "editorial_basis": "基于本报告已收录公开证据的风险沟通建议",
-            "items": [
-                {
-                    "text": "优先回看证据卡中的原文关键句，再判断是否转发或采取行动。",
-                    "evidence_refs": recommendation_refs,
-                }
-            ],
+            "fallback_text": "本轮未形成有充分依据的行动研判。请先补齐核心回应原文与当前进展，再决定处置重点；当前产物仅可作为证据简报。",
         }
 
-        if self.reporter is not None:
+        enrichment: dict[str, Any] = {}
+        if self.reporter is not None and not diagnostic_only:
             try:
                 enrichment = await self.reporter.enrich(
-                    {
-                        "task": report["task"],
-                        "metrics": report["metrics"],
-                        "forum": [m.model_dump(mode="json") for m in forum],
-                    }
+                    report_context(report["task"], fact_items, main_evidence, forum)
                 )
-                report["reporter_notes"] = enrichment
-                note = str(enrichment.get("organization_note") or "").strip()
+                if not isinstance(enrichment, dict):
+                    enrichment = {}
                 warnings = enrichment.get("section_warnings") or []
-                if note:
-                    recommendations["items"].append(
-                        {
-                            "text": note,
-                            "evidence_refs": recommendation_refs,
-                            "source": "综合报告 Agent",
-                        }
-                    )
-                for warning in warnings if isinstance(warnings, list) else []:
-                    if str(warning).strip():
+                for warning in warnings[:8] if isinstance(warnings, list) else []:
+                    if isinstance(warning, str) and warning.strip():
                         by_type["limitations"]["items"].append(
                             {
                                 "id": f"L9{len(by_type['limitations']['items'])}",
                                 "category": "报告 Agent 提醒",
-                                "text": str(warning).strip(),
+                                "text": warning.strip()[:500],
                             }
                         )
             except Exception as exc:
@@ -512,17 +549,120 @@ class FullReportBuilder:
                         "text": f"报告 Agent 降级：{type(exc).__name__}",
                     }
                 )
+        summary, analysis_blocks, quality = assemble_analysis(
+            enrichment, primary_fact_items, main_evidence
+        )
+        event_nodes = event_timeline(
+            primary_fact_items,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        if len(event_nodes) >= 2:
+            timeline.update(
+                title="关键事件与机构回应时点",
+                items=event_nodes,
+                fallback_text=None,
+                note="时点仅取自陈述正文明确写出的年月日，徽章保留该陈述的核验状态，不以网页发布日期替代事件日期。同日最多展示两个节点；完整陈述与其他来源可在核查记录展开。",
+            )
+        by_type["executive_summary"].update(summary)
+        by_type["fact_check_table"]["priority_claim_refs"] = [
+            item["claim_ref"] for item in summary["what"]
+        ]
+        definitive_claims = sum(
+            item.get("verification_state") == "complete"
+            and item.get("badge") in {"verified", "disputed", "refuted"}
+            for item in primary_fact_items
+        )
+        recommendation_count = sum(
+            bool(item.get("evidence_refs"))
+            for block in analysis_blocks
+            if block.get("type") == "analysis" and block.get("section") == "07"
+            for item in block.get("items", [])
+        )
+        release = ReportReleaseAssessment.evaluate(
+            concrete_event=bool(task.resolved_event_query or task.request_kind == "event"),
+            main_evidence=len(main_evidence),
+            verifiable_key_claims=definitive_claims,
+            in_window_timeline_nodes=len(event_nodes),
+            publication_nodes=publication_nodes,
+            propagation_edges=propagation_edges,
+            summary_has_what=bool(summary["what"]),
+            summary_has_why=bool(summary["why"]),
+            summary_has_action=bool(summary["so_what"]),
+            evidence_bound_recommendations=recommendation_count,
+        )
+        if diagnostic_only:
+            release = ReportReleaseAssessment("retrieval_diagnostic", release.missing)
+        quality["release_label"] = release.label
+        quality["release_gate_missing"] = list(release.missing)
+        report["quality"] = quality
+        header["subtitle"] = {
+            "full_report": "完整舆情专报 · 事实、传播与行动依据分层呈现",
+            "evidence_brief": "证据简报 · 尚未通过完整舆情专报发布门",
+            "retrieval_diagnostic": "检索诊断 · 当前材料不足以生成舆情专报",
+        }[release.label]
+        analysis_sections = {
+            block["section"] for block in analysis_blocks if block["type"] == "analysis"
+        }
+        if quality["rejected_items"]:
+            by_type["limitations"]["items"].append(
+                {
+                    "id": "L91",
+                    "category": "分析质量检查",
+                    "text": f"已移除 {sum(quality['rejected_items'].values())} 项不符合质量检查的内容或越权字段，涉及引用对应关系、分析要素或数字依据。具体检查记录保存在报告数据中。",
+                }
+            )
+        notice = {
+            "block_id": "b_00_reading_scope",
+            "type": "text",
+            "section": "00",
+            "in_brief": True,
+            "title": "阅读范围与决策边界",
+            "text": f"调查主题：{task.resolved_event_query or task.event_query}。材料时间范围：{task.time_range_from or '未指定起点'} 至 {task.time_range_to or '未指定终点'}。"
+            + (
+                "已通过完整专报发布门；分析判断与已核验事实分开呈现，仍需关注各条不确定性。"
+                if release.label == "full_report"
+                else (
+                    "当前仅输出检索诊断，没有足够的范围内主证据与可核验关键陈述。"
+                    if release.label == "retrieval_diagnostic"
+                    else "已形成有依据的分析条目，但当前仍是证据简报；事实链、传播关系或行动依据尚不完整。"
+                )
+            ),
+        }
+        if not quality["sourced_measurements"]:
+            analysis_blocks.append(
+                {
+                    "block_id": "b_04_numeric_gap",
+                    "type": "text",
+                    "section": "04",
+                    "in_brief": False,
+                    "title": "量化数据缺口",
+                    "text": "本轮没有同时满足原文可回查、已绑定事件事实、数字与单位明确的披露指标。要判断传播规模，需要补充带采集时点与平台口径的阅读/互动数据；要比较立场，需要可说明采样方式的评论样本。检索材料数量不能替代这些指标。",
+                }
+            )
+        by_type["limitations"]["items"] = deduplicate_limitations(by_type["limitations"]["items"])
+        for item in appendix_items:
+            item["cited_in_report"] = item["evidence_ref"] in cited_evidence_ids
+            item["measurement_quotes"] = [
+                m["quote"]
+                for b in analysis_blocks
+                if b["type"] == "metric_cards"
+                for m in b["items"]
+                if item["evidence_ref"] in m["evidence_refs"]
+            ]
         report["blocks"] = [
             header,
+            notice,
             kpis,
             by_type["executive_summary"],
             timeline,
             by_type["fact_check_table"],
             *propagation,
-            viewpoint,
+            *analysis_blocks,
+            *([] if "05" in analysis_sections else [viewpoint]),
             comment_insight,
-            history,
-            recommendations,
+            *([history] if local_cards or "06" not in analysis_sections else []),
+            *([] if "07" in analysis_sections else [recommendations]),
             by_type["limitations"],
             data_quality,
             by_type["evidence_appendix"],
@@ -534,13 +674,109 @@ class FullReportBuilder:
         return report_id, validated, path
 
     @staticmethod
+    def _publication_network(
+        claims: Sequence[Any],
+        evidence_by_id: dict[str, Any],
+        main_evidence_ids: set[str],
+        limitations: dict[str, Any],
+    ) -> tuple[dict[str, Any], int, int]:
+        nodes: dict[str, dict[str, Any]] = {}
+        edges: list[dict[str, Any]] = []
+        for claim in claims:
+            if claim.agent != "media_propagation":
+                continue
+            data = claim.analysis_data if isinstance(claim.analysis_data, dict) else {}
+            node = data.get("publication_node")
+            if not isinstance(node, dict):
+                continue
+            evidence_id = str(node.get("evidence_id") or "")
+            source = evidence_by_id.get(evidence_id)
+            if (
+                source is None
+                or evidence_id not in main_evidence_ids
+                or evidence_id not in claim.evidence_ids
+                or node.get("node_type") not in {"original", "repost", "response", "independent"}
+            ):
+                continue
+            nodes[evidence_id] = {
+                "evidence_id": evidence_id,
+                "publisher": str(
+                    node.get("publisher")
+                    or source.publisher_entity
+                    or source.source_name
+                    or source.source_domain
+                )[:120],
+                "published_at": source.published_at,
+                "node_type": node["node_type"],
+                "framing": str(node.get("framing") or claim.text)[:300],
+                "claim_ref": claim.local_id,
+                "evidence_refs": [evidence_id],
+            }
+            for edge in data.get("propagation_edges", []):
+                if not isinstance(edge, dict):
+                    continue
+                from_id = str(edge.get("from_evidence_id") or "")
+                to_id = str(edge.get("to_evidence_id") or "")
+                relation = str(edge.get("relation") or "")
+                if (
+                    from_id in main_evidence_ids
+                    and to_id in main_evidence_ids
+                    and from_id != to_id
+                    and relation in {"repost", "response", "follow_up"}
+                ):
+                    edges.append(
+                        {
+                            "from_evidence_id": from_id,
+                            "to_evidence_id": to_id,
+                            "relation": relation,
+                            "claim_ref": claim.local_id,
+                        }
+                    )
+        unique_edges = list(
+            {
+                (item["from_evidence_id"], item["to_evidence_id"], item["relation"]): item
+                for item in edges
+                if item["from_evidence_id"] in nodes and item["to_evidence_id"] in nodes
+            }.values()
+        )
+        sufficient = len(nodes) >= 2 and bool(unique_edges)
+        if not sufficient:
+            limitations["items"].append(
+                {
+                    "id": "L16",
+                    "category": "传播分析证据不足",
+                    "text": f"仅形成 {len(nodes)} 个合格发布节点和 {len(unique_edges)} 条可追溯关系；未把普通事件事实或搜索命中数包装成传播路径。",
+                }
+            )
+        return (
+            {
+                "block_id": "b_04_publication_network",
+                "type": "propagation_network",
+                "section": "04",
+                "in_brief": sufficient,
+                "title": "媒体发布与回应关系",
+                "data_basis": "typed_claim_evidence",
+                "nodes": list(nodes.values()),
+                "edges": unique_edges,
+                "fallback_text": None
+                if sufficient
+                else "传播分析证据不足：至少需要两个可信发布节点和一条可追溯的转载、回应或跟进关系。",
+            },
+            len(nodes),
+            len(unique_edges),
+        )
+
+    @staticmethod
     def _time_span_days(evidence: Sequence[Any]) -> int:
         parsed: list[datetime] = []
         for item in evidence:
             if not item.published_at:
                 continue
             try:
-                parsed.append(datetime.fromisoformat(item.published_at.replace("Z", "+00:00")))
+                stamp = datetime.fromisoformat(item.published_at.replace("Z", "+00:00"))
+                parsed.append(
+                    stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+                )
             except ValueError:
                 continue
         if len(parsed) < 2:
@@ -631,21 +867,51 @@ class FullReportBuilder:
 
     @staticmethod
     def _hot_chart(hot_points: Sequence[HotSnapshotPoint]) -> dict[str, Any]:
+        groups: dict[tuple[str, str], list[HotSnapshotPoint]] = defaultdict(list)
+        for item in hot_points:
+            if item.heat_value is not None and isfinite(item.heat_value) and item.heat_value >= 0:
+                groups[(item.platform, item.url or item.title)].append(item)
+        series = []
+        for (platform, _topic), points in sorted(groups.items()):
+            ordered = sorted(points, key=lambda item: item.captured_at)
+            # 同一采集时点的重复数据不组成伪趋势；保留最高排名的记录。
+            by_time = {}
+            for point in sorted(ordered, key=lambda item: item.rank, reverse=True):
+                by_time[point.captured_at] = point
+            ordered = sorted(by_time.values(), key=lambda item: item.captured_at)
+            series.append(
+                {
+                    "block_id": f"b_04_hot_series_{len(series) + 1}",
+                    "type": "chart",
+                    "section": "04",
+                    "in_brief": False,
+                    "title": f"{platform} · {ordered[0].title}",
+                    "data_basis": "hot_snapshot_database",
+                    "chart_kind": "line" if len(ordered) >= 2 else "bar",
+                    "items": [
+                        {
+                            "label": item.captured_at,
+                            "timestamp": item.captured_at,
+                            "value": item.heat_value,
+                            "rank": item.rank,
+                            "title": item.title,
+                        }
+                        for item in ordered
+                    ],
+                    "note": "仅比较同平台、同话题的已采集热榜值，不等于阅读量；各序列独立刻度，不跨平台相加。"
+                    + ("只有一个采集时点，不推断趋势。" if len(ordered) < 2 else ""),
+                }
+            )
+        if len(series) == 1:
+            return {**series[0], "block_id": "b_04_hot_chart"}
         return {
             "block_id": "b_04_hot_chart",
             "type": "chart",
             "section": "04",
             "in_brief": False,
-            "title": "真实热榜热度曲线",
+            "title": "分平台、分话题的热榜记录",
             "data_basis": "hot_snapshot_database",
-            "chart_kind": "line",
-            "items": [
-                {
-                    "label": f"{item.captured_at[:16]} · {item.platform}",
-                    "value": item.heat_value,
-                    "rank": item.rank,
-                    "title": item.title,
-                }
-                for item in hot_points
-            ],
+            "chart_kind": "series",
+            "items": [],
+            "series": series,
         }

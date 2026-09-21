@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -11,6 +11,7 @@ Badge = Literal["verified", "unverified", "disputed", "refuted"]
 SourceScope = Literal["auto", "domestic", "global"]
 CommentMode = Literal["off", "smart", "manual", "hybrid"]
 EvidenceKind = Literal["web", "local_dataset", "social_comments"]
+RequestKind = Literal["event", "topic_discovery"]
 
 
 class TaskCreate(BaseModel):
@@ -22,6 +23,7 @@ class TaskCreate(BaseModel):
     source_languages: list[str] = Field(default_factory=lambda: ["zh", "en"], max_length=3)
     comment_mode: CommentMode = "off"
     comment_urls: list[HttpUrl] = Field(default_factory=list, max_length=20)
+    request_kind: RequestKind = "event"
 
     @field_validator("source_languages")
     @classmethod
@@ -50,6 +52,8 @@ class TimeRange(BaseModel):
 class TaskRecord(BaseModel):
     id: str
     event_query: str
+    resolved_event_query: str | None = None
+    request_kind: RequestKind = "event"
     user_note: str | None = None
     depth: Depth
     time_range_from: str | None = None
@@ -135,6 +139,7 @@ class ClaimCreate(BaseModel):
     is_key_reason: str | None = None
     evidence_ids: list[str] = Field(min_length=1, max_length=6)
     quotes: list[QuoteCreate] = []
+    analysis_data: dict[str, Any] = Field(default_factory=dict)
 
 
 class ClaimRecord(BaseModel):
@@ -153,6 +158,8 @@ class ClaimRecord(BaseModel):
     badge: Badge | None
     verdict: str | None
     verification_state: str
+    verify_reason: str | None = None
     independent_sources: int = 0
     max_source_tier: int | None = None
     evidence_ids: list[str] = []
+    analysis_data: dict[str, Any] = Field(default_factory=dict)

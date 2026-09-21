@@ -381,7 +381,9 @@ async def test_daily_hot_collector_normalizes_common_response_shapes(runtime_dir
 
 
 @pytest.mark.asyncio
-async def test_local_history_and_hotlist_are_bound_into_full_report(runtime_dir: Path):
+async def test_local_history_and_hotlist_are_bound_into_full_report(
+    runtime_dir: Path, claim_limits: dict[str, int]
+):
     database = Database(runtime_dir / "v15-report.db")
     await database.initialize()
     history = HistoricalDataService(database)
@@ -446,7 +448,8 @@ async def test_local_history_and_hotlist_are_bound_into_full_report(runtime_dir:
             agent="history_insight",
             section="history",
             evidence_ids=[local_evidence.local_id],
-        )
+        ),
+        **claim_limits,
     )
 
     _, report, _ = await FullReportBuilder(

@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from yuqing.core.measurements import measurement_values
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR
 
 
@@ -90,7 +91,9 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
     for block in blocks:
         if block.get("data_basis") == "illustrative":
             errors.append(f"R4: {block.get('block_id')} 使用 illustrative 数据")
-        if block.get("type") in {"kpi_grid", "chart"} and not block.get("data_basis"):
+        if block.get("type") in {"kpi_grid", "chart", "metric_cards"} and not block.get(
+            "data_basis"
+        ):
             errors.append(f"R7: {block.get('block_id')} 数值块缺 data_basis")
         if block.get("is_editorial") and not block.get("editorial_basis"):
             errors.append(f"R5: {block.get('block_id')} 编辑判断缺依据")
@@ -99,8 +102,8 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
         if block.get("limitation_ref") and block["limitation_ref"] not in limitation_ids:
             warnings.append(f"R12: {block.get('block_id')} 的局限性引用不存在")
             block.pop("limitation_ref", None)
-        if block.get("type") == "timeline":
-            for node in block.get("nodes", []):
+        if block.get("type") == "timeline" or block.get("chart_kind") == "timeline":
+            for node in block.get("nodes", []) + block.get("items", []):
                 if not node.get("evidence_refs"):
                     errors.append(f"R8: 时间线节点 {node.get('date')} 缺少证据")
         if block.get("type") == "history_compare":
@@ -110,11 +113,81 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
         if block.get("type") == "executive_summary":
             for key in ("what", "why", "so_what"):
                 for item in block.get(key, []):
+                    if item.get("is_editorial"):
+                        refs = item.get("claim_refs") or []
+                        bound = set().union(*(bindings.get(ref, set()) for ref in refs))
+                        if (
+                            not item.get("text")
+                            or not item.get("uncertainty")
+                            or not refs
+                            or any(ref not in claim_texts for ref in refs)
+                            or not set(item.get("evidence_refs") or []).issubset(bound)
+                        ):
+                            errors.append("R19: 执行摘要编辑判断缺少陈述、证据或不确定性")
+                        continue
                     claim_ref = item.get("claim_ref")
                     if not claim_ref or not _text_supported(
                         claim_texts.get(claim_ref), item.get("text")
                     ):
                         errors.append(f"R14: 执行摘要 {claim_ref or '无引用'} 未被 claim 正文蕴含")
+        if block.get("type") == "analysis":
+            if not block.get("is_editorial") or block.get("section") not in {
+                "04",
+                "05",
+                "06",
+                "07",
+            }:
+                errors.append("R19: 综合分析必须标记编辑判断并位于分析章节")
+            for item in block.get("items", []):
+                refs = item.get("claim_refs") or []
+                if not refs or any(ref not in claim_texts for ref in refs):
+                    errors.append("R19: 分析缺少可回填的陈述")
+                    continue
+                observation = "\n".join(claim_texts[ref] for ref in refs)
+                if item.get("observation") != observation:
+                    errors.append("R19: 分析观察必须由陈述正文回填")
+                if not all(
+                    item.get(key)
+                    for key in ("interpretation", "implication", "uncertainty", "evidence_refs")
+                ):
+                    errors.append("R19: 分析缺少解释、影响、不确定性或依据")
+                if block.get("section") == "07" and not all(
+                    item.get(key) for key in ("action", "owner", "trigger")
+                ):
+                    errors.append("R19: 行动建议缺少执行要素")
+        if block.get("type") == "metric_cards":
+            if block.get("data_basis") != "quoted_evidence":
+                errors.append("R20: 来源披露指标必须使用 quoted_evidence")
+            for item in block.get("items", []):
+                refs = item.get("evidence_refs") or []
+                sources = [
+                    e for e in (appendix or {}).get("items", []) if e.get("evidence_ref") in refs
+                ]
+                quote = item.get("quote") or ""
+                if (
+                    not quote
+                    or not sources
+                    or not all(
+                        e.get("fetch_status") == "fetched"
+                        and quote in e.get("measurement_quotes", [])
+                        for e in sources
+                    )
+                ):
+                    errors.append("R20: 来源指标缺少经过原文匹配的引句")
+                if (
+                    not item.get("claim_refs")
+                    or not item.get("scope")
+                    or not item.get("verification_note")
+                    or str(item.get("value") or "") not in measurement_values(quote)
+                    or not item.get("label")
+                    or item["label"] not in quote
+                    or not any(
+                        str(item.get("value") or "")
+                        in measurement_values(claim_texts.get(ref) or "")
+                        for ref in item.get("claim_refs", [])
+                    )
+                ):
+                    errors.append("R20: 来源指标缺少口径或数字与引句不一致")
 
     for item in fact_items:
         claim_ref = item.get("claim_ref")
@@ -158,6 +231,14 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
             if node.get(key):
                 refs.append(node[key])
         refs.extend(node.get("evidence_refs") or [])
+        claim_refs = node.get("claim_refs") or []
+        for ref in claim_refs:
+            if ref not in claim_texts:
+                errors.append(f"R2: claim_refs {ref} 未进入报告事实表")
+        if claim_refs and refs:
+            bound = set().union(*(bindings.get(ref, set()) for ref in claim_refs))
+            if not set(refs).issubset(bound):
+                errors.append("R17: 多陈述分析引用了未绑定证据")
         for evidence_ref in refs:
             if evidence_ref not in evidence_ids:
                 errors.append(f"R2: evidence_ref {evidence_ref} 不存在")

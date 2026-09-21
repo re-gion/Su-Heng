@@ -7,6 +7,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from yuqing.core.llm.roles import ROLES
+from yuqing.services.budget import (
+    BUDGET_FIELDS,
+    DEFAULT_BUDGET_TABLE,
+    budget_table_to_json,
+    dump_budget_overrides,
+    parse_budget_overrides,
+    resolve_budget_table,
+)
 from yuqing.storage.db import Database
 
 SEARCH_PROVIDERS = ("langsearch", "zhipu", "qianfan", "tavily", "serper")
@@ -80,6 +88,7 @@ class ConfigService:
             ).split(",")
             if name.strip() in SEARCH_PROVIDERS
         ]
+        budget_overrides = parse_budget_overrides(values.get("BUDGET_OVERRIDES"))
         return {
             "llm": {"default": default, "roles": roles},
             "search": {
@@ -93,6 +102,14 @@ class ConfigService:
             "comments": {
                 "enabled": values.get("YUQING_COMMENT_PLUGIN_ENABLED", "false").lower()
                 in {"1", "true", "yes", "on"}
+            },
+            "budget": {
+                "overrides": budget_overrides,
+                "effective": budget_table_to_json(resolve_budget_table(budget_overrides)),
+                "defaults": budget_table_to_json(DEFAULT_BUDGET_TABLE),
+                "fields": list(BUDGET_FIELDS),
+                "depths": list(DEFAULT_BUDGET_TABLE),
+                "source": self._origin("BUDGET_OVERRIDES", stored, self.environ),
             },
         }
 
@@ -142,6 +159,16 @@ class ConfigService:
             if not isinstance(comments["enabled"], bool):
                 raise ValueError("comments.enabled 必须是布尔值")
             changes["YUQING_COMMENT_PLUGIN_ENABLED"] = "true" if comments["enabled"] else "false"
+        budget = payload.get("budget") or {}
+        if not isinstance(budget, dict):
+            raise ValueError("budget 必须是对象")
+        if "overrides" in budget:
+            overrides = budget["overrides"] if budget["overrides"] is not None else {}
+            if not isinstance(overrides, dict):
+                raise ValueError("budget.overrides 必须是对象")
+            # 先按默认表合并校验；非法档位/字段/数值一律拒绝落库。
+            resolve_budget_table(overrides)
+            changes["BUDGET_OVERRIDES"] = dump_budget_overrides(overrides)
         for key, value in changes.items():
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} 必须是字符串或 null")

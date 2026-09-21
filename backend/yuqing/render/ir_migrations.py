@@ -3,8 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = "0.4"
-CURRENT_READER_MINOR = 4
+CURRENT_SCHEMA_VERSION = "0.5"
+CURRENT_READER_MINOR = 5
 
 
 class UnsupportedReportVersion(ValueError):
@@ -18,7 +18,7 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
     version = str(value.get("schema_version") or "")
     if version == CURRENT_SCHEMA_VERSION:
         return value
-    if version not in {"0.1", "0.2", "0.3"}:
+    if version not in {"0.1", "0.2", "0.3", "0.4"}:
         raise UnsupportedReportVersion(f"不支持报告 IR {version or 'unknown'}")
     history = list(value.get("migration_history") or [])
     if version == "0.1":
@@ -42,6 +42,8 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
         version = "0.3"
     if version == "0.3" and "0.3->0.4" not in history:
         history.append("0.3->0.4")
+    if "0.4->0.5" not in history:
+        history.append("0.4->0.5")
     value["schema_version"] = CURRENT_SCHEMA_VERSION
     value["min_reader_minor"] = CURRENT_READER_MINOR
     value["migration_history"] = history
