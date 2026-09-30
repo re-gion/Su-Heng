@@ -96,6 +96,19 @@ groups:
       - xhby.net
       - yunnan.cn
       - qstheory.cn
+      # Frequently encountered licensed news domains in recent public-event tasks.
+      # They remain independent media (tier 2), never裁判性权威.
+      - globaltimes.cn
+      - zaobao.com.sg
+      - cls.cn
+      - sciencenet.cn
+      - cbg.cn
+      - cditv.cn
+      - sztv.com.cn
+      - hinews.cn
+      - oeeee.com
+      - yangtse.com
+      - ahwang.cn
 
   # L5 百科/待交叉：可展示，但不可作为独立采编主体计数。权重 0.2。
   - tier: 5

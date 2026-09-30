@@ -1222,6 +1222,9 @@ async def test_v1_restart_after_investigation_resumes_and_publishes_report(runti
     phases = [event.data.get("phase") for event in events if event.event == "task.status"]
     assert "verifying" in phases
     assert "reporting" in phases
+    report_done = [event.data for event in events if event.event == "report.done"]
+    assert any(item.get("partial") and item.get("comment_pending") for item in report_done)
+    assert report_done[-1].get("partial") is not True
     # Resuming saved comments must not attribute their analysis to the forum.
     assert "comment_analysis" in phases
     assert "forum" not in phases[phases.index("comment_selection") + 1 :]

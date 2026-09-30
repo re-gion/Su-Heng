@@ -335,7 +335,7 @@ def _chart(block: dict[str, Any]) -> str:
                 f'<td class="relation relation-{key}">{_escape(relations.get(key, 0))}</td>'
                 for key in ("support", "partial", "contradict", "not_mentioned", "unverified")
             )
-            badge = item.get("badge", "unverified")
+            badge = _display_badge(item)
             rows.append(
                 f'<tr><th scope="row"><a href="#claim-{_escape(item.get("claim_ref"))}">'
                 f"{_escape(item.get('claim_ref'))}</a><span>{_escape(item.get('text'))}</span></th>"
@@ -453,6 +453,7 @@ def _data_quality(block: dict[str, Any]) -> str:
         f"<details><summary><span>{_escape(block.get('title'))}</span><small>展开查看计算口径与检索库存统计</small></summary>"
         f'<div class="quality-summary">{summary}</div>'
         f'<p class="method-note">已证实陈述占比：{float(method.get("verified_rate", 0)):.0%}；'
+        f"来源直接支持：{int(method.get('single_source_supported_count', 0))} 条；"
         f"信源加权值：{float(method.get('weighted_verified_rate', 0)):.0%}；"
         f"权重口径：{_escape(method.get('weight_scheme'))}。这些数值描述核验结论，不代表系统运行成功率。</p>"
         f"{''.join(distributions)}</details></section>"

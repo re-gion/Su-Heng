@@ -189,6 +189,14 @@ class BriefReportBuilder:
             rejection_reasons["范围审查尚未完成"] = scope_pending
         total = len(rendered_claims)
         verified = sum(item["badge"] == "verified" for item in rendered_claims)
+        single_source_supported = sum(
+            item["badge"] == "unverified"
+            and item["verification_state"] == "complete"
+            and item["independent_sources"] == 1
+            and item["evidence_grade"] == "fulltext"
+            and any(citation.get("relation") == "support" for citation in item["citations"])
+            for item in rendered_claims
+        )
         disputed = sum(item["badge"] == "disputed" for item in rendered_claims)
         refuted = sum(item["badge"] == "refuted" for item in rendered_claims)
         evidence_items = [appendix[key] for key in sorted(appendix)]
@@ -208,6 +216,7 @@ class BriefReportBuilder:
             "stance_drops": dict(stance_drops),
             "citation_coverage": 1.0 if total else 0.0,
             "verified_rate": verified / total if total else 0.0,
+            "single_source_supported_count": single_source_supported,
             "weighted_verified_rate": (
                 sum(
                     {1: 1.0, 2: 0.8, 3: 0.6, 4: 0.4, 5: 0.2}.get(item["max_source_tier"], 0.2)

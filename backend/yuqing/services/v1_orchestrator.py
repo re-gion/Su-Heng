@@ -2616,11 +2616,19 @@ class V1Orchestrator:
                     },
                 )
             return
+        # Comment analysis is an enrichment branch. Start it as soon as the user
+        # has approved posts so it can overlap with deterministic verification;
+        # the core report no longer waits for a serial comment pass before doing
+        # its own work. The task is joined before report assembly so its findings
+        # remain part of the final IR when the optional branch completes.
+        comment_analysis_task = None
         if phase == "comments_ready":
             await self.events.emit_task_status(
                 task_id, status="running", phase="comment_analysis", progress=70
             )
-            await self._run_comment_insight(task_id, investigation_query, board)
+            comment_analysis_task = asyncio.create_task(
+                self._run_comment_insight(task_id, investigation_query, board)
+            )
         if checkpoint is None or checkpoint.get("phase") != "verified":
             self._set_llm_phase_limit(token_limit, "verification")
             await self.events.emit_task_status(
@@ -2757,6 +2765,39 @@ class V1Orchestrator:
             orchestration_limitations=self._limitations,
             diagnostic_only=diagnostic_only,
         )
+        if comment_analysis_task is not None:
+            # Publish the core report while the optional comment branch is still
+            # running. A second build below folds completed comment findings into
+            # the final report; both report.done events are safe because the
+            # client always keeps the newest URL.
+            await self.database.save_report(
+                task_id, report_id, report, html_path, report["metrics"]
+            )
+            await asyncio.to_thread(
+                Path(html_path).write_text, render_html(report), encoding="utf-8"
+            )
+            await self.events.emit(
+                task_id,
+                "report.done",
+                {
+                    "report_id": report_id,
+                    "html_url": f"/api/reports/{report_id}/html?view=full",
+                    "partial": True,
+                    "comment_pending": True,
+                },
+            )
+            try:
+                await comment_analysis_task
+            except Exception as exc:
+                self._limitations.append(
+                    f"评论增量分析未完成（{type(exc).__name__}），核心报告仍按事实证据生成。"
+                )
+            report_id, report, html_path = await self.reports.build(
+                task_id,
+                forum=board.history(),
+                orchestration_limitations=self._limitations,
+                diagnostic_only=diagnostic_only,
+            )
         # Evaluate the assembled, reviewed report before deciding what to recover.
         # Persist each attempt, including failed attempts, so resume never resets the bound.
         progress = await self.database.checkpoint(task_id, "report:quality_recovery") or {}

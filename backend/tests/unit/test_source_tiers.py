@@ -64,6 +64,21 @@ def test_mainstream_media_are_never_authority(host):
     assert bundled().classify(host)[:2] != (1, "authority")
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "www.globaltimes.cn",
+        "www.zaobao.com.sg",
+        "www.cls.cn",
+        "news.sciencenet.cn",
+        "www.cbg.cn",
+        "www.sztv.com.cn",
+    ],
+)
+def test_known_licensed_media_are_independent_tier_two(host):
+    assert bundled().classify(host) == (2, "independent", True)
+
+
 def test_deny_short_circuits_before_allow():
     classifier = SourceTierClassifier(
         TierConfig(

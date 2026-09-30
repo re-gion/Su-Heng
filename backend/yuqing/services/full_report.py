@@ -648,6 +648,15 @@ class FullReportBuilder:
         total_claims = len(fact_items)
         verified_claims = sum(item["badge"] == "verified" for item in fact_items)
         unverified_claims = sum(item["badge"] == "unverified" for item in fact_items)
+        single_source_supported = sum(
+            item["badge"] == "unverified"
+            and item["verification_state"] == "complete"
+            and item.get("independent_sources") == 1
+            and item.get("evidence_grade") == "fulltext"
+            and any(citation.get("relation") == "support" for citation in item.get("citations", []))
+            for item in fact_items
+        )
+        report["metrics"]["single_source_supported_count"] = single_source_supported
         cited_records = [
             evidence_by_id[evidence_id]
             for evidence_id in sorted(cited_evidence_ids)
@@ -666,6 +675,7 @@ class FullReportBuilder:
             if unfinished_claims
             else "需要更多独立支持或一手材料"
         )
+        unresolved_claims = max(0, unverified_claims - single_source_supported)
         kpis = {
             "block_id": "b_00_kpi",
             "type": "kpi_grid",
@@ -681,9 +691,15 @@ class FullReportBuilder:
                 },
                 {
                     "label": "待核验陈述",
-                    "value": f"{unverified_claims} / {total_claims}",
+                    "value": f"{unresolved_claims} / {total_claims}",
                     "note": unverified_note,
-                    "tone": "warning" if unverified_claims else "neutral",
+                    "tone": "warning" if unresolved_claims else "neutral",
+                },
+                {
+                    "label": "来源直接支持",
+                    "value": f"{single_source_supported} / {total_claims}",
+                    "note": "已取得原文并支持整条陈述；仍需独立互证才会标为已证实",
+                    "tone": "neutral" if single_source_supported else "warning",
                 },
                 {
                     "label": "已取得原文",
@@ -925,6 +941,9 @@ class FullReportBuilder:
             ],
             "verification_method": {
                 "verified_rate": report["metrics"]["verified_rate"],
+                "single_source_supported_count": report["metrics"].get(
+                    "single_source_supported_count", 0
+                ),
                 "weighted_verified_rate": report["metrics"]["weighted_verified_rate"],
                 "weight_scheme": report["metrics"]["weight_scheme"],
             },
