@@ -1,9 +1,34 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from yuqing.storage.db import Database
 from yuqing.storage.models import ClaimCreate, EvidenceCreate, QuoteCreate, TaskCreate
+
+
+@pytest.mark.asyncio
+async def test_existing_task_table_gains_institution_scope_column(runtime_dir):
+    path = runtime_dir / "legacy-scope.db"
+    schema = (Path(__file__).parents[2] / "yuqing" / "storage" / "schema.sql").read_text(
+        encoding="utf-8"
+    )
+    old_column = (
+        "  investigation_scope TEXT NOT NULL DEFAULT 'general' "
+        "CHECK (investigation_scope IN ('general','institution','public_event')),\n"
+    )
+    assert old_column in schema
+    connection = sqlite3.connect(path)
+    connection.executescript(schema.replace(old_column, ""))
+    connection.close()
+
+    database = Database(path)
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="机构公开回应", investigation_scope="institution")
+    )
+    assert task.investigation_scope == "institution"
+    await database.close()
 
 
 @pytest.mark.asyncio

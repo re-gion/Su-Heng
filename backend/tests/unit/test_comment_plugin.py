@@ -8,19 +8,12 @@ import pytest
 
 from yuqing.services.comment_plugin import (
     CandidateDiscoveryAttempt,
-    OpenAICandidateEvaluator,
+    CollectedPost,
+    CommentCandidate,
     PlaywrightCommentCollector,
     PlaywrightPublicCandidateDiscoverer,
     PublicCandidateDiscovery,
 )
-
-
-class TopicQueryGateway:
-    def __init__(self, payload):
-        self.payload = payload
-
-    async def complete_json(self, *args, **kwargs):
-        return self.payload
 
 
 class FakeContext:
@@ -85,6 +78,12 @@ class FakeAsyncPlaywright:
     async def start(self):
         return self.playwright
 
+    async def __aenter__(self):
+        return self.playwright
+
+    async def __aexit__(self, *_args):
+        await self.playwright.stop()
+
 
 def test_public_candidate_search_url_encodes_query_and_targets_platform():
     url = PlaywrightPublicCandidateDiscoverer.search_url("bilibili", "武汉大学 图书馆事件")
@@ -99,31 +98,6 @@ def test_public_candidate_prefers_event_title_over_thumbnail_metrics():
     assert PlaywrightPublicCandidateDiscoverer.title_score(
         query, "一个视频了解武汉大学图书馆事件始末"
     ) > PlaywrightPublicCandidateDiscoverer.title_score(query, "129.5万 5060 11:49")
-
-
-@pytest.mark.asyncio
-async def test_topic_query_expansion_keeps_subject_and_drops_drifted_queries():
-    evaluator = OpenAICandidateEvaluator(
-        TopicQueryGateway(
-            {
-                "queries": [
-                    "武汉大学 图书馆 争议 校方回应",
-                    "武汉大学 2025 舆情 事件",
-                    "其他大学 学术争议",
-                    "武汉大学 图书馆 争议 校方回应",
-                ]
-            }
-        )
-    )
-
-    queries = await evaluator.propose_topic_queries(
-        "武汉大学舆情",
-        date_from="2023-01-01",
-        date_to="2026-01-01",
-        language="zh",
-    )
-
-    assert queries == ["武汉大学 图书馆 争议 校方回应"]
 
 
 @pytest.mark.asyncio
@@ -185,7 +159,121 @@ async def test_comment_login_launches_browser_in_dedicated_worker_loop(tmp_path:
     if hasattr(asyncio, "ProactorEventLoop"):
         assert isinstance(fake_playwright.chromium.loop, asyncio.ProactorEventLoop)
     assert fake_playwright.chromium.context.pages[0].visited == ["https://weibo.com"]
+    assert collector._sessions["weibo"]["keep_open"] is True
 
     assert await collector.has_login("weibo") is True
     await collector.aclose()
     assert fake_playwright.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_login_precheck_closes_its_hidden_browser(tmp_path: Path, monkeypatch):
+    fake_playwright = FakePlaywright()
+    fake_async_api = ModuleType("playwright.async_api")
+    fake_async_api.async_playwright = lambda: FakeAsyncPlaywright(fake_playwright)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", fake_async_api)
+    monkeypatch.setattr(
+        PlaywrightCommentCollector, "_browser_path", staticmethod(lambda: "browser.exe")
+    )
+    (tmp_path / "weibo").mkdir()
+    collector = PlaywrightCommentCollector(tmp_path)
+
+    assert await collector.has_login("weibo") is True
+    assert fake_playwright.chromium.kwargs["headless"] is True
+    assert fake_playwright.chromium.context.closed is True
+    assert fake_playwright.stopped is True
+    assert collector.is_open("weibo") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep_open,raises", [(False, False), (False, True), (True, False)])
+async def test_collection_closes_only_auto_browser(tmp_path: Path, monkeypatch, keep_open, raises):
+    collector = PlaywrightCommentCollector(tmp_path)
+    collector._sessions["weibo"] = {"keep_open": keep_open}
+    closed = []
+
+    async def fake_run(_platform, _operation):
+        if raises:
+            raise RuntimeError("collection failed")
+        return CollectedPost(comments=[], sampling_method="fixture")
+
+    async def fake_close(platform):
+        closed.append(platform)
+
+    monkeypatch.setattr(collector, "_run_on_session", fake_run)
+    monkeypatch.setattr(collector, "close_platform", fake_close)
+    candidate = CommentCandidate(
+        id="c1",
+        task_id="t1",
+        url="https://weibo.com/123456/AbCdEf",
+        platform="weibo",
+        title="测试帖子",
+        selection_mode="manual",
+        score=0,
+        score_breakdown={},
+        reasons=[],
+    )
+
+    if raises:
+        with pytest.raises(RuntimeError, match="collection failed"):
+            await collector.collect(candidate, limit=1, stop_requested=lambda: False)
+    else:
+        await collector.collect(candidate, limit=1, stop_requested=lambda: False)
+
+    assert closed == ([] if keep_open else ["weibo"])
+
+
+@pytest.mark.asyncio
+async def test_parallel_tasks_do_not_open_two_auto_collection_browsers(tmp_path: Path, monkeypatch):
+    collector = PlaywrightCommentCollector(tmp_path)
+    collector._sessions = {
+        "weibo": {"keep_open": False},
+        "bilibili": {"keep_open": False},
+    }
+    active = 0
+    most_active = 0
+
+    async def fake_run(_platform, _operation):
+        nonlocal active, most_active
+        active += 1
+        most_active = max(most_active, active)
+        await asyncio.sleep(0.01)
+        return CollectedPost(comments=[], sampling_method="fixture")
+
+    async def fake_close(_platform):
+        nonlocal active
+        active -= 1
+
+    monkeypatch.setattr(collector, "_run_on_session", fake_run)
+    monkeypatch.setattr(collector, "close_platform", fake_close)
+    candidates = [
+        CommentCandidate(
+            id="c1",
+            task_id="t1",
+            url="https://weibo.com/123456/AbCdEf",
+            platform="weibo",
+            title="微博帖子",
+            selection_mode="manual",
+            score=0,
+            score_breakdown={},
+            reasons=[],
+        ),
+        CommentCandidate(
+            id="c2",
+            task_id="t2",
+            url="https://www.bilibili.com/video/BV1xx411c7mD",
+            platform="bilibili",
+            title="B站帖子",
+            selection_mode="manual",
+            score=0,
+            score_breakdown={},
+            reasons=[],
+        ),
+    ]
+
+    await asyncio.gather(
+        *(collector.collect(item, limit=1, stop_requested=lambda: False) for item in candidates)
+    )
+
+    assert most_active == 1
+    assert active == 0

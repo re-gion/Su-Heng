@@ -82,7 +82,7 @@ class TierGroup(BaseModel):
 
 
 class EntityGroup(BaseModel):
-    """一个采编主体及其多个站点（05-核心契约 §0.4 的独立性归并单位）。"""
+    """An explicitly named publisher or institution and its owned domains."""
 
     name: str
     domains: list[str]
@@ -93,6 +93,7 @@ class TierConfig(BaseModel):
     # deny 先于 groups 匹配：聚合/转载平台无论 tier 多高都不算独立采编主体。
     deny: list[TierGroup] = []
     entities: list[EntityGroup] = []
+    institutions: list[EntityGroup] = []
     default_tier: int = 4
     default_role: SourceRole = "unknown"
 
@@ -131,9 +132,16 @@ class SourceTierClassifier:
 
     def entity_for(self, host: str) -> str | None:
         """按最长域名后缀匹配采编主体；无名可归时返回 None。"""
+        return self._group_name_for(host, self.config.entities)
+
+    def institution_for(self, host: str) -> str | None:
+        """Only explicit domain ownership maps may identify a selected institution."""
+        return self._group_name_for(host, self.config.institutions)
+
+    def _group_name_for(self, host: str, groups: list[EntityGroup]) -> str | None:
         host = self._normalize(host)
         best: tuple[int, str] | None = None
-        for group in self.config.entities:
+        for group in groups:
             for item in group.domains:
                 item = item.lower()
                 if host == item or host.endswith(f".{item}"):

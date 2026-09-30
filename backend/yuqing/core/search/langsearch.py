@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from typing import Any
 
 import httpx
 
@@ -10,7 +11,7 @@ from yuqing.core.search.base import SearchParams, SearchResult
 
 
 class LangSearchLimiter:
-    def __init__(self, interval: float, *, max_calls_per_minute: int = 55):
+    def __init__(self, interval: float, *, max_calls_per_minute: int = 290):
         self.interval = interval
         self.max_calls_per_minute = max(1, max_calls_per_minute)
         self.last_call = 0.0
@@ -55,14 +56,15 @@ class LangSearchProvider:
         api_key: str,
         *,
         client: httpx.AsyncClient | None = None,
-        qps: float = 1.0,
+        qps: float = 5.0,
         limiter: LangSearchLimiter | None = None,
     ):
         if not api_key:
             raise ValueError("LANGSEARCH_API_KEY 未配置")
         self.api_key = api_key
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10))
-        # 官方 1 QPS 按服务端时间窗口计数；留出 10% 抖动余量避免边界 429。
+        # 当前公开免费计划写明 5 RPS；这里保留约 10% 抖动余量，
+        # 避免并发任务恰好卡在服务端时间窗口边界而触发 429。
         self._limiter = limiter or LangSearchLimiter(1.1 / qps)
 
     async def _throttle(self) -> None:
@@ -77,16 +79,23 @@ class LangSearchProvider:
             return min(60.0, 15.0 * (2**attempt))
 
     async def search(self, params: SearchParams) -> list[SearchResult]:
+        include_text = (
+            params.contents_text
+            if params.langsearch_contents_text is None
+            else params.langsearch_contents_text
+        )
         payload = {
             "query": params.query,
             "count": params.top_k,
             "freshness": params.freshness,
-            "summary": True,
+            "contents": {
+                "text": {"maxCharacters": params.max_characters} if include_text else False
+            },
         }
         if params.include_domains:
-            payload["include_domains"] = params.include_domains
+            payload["includeDomains"] = params.include_domains
         if params.exclude_domains:
-            payload["exclude_domains"] = params.exclude_domains
+            payload["excludeDomains"] = params.exclude_domains
         response: httpx.Response | None = None
         for attempt in range(3):
             await self._throttle()
@@ -103,22 +112,35 @@ class LangSearchProvider:
             await self._limiter.defer(self._retry_after(response, attempt))
         assert response is not None
         response.raise_for_status()
-        body = response.json()
+        body: dict[str, Any] = response.json()
         items = (
             body.get("data", {})
             .get("webPages", {})
             .get("value", body.get("data", {}).get("results", []))
         )
+        usage = body.get("usage")
+        metadata = {key: body[key] for key in ("code", "log_id", "msg") if key in body}
         return [
             SearchResult(
                 url=item["url"],
                 title=item.get("name") or item.get("title") or item["url"],
-                snippet=item.get("snippet") or item.get("summary") or "无摘要",
+                snippet=(
+                    item.get("snippet")
+                    or item.get("summary")
+                    or item.get("text", "")[:500]
+                    or "无摘要"
+                ),
                 summary=item.get("summary"),
                 published_at=item.get("datePublished") or item.get("published_at"),
                 source_name=item.get("siteName") or item.get("source_name"),
                 provider=self.name,
                 lang=params.lang,
+                content_text=item.get("text") if include_text else None,
+                content_origin=(
+                    "provider_fulltext" if include_text and item.get("text") else "search_snippet"
+                ),
+                usage=usage if isinstance(usage, dict) else None,
+                provider_metadata=metadata,
                 raw=item,
             )
             for item in items

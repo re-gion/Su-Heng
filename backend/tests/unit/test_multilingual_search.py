@@ -21,15 +21,17 @@ class Provider:
 
 
 @pytest.mark.asyncio
-async def test_non_chinese_search_prefers_global_providers_without_changing_config_order():
+async def test_non_chinese_search_uses_foreign_provider_group():
     domestic = Provider("langsearch")
     global_provider = Provider("tavily")
     chain = SearchChain([domestic, global_provider])
 
     await chain.search(SearchParams(query="CrowdStrike outage", lang="en"))
 
+    # English searches use the configured foreign group instead of spending
+    # domestic quota on a query that the foreign providers cover directly.
+    assert len(domestic.calls) == 0
     assert len(global_provider.calls) == 1
-    assert domestic.calls == []
     assert [item.name for item in chain.providers] == ["langsearch", "tavily"]
 
 

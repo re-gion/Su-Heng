@@ -7,6 +7,7 @@ from yuqing.agents.openai_runtime import (
     OpenAIInvestigationAgent,
     build_evidence_digest,
 )
+from yuqing.core.llm.gateway import LLMOutputTruncated
 
 
 class StaticGateway:
@@ -100,7 +101,7 @@ def test_evidence_digest_samples_large_inventory_across_groups():
     [
         ("analyst_a", "权威通报、当事方回应及其明确日期"),
         ("analyst_b", "首发、回应、独立采编与转载"),
-        ("analyst_c", "历史对照"),
+        ("analyst_c", "独立事件"),
     ],
 )
 async def test_plan_prompt_is_role_specific_and_rejects_fake_population_metrics(role, expected):
@@ -130,3 +131,89 @@ async def test_summarize_prompt_uses_existing_claims_as_novelty_guard_not_fuzzy_
     assert "不得仅换同义词重复" in prompt
     assert "新数字及其口径" in prompt
     assert "含新数字、否定关系或主体差异的陈述不得因主题相近而省略" in prompt
+
+
+@pytest.mark.asyncio
+async def test_summarize_recovers_claims_when_large_inventory_returns_empty_object():
+    class SizeSensitiveGateway:
+        def __init__(self):
+            self.calls = []
+
+        async def complete_json(self, _role, _system, prompt, **_kwargs):
+            self.calls.append(prompt)
+            ids = [f"E{index:03d}" for index in range(1, 17) if f"E{index:03d} |" in prompt]
+            if len(ids) > 4:
+                return {}
+            return {
+                "claims": [
+                    {"text": f"来源 {item} 记录了相关事件。", "evidence_ids": [item]}
+                    for item in ids[:2]
+                ]
+            }
+
+    gateway = SizeSensitiveGateway()
+    agent = OpenAIInvestigationAgent(gateway, "system", role="analyst_a")
+
+    claims = await agent.summarize("测试事件", [_evidence(index) for index in range(1, 17)])
+
+    assert len(gateway.calls) > 1
+    assert len(claims) >= 4
+    assert all(claim.evidence_ids for claim in claims)
+
+
+@pytest.mark.asyncio
+async def test_summarize_keeps_other_batches_when_one_output_is_truncated():
+    class TruncatingGateway:
+        async def complete_json(self, _role, _system, prompt, **_kwargs):
+            if "E001 |" in prompt:
+                raise LLMOutputTruncated("输出已截断")
+            return {"claims": [{"text": "第二批的事实", "evidence_ids": ["E005"]}]}
+
+    agent = OpenAIInvestigationAgent(TruncatingGateway(), "system", role="analyst_a")
+
+    claims = await agent.summarize("测试事件", [_evidence(index) for index in range(1, 9)])
+
+    assert [claim.text for claim in claims] == ["第二批的事实"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_repairs_compound_claim_before_it_enters_verification():
+    class CompoundGateway:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_json(self, _role, _system, prompt, **_kwargs):
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return {
+                    "claims": [
+                        {
+                            "text": "校方发布情况说明；法院随后作出判决；媒体又报道了复核结果。",
+                            "evidence_ids": ["E001"],
+                        }
+                    ]
+                }
+            return {"claims": [{"text": "校方发布了情况说明。", "evidence_ids": ["E001"]}]}
+
+    gateway = CompoundGateway()
+    agent = OpenAIInvestigationAgent(gateway, "system", role="analyst_a")
+
+    claims = await agent.summarize("测试事件", [_evidence(1)])
+
+    assert [claim.text for claim in claims] == ["校方发布了情况说明。"]
+    assert len(gateway.prompts) == 2
+    assert "单一" in gateway.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_reflection_truncation_keeps_agent_in_safe_fallback():
+    class TruncatingGateway:
+        async def complete_json(self, *_args, **_kwargs):
+            raise LLMOutputTruncated("输出已截断")
+
+    agent = OpenAIInvestigationAgent(TruncatingGateway(), "system", role="analyst_a")
+
+    reflection = await agent.reflect("测试事件", [])
+
+    assert reflection.should_continue is False
+    assert "结构化输出失败" in reflection.reason

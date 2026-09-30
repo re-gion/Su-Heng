@@ -1,12 +1,99 @@
 import asyncio
+import json
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from yuqing.services.forum import ForumBoard, ForumMessageCreate
 from yuqing.services.full_report import FullReportBuilder
+from yuqing.services.report_delivery import EvidencePackageBuilder
 from yuqing.storage.db import Database
-from yuqing.storage.models import ClaimCreate, EvidenceCreate, TaskCreate
+from yuqing.storage.models import ClaimCreate, EvidenceCreate, QuoteCreate, TaskCreate
+from yuqing.storage.snapshots import SnapshotStore
+
+
+class InstitutionReviewer:
+    def bind(self, *args):
+        return self
+
+    async def review(self, texts, *, kind):
+        from yuqing.services.institution_scope import ScopeReview
+
+        return [
+            ScopeReview("rejected" if "张三" in text else "accepted", "policy", text)
+            for text in texts
+        ]
+
+    async def accepted(self, texts, *, kind):
+        return ["张三" not in text for text in texts]
+
+
+@pytest.mark.asyncio
+async def test_institution_report_hides_personal_source_text_and_preserves_link(
+    runtime_dir: Path, claim_limits: dict[str, int]
+):
+    database = Database(runtime_dir / "institution.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="某高校图书馆事件", investigation_scope="institution")
+    )
+    snapshot = runtime_dir / "source.html"
+    snapshot.write_text("张三相关网页原文", encoding="utf-8")
+    evidence = await database.add_evidence(
+        EvidenceCreate(
+            task_id=task.id,
+            url="https://example.com/notice",
+            title="学校回应张三相关争议",
+            snippet="学校回应张三相关争议，并公布复核安排。",
+            source_name="某高校",
+            source_role="party",
+            source_tier=1,
+        )
+    )
+    await database.add_claim(
+        ClaimCreate(
+            task_id=task.id,
+            text="学校公布了复核安排。",
+            agent="fact_investigator",
+            section="fact_check",
+            evidence_ids=[evidence.local_id],
+        ),
+        **claim_limits,
+    )
+
+    report_id, report, path = await FullReportBuilder(
+        database, runtime_dir / "reports", scope_reviewer=InstitutionReviewer()
+    ).build(task.id)
+    html = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
+
+    assert "张三" not in json.dumps(report, ensure_ascii=False)
+    assert "张三" not in html
+    assert "学校公布了复核安排" in html
+    assert "https://example.com/notice" in html
+    appendix = next(block for block in report["blocks"] if block["type"] == "evidence_appendix")
+    assert appendix["items"][0]["snapshot_pk"] is None
+    # A legacy or manually migrated IR may still hold a snapshot reference.
+    await database.update_evidence_fetched(
+        task.id,
+        evidence.local_id,
+        content_text="张三相关网页原文",
+        snapshot_path=str(snapshot),
+        content_sha256="a" * 64,
+    )
+    appendix["items"][0]["fetch_status"] = "fetched"
+    appendix["items"][0]["snapshot_pk"] = evidence.pk
+    report["task"].pop("investigation_scope", None)
+    await database.save_report(task.id, report_id, report, path, report["metrics"])
+    packaged = await EvidencePackageBuilder(database, SnapshotStore(runtime_dir)).build(report_id)
+    with zipfile.ZipFile(BytesIO(packaged)) as archive:
+        assert archive.namelist() == ["report.html", "manifest.json"]
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["evidence"][0]["url"] == "https://example.com/notice"
+        assert manifest["evidence"][0]["snapshot_file"] is None
+        assert "张三" not in archive.read("report.html").decode("utf-8")
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -111,7 +198,7 @@ async def test_full_report_has_ten_sections_real_charts_and_offline_interactions
     assert ":focus-visible" in html
     assert "IntersectionObserver" in html
     assert "搜索摘要（非原文）" in html
-    assert '<link rel="icon" href="data:,">' in html
+    assert '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,' in html
     assert "https://cdn." not in html
     assert report["metrics"]["key_claims_candidate"] == 1
     assert report["metrics"]["citation_coverage"] == 1.0
@@ -127,6 +214,155 @@ async def test_full_report_has_ten_sections_real_charts_and_offline_interactions
         block for block in report["blocks"] if block.get("block_id") == "b_04_verification_matrix"
     )
     assert matrix["items"][0]["claim_ref"] == "C001"
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_node_drops_evidence_rejected_by_claim_verification(
+    runtime_dir: Path, claim_limits: dict[str, int]
+):
+    database = Database(runtime_dir / "media-rejected-citation.db")
+    await database.initialize()
+    task = await database.create_task(TaskCreate(event_query="某机构发布调查通报"))
+    first = await database.add_evidence(
+        EvidenceCreate(
+            task_id=task.id,
+            url="https://example.cn/first",
+            title="机构调查通报",
+            snippet="机构发布了调查通报。",
+            published_at="2026-08-10T10:00:00+08:00",
+        )
+    )
+    second = await database.add_evidence(
+        EvidenceCreate(
+            task_id=task.id,
+            url="https://example.cn/second",
+            title="媒体后续报道",
+            snippet="媒体刊发后续报道。",
+            published_at="2026-08-11T10:00:00+08:00",
+        )
+    )
+    claim = await database.add_claim(
+        ClaimCreate(
+            task_id=task.id,
+            text="机构发布调查通报，媒体刊发后续报道。",
+            agent="media_propagation",
+            section="propagation",
+            evidence_ids=[first.local_id, second.local_id],
+            quotes=[
+                QuoteCreate(evidence_id=first.local_id, quote_type="paraphrase"),
+                QuoteCreate(evidence_id=second.local_id, quote_type="paraphrase"),
+            ],
+            analysis_data={
+                "publication_node": {
+                    "evidence_id": second.local_id,
+                    "publisher": "媒体",
+                    "published_at": "2026-08-11T10:00:00+08:00",
+                    "node_type": "independent",
+                    "framing": "后续报道",
+                },
+                "propagation_edges": [
+                    {
+                        "from_evidence_id": first.local_id,
+                        "to_evidence_id": second.local_id,
+                        "relation": "follow_up",
+                    }
+                ],
+            },
+        ),
+        **claim_limits,
+    )
+    await database.set_evidence_relation(
+        claim.pk,
+        first.pk,
+        relation="partial",
+        reason="支持通报部分",
+        cited_sentence=first.snippet or "",
+        cited_verified=True,
+    )
+    await database.set_evidence_relation(
+        claim.pk,
+        second.pk,
+        relation="not_mentioned",
+        reason="不支持该陈述",
+        cited_sentence=second.snippet or "",
+        cited_verified=False,
+    )
+
+    _, report, _ = await FullReportBuilder(database, runtime_dir / "reports").build(task.id)
+
+    network = next(
+        block for block in report["blocks"] if block["block_id"] == "b_04_publication_network"
+    )
+    assert network["nodes"] == []
+    assert network["edges"] == []
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_reviewed_relation_can_add_dated_publication_page_without_media_claim(
+    runtime_dir: Path,
+):
+    class Reporter:
+        relation_diagnostics: list[dict] = []
+        relation_candidates: list[dict] = []
+
+        async def recover_relations(self, sources: list[dict]) -> list[dict]:
+            assert {item["evidence_ref"] for item in sources} == {"E001", "E002"}
+            return [
+                {
+                    "from_evidence_id": "E001",
+                    "to_evidence_id": "E002",
+                    "relation": "repost",
+                    "support_evidence_id": "E002",
+                    "quote": "来源：甲方",
+                    "evidence_refs": ["E002"],
+                    "review_status": "accepted",
+                }
+            ]
+
+        async def enrich(self, context: dict) -> dict:
+            return {"analyses": [], "summary_claim_refs": []}
+
+    database = Database(runtime_dir / "reviewed-relation.db")
+    await database.initialize()
+    task = await database.create_task(TaskCreate(event_query="甲方发布某机构通报"))
+    for url, title, publisher, body in (
+        ("https://one.example.cn/news", "甲方原始报道", "甲方", "甲方发布某机构通报。"),
+        (
+            "https://two.example.cn/news",
+            "乙方转载甲方报道",
+            "乙方",
+            "来源：甲方。甲方发布某机构通报。",
+        ),
+    ):
+        await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url=url,
+                title=title,
+                snippet=body,
+                publisher_entity=publisher,
+                published_at="2025-09-20T10:00:00+08:00",
+                fetch_status="fetched",
+                fetched_at="2025-09-20T11:00:00+08:00",
+                content_text=body,
+                snapshot_path=str(runtime_dir / "source.html"),
+                content_sha256="a" * 64,
+                extra={"scope_status": "main", "date_provenance": "page_metadata"},
+            )
+        )
+
+    _, report, _ = await FullReportBuilder(
+        database, runtime_dir / "reviewed-relation-reports", reporter=Reporter()
+    ).build(task.id)
+    network = next(
+        block for block in report["blocks"] if block["block_id"] == "b_04_publication_network"
+    )
+    assert {node["evidence_id"] for node in network["nodes"]} == {"E001", "E002"}
+    assert len(network["edges"]) == 1
+    assert network["edges"][0]["review_status"] == "accepted"
+    assert network["fallback_text"] is None
     await database.close()
 
 

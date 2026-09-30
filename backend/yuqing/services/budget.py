@@ -51,9 +51,9 @@ class DepthBudget:
 # 各档位之间保持自洽：verify ≈ claims × 2.4 关系，token 按每条 claim 约 1.1 万 token 估。
 DEFAULT_BUDGET_TABLE: dict[str, DepthBudget] = {
     "quick": DepthBudget(
-        token_limit=200_000,
-        search_calls=12,
-        fetch_calls=10,
+        token_limit=300_000,
+        search_calls=18,
+        fetch_calls=15,
         max_claims=15,
         max_evidence_per_claim=3,
         max_verify_calls=40,
@@ -64,9 +64,9 @@ DEFAULT_BUDGET_TABLE: dict[str, DepthBudget] = {
         comments_per_post=100,
     ),
     "standard": DepthBudget(
-        token_limit=750_000,
-        search_calls=55,
-        fetch_calls=45,
+        token_limit=1_400_000,
+        search_calls=75,
+        fetch_calls=70,
         max_claims=60,
         max_evidence_per_claim=4,
         max_verify_calls=150,
@@ -77,9 +77,9 @@ DEFAULT_BUDGET_TABLE: dict[str, DepthBudget] = {
         comments_per_post=200,
     ),
     "deep": DepthBudget(
-        token_limit=1_300_000,
-        search_calls=110,
-        fetch_calls=85,
+        token_limit=2_000_000,
+        search_calls=140,
+        fetch_calls=120,
         max_claims=90,
         max_evidence_per_claim=6,
         max_verify_calls=230,

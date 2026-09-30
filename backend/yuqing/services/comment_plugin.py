@@ -10,7 +10,7 @@ import shutil
 import threading
 import uuid
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
@@ -148,51 +148,6 @@ class OpenAICandidateEvaluator:
         overlap = len(candidate_terms & source_terms) / max(1, len(candidate_terms))
         return candidate if overlap >= 0.5 else event_query
 
-    async def propose_topic_queries(
-        self,
-        topic: str,
-        *,
-        date_from: str | None,
-        date_to: str | None,
-        language: str,
-        limit: int = 4,
-    ) -> list[str]:
-        """Propose retrieval queries only; candidates still require a matching source."""
-
-        result = await self.gateway.complete_json(
-            "utility",
-            "你只负责把宽泛机构舆情主题拆成具体事件的检索词。不得把推测写成事实，"
-            "不得输出候选结论；后续只有搜索命中的公开来源才能成为候选。"
-            "不能只给机构名加年份、舆情、事件、争议、通报或回应，必须包含能区分事件的对象、场景或行为。"
-            "无法提出具体检索词时返回空数组。只输出 JSON。",
-            f"主题：{topic}\n时间范围：{date_from or '不限'} 至 {date_to or '不限'}\n"
-            f"检索语言：{language}\n"
-            '输出 {"queries":["..."]}，每条必须保留主题中的机构名，并聚焦不同的具体事件、争议或官方回应。',
-            max_tokens=360,
-        )
-        topic_terms = _terms(topic)
-        topic_core = re.sub(r"(舆情|舆论|热点|负面新闻|相关新闻|最新消息)$", "", topic).strip()
-        queries: list[str] = []
-        for raw in result.get("queries", []):
-            candidate = re.sub(r"\s+", " ", str(raw)).strip()
-            if not 4 <= len(candidate) <= 120:
-                continue
-            candidate_terms = _terms(candidate)
-            overlap = len(candidate_terms & topic_terms) / max(1, len(topic_terms))
-            residual = candidate.replace(topic_core, "") if topic_core else candidate
-            residual = re.sub(
-                r"(?:19|20)\d{2}|舆情|舆论|热点|事件|争议|通报|回应|官方|调查|最新|具体",
-                "",
-                residual,
-            )
-            residual_han = re.sub(r"[^\u4e00-\u9fff]", "", residual)
-            if overlap < 0.5 or len(residual_han) < 2 or candidate in queries:
-                continue
-            queries.append(candidate)
-            if len(queries) >= max(1, limit):
-                break
-        return queries
-
 
 class PlaywrightCommentCollector:
     """专用持久化浏览器采集器；只解析浏览器正常取得的响应与可见 DOM。"""
@@ -200,6 +155,11 @@ class PlaywrightCommentCollector:
     def __init__(self, profile_dir: Path):
         self.profile_dir = Path(profile_dir)
         self._sessions: dict[str, dict[str, Any]] = {}
+        self._platform_locks: dict[str, asyncio.Lock] = {}
+        self._collection_lock = asyncio.Lock()
+
+    def _platform_lock(self, platform: str) -> asyncio.Lock:
+        return self._platform_locks.setdefault(platform, asyncio.Lock())
 
     @staticmethod
     def _browser_path() -> str | None:
@@ -218,7 +178,7 @@ class PlaywrightCommentCollector:
         if session is not None:
             return session
         ready = threading.Event()
-        session = {"ready": ready}
+        session = {"ready": ready, "keep_open": False}
         self._sessions[platform] = session
 
         def worker() -> None:
@@ -256,6 +216,8 @@ class PlaywrightCommentCollector:
             except Exception as exc:  # pragma: no cover - surfaced to caller
                 session["error"] = exc
                 ready.set()
+                if playwright := session.get("playwright"):
+                    loop.run_until_complete(playwright.stop())
             finally:
                 ready.set()
                 try:
@@ -282,8 +244,10 @@ class PlaywrightCommentCollector:
             raise RuntimeError(str(error)) from error
         return session
 
-    async def _run_on_session(self, platform: str, coro_factory):
+    async def _run_on_session(self, platform: str, coro_factory, *, keep_open: bool = False):
         session = await self._wait_session(platform)
+        if keep_open:
+            session["keep_open"] = True
         loop = session["loop"]
         future = asyncio.run_coroutine_threadsafe(coro_factory(session["context"]), loop)
         return await asyncio.wrap_future(future)
@@ -296,7 +260,8 @@ class PlaywrightCommentCollector:
             )
             await page.bring_to_front()
 
-        await self._run_on_session(adapter.platform, op)
+        async with self._platform_lock(adapter.platform):
+            await self._run_on_session(adapter.platform, op, keep_open=True)
 
     async def close_platform(self, platform: str) -> None:
         session = self._sessions.pop(platform, None)
@@ -309,10 +274,12 @@ class PlaywrightCommentCollector:
         if loop is not None and loop.is_running():
 
             async def shutdown() -> None:
-                if context is not None:
-                    await context.close()
-                if playwright is not None:
-                    await playwright.stop()
+                try:
+                    if context is not None:
+                        await context.close()
+                finally:
+                    if playwright is not None:
+                        await playwright.stop()
 
             try:
                 await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(shutdown(), loop))
@@ -327,7 +294,43 @@ class PlaywrightCommentCollector:
         return bool(session and session.get("started") and thread and thread.is_alive())
 
     async def has_login(self, platform: str) -> bool:
-        return bool(await self._run_on_session(platform, lambda context: context.cookies()))
+        async with self._platform_lock(platform):
+            if platform in self._sessions:
+                return bool(await self._run_on_session(platform, lambda context: context.cookies()))
+            if not (self.profile_dir / platform).is_dir():
+                return False
+            return await asyncio.to_thread(self._check_saved_login, platform)
+
+    def _check_saved_login(self, platform: str) -> bool:
+        # The approval check must not leave a visible, persistent browser behind.
+        loop = asyncio.ProactorEventLoop() if os.name == "nt" else asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(self._check_saved_login_in_loop(platform))
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    async def _check_saved_login_in_loop(self, platform: str) -> bool:
+        from playwright.async_api import async_playwright
+
+        executable = self._browser_path()
+        if not executable:
+            raise RuntimeError("未找到 Chrome/Edge；可设置 YUQING_COMMENT_BROWSER")
+        async with async_playwright() as playwright:
+            context = await playwright.chromium.launch_persistent_context(
+                str(self.profile_dir / platform),
+                executable_path=executable,
+                headless=True,
+                viewport={"width": 1360, "height": 900},
+                locale="zh-CN",
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                return bool(await context.cookies())
+            finally:
+                await context.close()
 
     async def aclose(self) -> None:
         for platform in list(self._sessions):
@@ -369,7 +372,12 @@ class PlaywrightCommentCollector:
         async def op(context):
             if not await context.cookies():
                 raise RuntimeError("COMMENT_LOGIN_REQUIRED")
-            page = await context.new_page()
+            session = self._sessions[adapter.platform]
+            page = (
+                context.pages[0]
+                if not session["keep_open"] and context.pages
+                else await context.new_page()
+            )
             payloads: list[Any] = []
 
             async def capture(response) -> None:
@@ -445,7 +453,13 @@ class PlaywrightCommentCollector:
             finally:
                 await page.close()
 
-        return await self._run_on_session(adapter.platform, op)
+        async with self._collection_lock, self._platform_lock(adapter.platform):
+            try:
+                return await self._run_on_session(adapter.platform, op)
+            finally:
+                session = self._sessions.get(adapter.platform)
+                if session is not None and not session["keep_open"]:
+                    await self.close_platform(adapter.platform)
 
 
 class PlaywrightPublicCandidateDiscoverer:
@@ -630,8 +644,9 @@ def _recency_score(value: str | None) -> float:
     if not value:
         return 0
     try:
-        age = max(0, (datetime.now().astimezone() - datetime.fromisoformat(value)).days)
-    except ValueError:
+        published_at = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        age = max(0, (datetime.now(UTC) - published_at).days)
+    except (OSError, OverflowError, ValueError):
         return 0
     return max(0, 15 - min(15, age / 30))
 
@@ -1022,18 +1037,22 @@ class CommentPluginService:
         )
         await self.database.execute_write(
             """UPDATE comment_collection SET status=?,collected_count=?,
-                 sampling_method=?,completed_at=? WHERE id=?""",
+                 sampling_method=?,completed_at=?,error=? WHERE id=?""",
             (
-                "stopped" if stopped else "completed",
+                "stopped" if stopped else "completed" if sanitized else "failed",
                 len(sanitized),
                 result.sampling_method,
                 now_iso(),
+                None
+                if sanitized or stopped
+                else "COMMENT_EMPTY: 未取得有效评论；需检查登录、页面权限及解析结果，不能认定帖子没有评论。",
                 collection_id,
             ),
         )
         if not stopped:
             await self.database.execute_write(
-                "UPDATE social_candidate SET status='collected' WHERE id=?", (candidate.id,)
+                "UPDATE social_candidate SET status=? WHERE id=?",
+                ("collected" if sanitized else "failed", candidate.id),
             )
 
     async def mark_selection(self, task_id: str, candidate_ids: list[str]) -> None:

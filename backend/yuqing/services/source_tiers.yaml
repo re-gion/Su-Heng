@@ -109,6 +109,12 @@ groups:
 # 采编主体（05-核心契约 §0.4）：同一主体的多站点归并为同一个 publisher_entity，
 # 使"同集团多站只算一个独立信源"。未登记主体时退化为可注册域（www.163.com 与
 # m.163.com 同归 163.com），这是写进报告的口径承诺。
+# 仅用于核对所选事件的机构自有域名，不自动赋予报道独立性或事件角色。
+institutions:
+  - name: 武汉大学
+    domains:
+      - whu.edu.cn
+
 entities:
   - name: 新华社
     domains:

@@ -140,6 +140,37 @@ async def test_quick_selection_rejects_more_than_two_posts_atomically(runtime_di
     await database.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "published_at",
+    ["2026-09-21T08:00:00", "2026-09-21T00:00:00Z", "2026-09-21T08:00:00+08:00"],
+)
+async def test_smart_candidate_scoring_accepts_common_publish_dates(
+    runtime_dir: Path, published_at: str
+):
+    database = Database(runtime_dir / "naive-comment-date.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="武汉大学图书馆事件", depth="quick", comment_mode="smart")
+    )
+    service = CommentPluginService(database, runtime_dir / "plugin", enabled=True)
+
+    candidates = await service.discover_candidates(
+        task,
+        [
+            CommentCandidateInput(
+                url="https://weibo.com/123456/A1",
+                title="武汉大学图书馆事件讨论",
+                published_at=published_at,
+            )
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].score_breakdown["recency"] >= 0
+    await database.close()
+
+
 def test_bilibili_adapter_understands_native_rpid_and_content_message_shape():
     adapter = adapter_for_url("https://www.bilibili.com/video/BV1xx411c7mD")
 
@@ -521,7 +552,7 @@ async def test_v2_report_keeps_foreign_original_separate_from_machine_translatio
     timeline = next(block for block in report["blocks"] if block.get("chart_kind") == "timeline")
     html = render_html(report, view="full")
 
-    assert report["schema_version"] == "0.5"
+    assert report["schema_version"] == "0.8"
     assert report["language_coverage"]["complete"] == ["en"]
     assert report["language_coverage"]["missing"] == ["zh"]
     assert card["original_excerpt"] == "CrowdStrike says a fix has been deployed."

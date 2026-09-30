@@ -15,13 +15,24 @@ from yuqing.services.budget import (
     parse_budget_overrides,
     resolve_budget_table,
 )
+from yuqing.services.provider_quota import ProviderQuotaManager
 from yuqing.storage.db import Database
 
-SEARCH_PROVIDERS = ("langsearch", "zhipu", "qianfan", "tavily", "serper")
+DOMESTIC_SEARCH_PROVIDERS = ("langsearch", "exa", "qianfan", "bocha")
+FOREIGN_SEARCH_PROVIDERS = ("exa", "tavily", "serper")
+DEFAULT_SEARCH_PROVIDER_ORDER = tuple(
+    dict.fromkeys((*DOMESTIC_SEARCH_PROVIDERS, *FOREIGN_SEARCH_PROVIDERS))
+)
+# 智谱适配器仍保留给旧配置与诊断脚本，但不再属于产品检索链。
+COMPATIBLE_SEARCH_PROVIDERS = ("zhipu",)
+SEARCH_PROVIDERS = (*DEFAULT_SEARCH_PROVIDER_ORDER, *COMPATIBLE_SEARCH_PROVIDERS)
+FETCH_PROVIDERS = ("builtin", "firecrawl")
+DEFAULT_FETCH_PROVIDER_ORDER = FETCH_PROVIDERS
 SECRET_KEYS = {
     "DEFAULT_API_KEY",
     *(f"LLM_{role.upper()}_API_KEY" for role in ROLES),
     *(f"{name.upper()}_API_KEY" for name in SEARCH_PROVIDERS),
+    "FIRECRAWL_API_KEY",
 }
 MASK_PATTERN = re.compile(r"^.{1,12}-?\*{3}.{3}$")
 
@@ -54,6 +65,7 @@ class ConfigService:
 
     async def public(self) -> dict[str, Any]:
         stored, values = await self._values()
+        quota_status = await ProviderQuotaManager(self.database).public_status()
         default_values = {
             "api_key": values.get("DEFAULT_API_KEY", "").strip() or None,
             "base_url": values.get("DEFAULT_BASE_URL", "").strip() or "https://api.deepseek.com/v1",
@@ -81,24 +93,31 @@ class ConfigService:
                 effective[field] = mask_secret(inherited) if field == "api_key" else inherited
                 source[field] = self._origin(key, stored, self.environ) if raw else "inherit"
             roles[role] = {**explicit, "effective": effective, "source": source}
-        order = [
+        fetch_order = [
             name.strip()
             for name in values.get(
-                "SEARCH_PROVIDER_ORDER", "langsearch,zhipu,qianfan,tavily,serper"
+                "FETCH_PROVIDER_ORDER", ",".join(DEFAULT_FETCH_PROVIDER_ORDER)
             ).split(",")
-            if name.strip() in SEARCH_PROVIDERS
+            if name.strip() in FETCH_PROVIDERS
         ]
         budget_overrides = parse_budget_overrides(values.get("BUDGET_OVERRIDES"))
         return {
             "llm": {"default": default, "roles": roles},
             "search": {
-                "provider_order": order,
+                "provider_order": list(DEFAULT_SEARCH_PROVIDER_ORDER),
                 "keys": {
                     name: mask_secret(values.get(f"{name.upper()}_API_KEY", "").strip() or None)
-                    for name in SEARCH_PROVIDERS
+                    for name in DEFAULT_SEARCH_PROVIDER_ORDER
+                },
+                "quota": quota_status,
+            },
+            "fetch": {
+                "provider_order": fetch_order,
+                "quota": {"firecrawl": await ProviderQuotaManager(self.database).fetch_status()},
+                "keys": {
+                    "firecrawl": mask_secret(values.get("FIRECRAWL_API_KEY", "").strip() or None)
                 },
             },
-            "fetch": {"provider_order": ["builtin"], "keys": {"jina": None, "firecrawl": None}},
             "comments": {
                 "enabled": values.get("YUQING_COMMENT_PLUGIN_ENABLED", "false").lower()
                 in {"1", "true", "yes", "on"}
@@ -141,10 +160,7 @@ class ConfigService:
         if not isinstance(search, dict):
             raise ValueError("search 必须是对象")
         if "provider_order" in search:
-            order = search["provider_order"]
-            if not isinstance(order, list) or any(name not in SEARCH_PROVIDERS for name in order):
-                raise ValueError("搜索 provider_order 含未知项")
-            changes["SEARCH_PROVIDER_ORDER"] = ",".join(order)
+            raise ValueError("搜索顺序已经固定，不再支持 provider_order 配置")
         search_keys = search.get("keys") or {}
         if not isinstance(search_keys, dict):
             raise ValueError("search.keys 必须是对象")
@@ -152,6 +168,21 @@ class ConfigService:
             if name not in SEARCH_PROVIDERS:
                 raise ValueError(f"未知搜索 provider：{name}")
             changes[f"{name.upper()}_API_KEY"] = value
+        fetch = payload.get("fetch") or {}
+        if not isinstance(fetch, dict):
+            raise ValueError("fetch 必须是对象")
+        if "provider_order" in fetch:
+            order = fetch["provider_order"]
+            if order not in (["builtin"], ["builtin", "firecrawl"]):
+                raise ValueError("抓取 provider_order 含未知项")
+            changes["FETCH_PROVIDER_ORDER"] = ",".join(order)
+        fetch_keys = fetch.get("keys") or {}
+        if not isinstance(fetch_keys, dict):
+            raise ValueError("fetch.keys 必须是对象")
+        for name, value in fetch_keys.items():
+            if name != "firecrawl":
+                raise ValueError(f"未知抓取 provider：{name}")
+            changes["FIRECRAWL_API_KEY"] = value
         comments = payload.get("comments") or {}
         if not isinstance(comments, dict):
             raise ValueError("comments 必须是对象")
@@ -185,4 +216,6 @@ class ConfigService:
         stored = await self.database.config_values()
         values = dict(self.environ)
         values.update(stored)
+        # 旧版 SQLite/.env 可能仍保存可调整顺序；运行时统一迁移到当前固定策略。
+        values["SEARCH_PROVIDER_ORDER"] = ",".join(DEFAULT_SEARCH_PROVIDER_ORDER)
         return values

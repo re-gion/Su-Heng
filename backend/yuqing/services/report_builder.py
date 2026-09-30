@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from collections import Counter
 from datetime import datetime
@@ -8,7 +10,12 @@ from typing import Protocol
 
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
-from yuqing.render.validator import validate_report
+from yuqing.render.validator import prune_citation_backlinks, validate_report
+from yuqing.services.institution_scope import (
+    PROTECTED_SCOPES,
+    InstitutionScopeReviewer,
+    ScopeReview,
+)
 from yuqing.services.verification import is_attribution_claim, stance_drop_reason
 from yuqing.storage.db import Database
 
@@ -23,17 +30,47 @@ class BriefReportBuilder:
         database: Database,
         reports_dir: Path,
         entailment_verifier: EntailmentVerifier | None = None,
+        scope_reviewer: InstitutionScopeReviewer | None = None,
     ):
         self.database = database
         self.reports_dir = Path(reports_dir)
         self.entailment_verifier = entailment_verifier
+        self.scope_reviewer = scope_reviewer
 
     async def build(self, task_id: str) -> tuple[str, dict, str]:
         task = await self.database.get_task(task_id)
         if task is None:
             raise ValueError("task not found")
         claims = await self.database.list_claims(task_id)
+        institution_scope = task.investigation_scope in PROTECTED_SCOPES
+        event_title = task.resolved_event_query or task.event_query
+        if institution_scope:
+            if self.scope_reviewer:
+                self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
+                title_review = (await self.scope_reviewer.review([event_title], kind="title"))[0]
+                event_title = title_review.text if title_review.allowed else "公开事件调查报告"
+            else:
+                event_title = "公开事件调查报告"
+        scope_excluded = 0
+        scope_pending = 0
+        if institution_scope:
+            if self.scope_reviewer is not None:
+                self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
+                decisions = await self.scope_reviewer.review(
+                    [claim.text for claim in claims], kind="claim"
+                )
+            else:
+                decisions = [
+                    ScopeReview("incomplete", "reviewer_unavailable", c.text) for c in claims
+                ]
+            accepted = [
+                d.allowed and d.text == c.text for c, d in zip(claims, decisions, strict=True)
+            ]
+            scope_excluded = sum(d.status == "rejected" for d in decisions)
+            scope_pending = len(claims) - sum(accepted) - scope_excluded
+            claims = [claim for claim, allowed in zip(claims, accepted, strict=True) if allowed]
         rendered_claims = []
+        original_publishers: set[str] = set()
         appendix: dict[str, dict] = {}
         rejection_reasons: dict[str, int] = {}
         stance_drops: Counter[str] = Counter()
@@ -44,6 +81,9 @@ class BriefReportBuilder:
             states = []
             attribution = is_attribution_claim(claim.text)
             for row in rows:
+                original_publishers.add(
+                    row["publisher_entity"] or row["source_name"] or row["evidence_id"]
+                )
                 drop_reason = stance_drop_reason(
                     relation=row["relation"],
                     source_role=row["source_role"],
@@ -65,22 +105,28 @@ class BriefReportBuilder:
                         {
                             "evidence_ref": row["evidence_id"],
                             "quote_type": row["quote_type"],
-                            "quote": row["quote"],
-                            "quote_start": row["quote_start"],
-                            "quote_end": row["quote_end"],
+                            "quote": None if institution_scope else row["quote"],
+                            "quote_start": None if institution_scope else row["quote_start"],
+                            "quote_end": None if institution_scope else row["quote_end"],
                             "relation": row["relation"],
                             "note": note,
                         }
                     )
+                    if institution_scope:
+                        citations[-1]["quote_type"] = "redacted"
                 else:
                     rejected_citations += 1
                 appendix.setdefault(
                     row["evidence_id"],
                     {
                         "evidence_ref": row["evidence_id"],
-                        "title": row["title"],
-                        "source_name": row["source_name"] or row["publisher_entity"],
-                        "publisher_entity": row["publisher_entity"],
+                        "title": f"公开来源 {row['evidence_id']}"
+                        if institution_scope
+                        else row["title"],
+                        "source_name": "公开来源"
+                        if institution_scope
+                        else row["source_name"] or row["publisher_entity"],
+                        "publisher_entity": None if institution_scope else row["publisher_entity"],
                         "source_tier": row["source_tier"],
                         "source_role": row["source_role"],
                         "published_at": row["published_at"],
@@ -88,17 +134,23 @@ class BriefReportBuilder:
                         "citations": [],
                         "fetch_status": row["fetch_status"],
                         "snapshot_pk": row["evidence_pk"]
-                        if row["fetch_status"] == "fetched"
+                        if row["fetch_status"] == "fetched" and not institution_scope
                         else None,
                         "content_sha256": row["content_sha256"]
                         if "content_sha256" in row.keys()
                         else None,
+                        "content_origin": (
+                            json.loads(row["extra"] or "{}").get("content_origin")
+                            if "extra" in row.keys()
+                            else None
+                        ),
                     },
                 )
                 appendix[row["evidence_id"]]["citations"].append(
                     {
                         "claim_ref": claim.local_id,
-                        "quote": row["quote"],
+                        "quote": None if institution_scope else row["quote"],
+                        "quote_redacted": institution_scope,
                         "relation": row["relation"],
                         "note": note,
                     }
@@ -118,12 +170,12 @@ class BriefReportBuilder:
                     "origin_agent": claim.agent,
                     "statement_kind": claim.statement_kind,
                     "text": claim.text,
-                    "rumor_text": claim.rumor_text,
-                    "correction_text": claim.correction_text,
+                    "rumor_text": None if institution_scope else claim.rumor_text,
+                    "correction_text": None if institution_scope else claim.correction_text,
                     "badge": claim.badge or "unverified",
                     "verdict": claim.verdict or "not_mentioned",
                     "verification_state": claim.verification_state,
-                    "verify_reason": claim.verify_reason,
+                    "verify_reason": None if institution_scope else claim.verify_reason,
                     "independent_sources": claim.independent_sources,
                     "max_source_tier": claim.max_source_tier,
                     "evidence_grade": grade,
@@ -131,15 +183,21 @@ class BriefReportBuilder:
                 }
             )
 
+        if scope_excluded:
+            rejection_reasons["范围审查明确拒绝"] = scope_excluded
+        if scope_pending:
+            rejection_reasons["范围审查尚未完成"] = scope_pending
         total = len(rendered_claims)
         verified = sum(item["badge"] == "verified" for item in rendered_claims)
         disputed = sum(item["badge"] == "disputed" for item in rendered_claims)
         refuted = sum(item["badge"] == "refuted" for item in rendered_claims)
         evidence_items = [appendix[key] for key in sorted(appendix)]
         metrics = {
-            "key_claims_candidate": len(claims),
+            "key_claims_candidate": len(claims) + scope_excluded + scope_pending,
             "key_claims_rendered": total,
-            "key_claims_rejected": len(claims) - total,
+            "key_claims_rejected": len(claims) + scope_excluded + scope_pending - total,
+            "institution_scope_excluded_claims": scope_excluded,
+            "scope_review_incomplete_claims": scope_pending,
             "rejection_reasons": rejection_reasons,
             "key_claims_verification_skipped": sum(
                 item["verification_state"] == "skipped" for item in rendered_claims
@@ -174,7 +232,7 @@ class BriefReportBuilder:
             # independent_publishers 与 time_span_days 是占位值：FullReportBuilder
             # 会在 metrics.update() 里用全量证据重算并覆盖（含 source_name/source_domain
             # 兜底），以保证报告里展示的独立信源数与计数口径一致。
-            "independent_publishers": len({item["publisher_entity"] for item in evidence_items}),
+            "independent_publishers": len(original_publishers),
             "time_span_days": 1,
         }
         report_id = uuid.uuid4().hex
@@ -194,6 +252,22 @@ class BriefReportBuilder:
                     "text": f"{rejected_citations} 条转述引用未通过原文回溯，已从事实正文移除。",
                 }
             )
+        if scope_excluded:
+            limitations.append(
+                {
+                    "id": "L03",
+                    "category": "机构范围",
+                    "text": f"{scope_excluded} 条陈述经审查明确不符合调查范围或隐私边界，未进入报告。",
+                }
+            )
+        if scope_pending:
+            limitations.append(
+                {
+                    "id": "L04",
+                    "category": "审查未完成",
+                    "text": f"{scope_pending} 条陈述尚未完成范围审查或脱敏后核验，暂不展示；这不表示内容违规。",
+                }
+            )
         summary_items = []
         # 摘要逐字回填陈述，不再让模型判断同一句话是否蕴含自身。
         # 综合报告只选择编号；解释和建议进入独立编辑分析及语义审查。
@@ -206,14 +280,15 @@ class BriefReportBuilder:
             "report_id": report_id,
             "task": {
                 "task_id": task.id,
-                "event_query": task.event_query,
+                "event_query": event_title,
+                "investigation_scope": task.investigation_scope,
                 "depth": task.depth,
                 "source_scope": task.source_scope,
                 "source_languages": task.source_languages,
                 "comment_mode": task.comment_mode,
                 "time_range_from": task.time_range_from,
                 "time_range_to": task.time_range_to,
-                "user_note": task.user_note,
+                "user_note": None if institution_scope else task.user_note,
                 "generated_at": stamp,
             },
             "metrics": metrics,
@@ -223,7 +298,7 @@ class BriefReportBuilder:
                     "type": "report_header",
                     "section": "00",
                     "in_brief": True,
-                    "event_title": task.event_query,
+                    "event_title": event_title,
                     "subtitle": "单 Agent 公开证据核验速览",
                 },
                 {
@@ -232,7 +307,9 @@ class BriefReportBuilder:
                     "section": "01",
                     "in_brief": True,
                     "is_editorial": False,
-                    "lede": f"本报告围绕“{task.event_query}”检索公开材料并逐条核验。",
+                    "lede": "本报告围绕机构公开回应与处理检索公开材料并逐条核验。"
+                    if task.investigation_scope == "institution"
+                    else f"本报告围绕“{event_title}”检索公开材料并逐条核验。",
                     "what": summary_items,
                     "why": [],
                     "so_what": [],
@@ -260,9 +337,10 @@ class BriefReportBuilder:
                 },
             ],
         }
+        prune_citation_backlinks(report)
         validated = validate_report(report).report
         html = render_html(validated)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         path = self.reports_dir / f"{report_id}.html"
-        path.write_text(html, encoding="utf-8")
+        await asyncio.to_thread(path.write_text, html, encoding="utf-8")
         return report_id, validated, str(path)

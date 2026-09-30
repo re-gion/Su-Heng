@@ -5,13 +5,16 @@
 而全仓库没有任何测试断言过它大于 0，所以缺陷长期潜伏。
 """
 
+import json
 from pathlib import Path
 
 import pytest
 
+from yuqing.core.fetch.base import FetchResult
 from yuqing.core.search.base import SearchResult
 from yuqing.services.evidence_store import EvidenceStore
 from yuqing.services.full_report import FullReportBuilder
+from yuqing.services.investigation_scope import InvestigationScope
 from yuqing.services.verifier import ClaimVerifierService, VerificationRelation
 from yuqing.storage.db import Database
 from yuqing.storage.models import ClaimCreate, TaskCreate
@@ -37,6 +40,136 @@ class AlwaysSupportVerifier:
 async def _store_results(runtime_dir: Path, database: Database, task_id: str, items):
     store = EvidenceStore(database, SnapshotStore(runtime_dir / "snapshots"), UnusedFetcher())
     return await store.add_search_results(task_id, "检索", items)
+
+
+@pytest.mark.asyncio
+async def test_provider_fulltext_is_reusable_but_not_promoted_to_direct_snapshot(runtime_dir: Path):
+    database = Database(runtime_dir / "provider-fulltext.db")
+    await database.initialize()
+    task = await database.create_task(TaskCreate(event_query="搜索服务全文"))
+    provider_text = "这是搜索服务返回的正文。" * 80
+
+    records = await _store_results(
+        runtime_dir,
+        database,
+        task.id,
+        [
+            SearchResult(
+                url="https://example.com/report",
+                title="公开报告",
+                snippet="公开报告摘要",
+                provider="langsearch",
+                content_text=provider_text,
+                content_origin="provider_fulltext",
+            )
+        ],
+    )
+
+    record = records[0]
+    assert record.content_text == provider_text
+    assert record.fetch_status == "discovered"
+    assert record.snapshot_path is None
+    assert record.content_sha256 is None
+    assert record.extra["content_origin"] == "provider_fulltext"
+    assert record.extra["provider_text_chars"] == len(provider_text)
+    assert EvidenceStore.has_usable_provider_text(record) is True
+
+    row = await database.fetch_one(
+        "SELECT extra FROM evidence WHERE task_id = ? AND local_id = ?",
+        (task.id, record.local_id),
+    )
+    assert json.loads(row["extra"])["provider_text_sha256"]
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_provider_fulltext_still_requires_direct_fetch_for_date_gate(
+    runtime_dir: Path,
+):
+    database = Database(runtime_dir / "provider-fulltext-pending.db")
+    await database.initialize()
+    task = await database.create_task(TaskCreate(event_query="武汉大学图书馆事件"))
+    provider_text = "发布时间：2025年9月20日。武汉大学通报图书馆事件调查复核情况。" * 30
+
+    records = await _store_results(
+        runtime_dir,
+        database,
+        task.id,
+        [
+            SearchResult(
+                url="https://china.caixin.com/2025-09-20/example.html",
+                title="武大通报图书馆事件调查复核情况",
+                snippet="2025年9月20日，武汉大学发布调查复核通报。",
+                provider="exa",
+                content_text=provider_text,
+                content_origin="provider_fulltext",
+                raw={
+                    "_scope": {
+                        "scope_status": "pending",
+                        "scope_reasons": ["date_untrusted"],
+                        "main_eligible": False,
+                    }
+                },
+            )
+        ],
+    )
+
+    record = records[0]
+    assert EvidenceStore.has_usable_provider_text(record) is True
+    assert EvidenceStore.needs_direct_fetch(record) is True
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_saved_page_publisher_date_promotes_pending_evidence_to_main(runtime_dir: Path):
+    class PublisherPageFetcher:
+        async def fetch(self, url: str) -> FetchResult:
+            return FetchResult(
+                url=url,
+                html=(
+                    '<div class="bd_block"><span id="pubtime_baidu">'
+                    '2025-09-20 10:12:49</span><span id="source_baidu">'
+                    "来源：财新网</span></div>"
+                ),
+                content_text="据新华社消息，武汉大学通报图书馆事件调查复核情况。",
+                content_type="text/html",
+            )
+
+    database = Database(runtime_dir / "publisher-page-date.db")
+    await database.initialize()
+    task = await database.create_task(TaskCreate(event_query="武汉大学图书馆事件"))
+    records = await _store_results(
+        runtime_dir,
+        database,
+        task.id,
+        [
+            SearchResult(
+                url="https://china.caixin.com/2025-09-20/example.html",
+                title="武大通报图书馆事件调查复核情况",
+                snippet="据新华社消息，武汉大学通报图书馆事件调查复核情况。",
+                provider="exa",
+                raw={"_scope": {"scope_status": "pending", "scope_reasons": ["date_unknown"]}},
+            )
+        ],
+    )
+    store = EvidenceStore(
+        database, SnapshotStore(runtime_dir / "snapshots"), PublisherPageFetcher()
+    )
+    scope = InvestigationScope(
+        event_query="武汉大学图书馆事件",
+        languages=("zh",),
+        source_scope="domestic",
+        date_from="2023-01-01",
+        date_to="2026-01-01",
+    )
+
+    fetched = await store.fetch_one(records[0], scope=scope, agent="media_propagation")
+
+    assert fetched.fetch_status == "fetched"
+    assert fetched.published_at == "2025-09-20T10:12:49"
+    assert fetched.extra["date_provenance"] == "page_metadata"
+    assert fetched.extra["scope_status"] == "main"
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -88,6 +221,61 @@ async def test_two_distinct_outlets_verify_a_claim_and_lift_verified_rate(
     _, report, _ = await FullReportBuilder(database, runtime_dir / "reports").build(task.id)
     assert report["metrics"]["verified_rate"] > 0
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_incomplete_claim_reuses_successful_evidence_relation(
+    runtime_dir, claim_limits
+):
+    database = Database(runtime_dir / "retry-relations.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(TaskCreate(event_query="机构公开报道"))
+        records = await _store_results(
+            runtime_dir,
+            database,
+            task.id,
+            [
+                SearchResult(
+                    url=url, title="机构报道", snippet="机构已公开调查结果。", provider="fixture"
+                )
+                for url in ("https://hb.news.cn/news/a", "https://www.cnr.cn/news/b")
+            ],
+        )
+        claim = await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                text="机构已公开调查结果。",
+                agent="fact_investigator",
+                evidence_ids=[r.local_id for r in records],
+            ),
+            **claim_limits,
+        )
+
+        class OnceFailedVerifier:
+            model_name = "fixture"
+            calls = []
+            failed = False
+
+            async def verify(self, claim, evidence):
+                self.calls.append(evidence.local_id)
+                if evidence.local_id == records[1].local_id and not self.failed:
+                    self.failed = True
+                    raise ConnectionError("upstream unavailable")
+                return VerificationRelation(
+                    relation="support", reason="原文支持", cited_sentence=evidence.snippet
+                )
+
+        verifier = OnceFailedVerifier()
+        service = ClaimVerifierService(database, verifier)
+        incomplete = await service.verify_claim(claim)
+        assert incomplete.verification_state == "incomplete"
+        restored = await service.verify_claim(incomplete, reuse_completed=True)
+        assert restored.verification_state == "complete"
+        assert restored.badge == "verified"
+        assert verifier.calls == [records[0].local_id, records[1].local_id, records[1].local_id]
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

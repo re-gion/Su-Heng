@@ -6,7 +6,12 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from yuqing.core.llm.gateway import LLMGateway
+from yuqing.core.llm.gateway import (
+    LLMBudgetExhausted,
+    LLMGateway,
+    is_upstream_failure,
+    logical_model_call,
+)
 from yuqing.services.forum import ForumMessage
 
 
@@ -15,7 +20,7 @@ class ReviewModel(BaseModel):
 
 
 class ReviewGap(ReviewModel):
-    agent: str
+    agent: Literal["fact_investigator", "media_propagation", "history_insight"]
     desc: str
     priority: Literal["low", "medium", "high"] = "medium"
 
@@ -32,7 +37,7 @@ class ReviewConflict(ReviewModel):
 
 
 class ReviewDirective(ReviewModel):
-    agent: str
+    agent: Literal["fact_investigator", "media_propagation", "history_insight"]
     instruction: str
 
 
@@ -63,6 +68,7 @@ class OpenAIModerator:
         self.gateway = gateway
         self.system_prompt = system_prompt
 
+    @logical_model_call("moderation")
     async def review(
         self,
         event_query: str,
@@ -70,16 +76,23 @@ class OpenAIModerator:
         evidence_count: int,
         claim_count: int,
     ) -> ModeratorReview:
-        digest = "\n".join(f"[{item.agent}/{item.type}] {item.content}" for item in forum[-30:])[
-            :20000
-        ]
+        digest = "\n".join(
+            f"[第{item.round}轮/{item.agent}/{item.type}; refs={','.join(item.refs)}] {item.content}"
+            for item in forum[-30:]
+        )[:20000]
         schema = self._output_schema()
         prompt = (
             f"事件：{event_query}\n证据数：{evidence_count}；claim 数：{claim_count}\n"
             f"论坛记录：\n{digest}\n"
             "只输出一个符合下列 JSON Schema 的对象，不得添加 Schema 之外的字段：\n"
             f"{json.dumps(schema, ensure_ascii=False)}\n"
-            "没有矛盾不要构造；release=true 时不得存在 high gap 或 unresolved_critical。"
+            "按事实、传播、历史三席各自职责和给出的引用检查具体缺口；"
+            "这是累计记录：先核对前轮已取得结论，再审查本轮增量。调用失败不等于公开不可得。"
+            "缺口须区分尚未调查、调用失败、检索后公开不可得。历史案例缺失不是核心发布阻断项；"
+            "不能要求所有处置环节完全相同，也不能把优先时间窗口的结束日当观察截止日。"
+            "不要把陈述数或证据数当成质量结论，也不要为形成讨论而制造矛盾。"
+            "directives 只给下一轮仍需补查的具体席位；"
+            "release=true 时 directives 必须为空，也不得存在 high gap 或 unresolved_critical。"
         )
         diagnostics: list[str] = []
         correction = ""
@@ -94,6 +107,8 @@ class OpenAIModerator:
                 )
             except Exception as exc:
                 diagnostics.append(f"response:{type(exc).__name__}")
+                if isinstance(exc, LLMBudgetExhausted) or is_upstream_failure(exc):
+                    break
             else:
                 previous = value
                 try:

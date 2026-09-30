@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS task (
   resolved_event_query TEXT,
   request_kind TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery')),
   user_note TEXT,
+  investigation_scope TEXT NOT NULL DEFAULT 'general' CHECK (investigation_scope IN ('general','institution','public_event')),
   time_range_from TEXT,
   time_range_to TEXT,
   source_scope TEXT NOT NULL DEFAULT 'auto' CHECK (source_scope IN ('auto','domestic','global')),
@@ -305,5 +306,33 @@ CREATE TABLE IF NOT EXISTS demo_task_owner (
   task_id TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
   owner_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scope_review (
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  fingerprint TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(task_id, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS llm_call (
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  call_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(task_id, call_id, attempt)
+);
+
+CREATE TABLE IF NOT EXISTS analysis_batch (
+  task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+  agent TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(task_id, agent, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS task_usage (
+  task_id TEXT PRIMARY KEY REFERENCES task(id) ON DELETE CASCADE,
+  payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_demo_owner ON demo_task_owner(owner_hash, created_at);

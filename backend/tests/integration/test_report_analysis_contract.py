@@ -63,10 +63,20 @@ async def analytical_report(runtime_dir, claim_limits):
         max_source_tier=2,
         verifier_model="fixture",
     )
+    await db.add_claim(
+        ClaimCreate(
+            task_id=task.id,
+            agent="fact_investigator",
+            text="校方通报本次所有诉求均已解决。",
+            evidence_ids=[evidence.local_id],
+        ),
+        **claim_limits,
+    )
 
     class Reporter:
         async def enrich(self, context):
             assert context["task"]["time_range_from"] == "2026-09-01"
+            assert [item["claim_ref"] for item in context["facts"]] == ["C001"]
             assert context["sources"][0]["excerpt"] == text
             common = {
                 "claim_refs": ["C001"],
@@ -91,6 +101,13 @@ async def analytical_report(runtime_dir, claim_limits):
                         "title": "建立进度反馈",
                         "interpretation": "在结果未明时，说明流程可能帮助相关人员理解处理状态。",
                     },
+                    {
+                        **common,
+                        "section": "05",
+                        "claim_refs": ["C002"],
+                        "title": "未经核验的结案判断",
+                        "interpretation": "所有诉求均已解决。",
+                    },
                 ],
                 "measurements": [
                     {
@@ -113,9 +130,10 @@ async def analytical_report(runtime_dir, claim_limits):
 @pytest.mark.asyncio
 async def test_full_report_has_grounded_analysis_and_compact_audit(analytical_report):
     report, rendered = analytical_report
-    assert report["schema_version"] == "0.5"
+    assert report["schema_version"] == "0.8"
     assert report["quality"]["status"] == "analysis_available"
     assert report["quality"]["sourced_measurements"] == 1
+    assert report["quality"]["rejected_items"]["analysis_reference"] == 1
     assert "已形成有依据的分析条目" in rendered
     assert "高校诉求受理" in rendered
     assert "120条" in rendered
@@ -175,6 +193,6 @@ def test_v04_migration_preserves_authority_and_is_idempotent():
     }
     migrated = migrate_report(original)
     assert migrated["blocks"] == original["blocks"]
-    assert migrated["schema_version"] == "0.5"
+    assert migrated["schema_version"] == "0.8"
     assert migrate_report(migrated) == migrated
     assert original["schema_version"] == "0.4"

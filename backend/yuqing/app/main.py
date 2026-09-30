@@ -6,7 +6,7 @@ import secrets
 import time
 from collections.abc import AsyncIterable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Protocol
 
@@ -16,17 +16,20 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
+from yuqing.agents.comment_analysis import OpenAICommentAgent
 from yuqing.agents.loader import load_definitions
 from yuqing.agents.openai_runtime import OpenAIInvestigationAgent
 from yuqing.agents.reporter import OpenAIReportAgent
 from yuqing.core.comments import adapter_for_url
 from yuqing.core.events import EventBus
-from yuqing.core.fetch.builtin import BuiltinFetchProvider
+from yuqing.core.fetch import BuiltinFetchProvider, FetchChain, FirecrawlCloudProvider
 from yuqing.core.llm.factory import LLMClientFactory
 from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message
 from yuqing.core.search.chain import SearchChain
 from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 from yuqing.core.search.providers import (
+    BochaSearchProvider,
+    ExaSearchProvider,
     QianfanSearchProvider,
     SerperSearchProvider,
     TavilySearchProvider,
@@ -49,14 +52,23 @@ from yuqing.services.comment_plugin import (
     PlaywrightCommentCollector,
     PlaywrightPublicCandidateDiscoverer,
 )
-from yuqing.services.configuration import ConfigService
+from yuqing.services.configuration import DEFAULT_SEARCH_PROVIDER_ORDER, ConfigService
 from yuqing.services.governance import ReportRetentionService
 from yuqing.services.historical_data import HistoricalDataService
 from yuqing.services.hotlist import DailyHotCollector
+from yuqing.services.institution_scope import InstitutionScopeReviewer
 from yuqing.services.investigation_scope import is_topic_discovery_query
 from yuqing.services.moderation import OpenAIModerator
 from yuqing.services.openai_verifier import OpenAIEvidenceVerifier
+from yuqing.services.provider_quota import (
+    ProviderQuotaManager,
+    ProviderRateLimiter,
+    QuotaAwareFetchProvider,
+    QuotaAwareSearchProvider,
+)
 from yuqing.services.public_interest import (
+    INSTITUTION_SCOPE_CATEGORY,
+    PUBLIC_EVENT_CATEGORY,
     PolicyChecker,
     PublicInterestDecision,
     assess_public_interest,
@@ -66,6 +78,8 @@ from yuqing.services.report_delivery import (
     EvidencePackageBuilder,
     PdfExporter,
 )
+from yuqing.services.task_diagnostics import task_timing
+from yuqing.services.topic_discovery import OpenAITopicQueryPlanner, TopicDiscovery
 from yuqing.services.translation import OpenAITranslator
 from yuqing.services.v1_orchestrator import V1Orchestrator
 from yuqing.storage.db import Database
@@ -110,6 +124,55 @@ def error_response(
     return JSONResponse({"error": error}, status_code=status)
 
 
+def _normalize_topic_candidate(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep paused tasks created by the pre-clustering contract usable."""
+
+    candidate = dict(raw)
+    title = str(candidate.get("title") or candidate.get("query") or "未命名事件").strip()
+    query = str(candidate.get("query") or title).strip()
+    source_name = str(candidate.get("source_name") or "历史候选来源")
+    url = str(candidate.get("url") or "")
+    published_at = candidate.get("published_at")
+    sources = candidate.get("sources")
+    if not isinstance(sources, list):
+        sources = (
+            [
+                {
+                    "url": url,
+                    "title": title,
+                    "source_name": source_name,
+                    "published_at": published_at,
+                    "role": "unknown",
+                    "provider": "legacy_checkpoint",
+                }
+            ]
+            if url
+            else []
+        )
+    candidate.update(
+        {
+            "title": title,
+            "query": query,
+            "summary": str(candidate.get("summary") or title),
+            "confidence": candidate.get("confidence") or "lead",
+            "confidence_label": candidate.get("confidence_label") or "线索（待核验）",
+            "score": float(candidate.get("score") or 0.0),
+            "reasons": candidate.get("reasons") or ["这是旧版任务保存的候选线索。"],
+            "gaps": candidate.get("gaps") or ["缺少新版证据聚类信息，选择前请人工核对。"],
+            "sources": sources,
+            "source_count": int(candidate.get("source_count") or len(sources)),
+            "date_from": candidate.get("date_from") or published_at,
+            "date_to": candidate.get("date_to") or published_at,
+            "coverage_limited": bool(candidate.get("coverage_limited", True)),
+            "source_name": source_name,
+            "url": url,
+            "published_at": published_at,
+            "date_status": candidate.get("date_status") or "unknown",
+        }
+    )
+    return candidate
+
+
 def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
     definitions_dir = Path(__file__).parents[1] / "agents" / "definitions"
     skills_dir = Path(__file__).parents[1] / "agents" / "skills"
@@ -119,21 +182,17 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         known_tools=KNOWN_AGENT_TOOLS,
         skills_directory=skills_dir,
     )
-    allow_proxy_fake_ip = os.environ.get("YUQING_FETCH_ALLOW_PROXY_FAKE_IP", "false").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    fetcher = BuiltinFetchProvider(allow_proxy_fake_ip=allow_proxy_fake_ip)
     provider_types = {
         "langsearch": LangSearchProvider,
         "zhipu": ZhipuSearchProvider,
         "qianfan": QianfanSearchProvider,
+        "bocha": BochaSearchProvider,
+        "exa": ExaSearchProvider,
         "tavily": TavilySearchProvider,
         "serper": SerperSearchProvider,
     }
     langsearch_limiters: dict[str, LangSearchLimiter] = {}
+    provider_rate_limiters: dict[tuple[str, str], ProviderRateLimiter] = {}
     search_failures: dict[str, int] = {}
     search_opened_at: dict[str, float] = {}
 
@@ -158,27 +217,71 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         }
         environ = dict(os.environ)
         environ.update(stored)
+        quotas = ProviderQuotaManager(database)
+        allow_proxy_fake_ip = environ.get("YUQING_FETCH_ALLOW_PROXY_FAKE_IP", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        builtin_fetcher = BuiltinFetchProvider(allow_proxy_fake_ip=allow_proxy_fake_ip)
+        fetch_order = [
+            item.strip()
+            for item in environ.get("FETCH_PROVIDER_ORDER", "builtin,firecrawl").split(",")
+            if item.strip() in {"builtin", "firecrawl"}
+        ]
+        firecrawl_key = environ.get("FIRECRAWL_API_KEY", "").strip()
+        if "firecrawl" in fetch_order and firecrawl_key:
+            firecrawl = QuotaAwareFetchProvider(
+                FirecrawlCloudProvider(
+                    api_key=firecrawl_key,
+                    allow_proxy_fake_ip=allow_proxy_fake_ip,
+                ),
+                quotas,
+                critical=True,
+            )
+            fetcher = FetchChain(builtin_fetcher, firecrawl)
+        else:
+            fetcher = FetchChain(builtin_fetcher)
         budgets = resolve_budget_table(parse_budget_overrides(environ.get("BUDGET_OVERRIDES")))
         llm_factory = LLMClientFactory(environ)
         gateway = LLMGateway(llm_factory)
-        order = [
-            item.strip()
-            for item in environ.get(
-                "SEARCH_PROVIDER_ORDER", "langsearch,zhipu,qianfan,tavily,serper"
-            ).split(",")
-            if item.strip() in provider_types
-        ]
+        order = [name for name in DEFAULT_SEARCH_PROVIDER_ORDER if name in provider_types]
         providers = []
         for name in order:
             key = environ.get(f"{name.upper()}_API_KEY", "").strip()
             if not key:
                 continue
             if name == "langsearch":
-                limiter = langsearch_limiters.setdefault(key, LangSearchLimiter(1.1))
-                provider = LangSearchProvider(key, limiter=limiter)
+                limiter = langsearch_limiters.setdefault(
+                    key, LangSearchLimiter(0.22, max_calls_per_minute=290)
+                )
+                raw_provider = LangSearchProvider(key, limiter=limiter)
             else:
-                provider = provider_types[name](key)
-            providers.append(provider)
+                raw_provider = provider_types[name](key)
+            interval = {
+                "qianfan": 1.05,
+                "bocha": 1.05,
+                "exa": 0.11,
+            }.get(name)
+            limiter = (
+                provider_rate_limiters.setdefault((name, key), ProviderRateLimiter(interval))
+                if interval is not None
+                else None
+            )
+            providers.append(
+                QuotaAwareSearchProvider(
+                    raw_provider,
+                    quotas,
+                    limiter=limiter,
+                    max_calls_per_task={
+                        "qianfan": 20,
+                        "bocha": 10,
+                        "tavily": 20,
+                        "serper": 10,
+                    }.get(name),
+                )
+            )
         if not providers:
             raise ValueError("未配置任何可用搜索 provider")
         search = SearchChain(providers, failures=search_failures, opened_at=search_opened_at)
@@ -203,25 +306,25 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             verifier=OpenAIEvidenceVerifier(gateway, llm_factory),
             reports_dir=runtime_dir / "reports",
             reporter=OpenAIReportAgent(gateway, by_name["reporter"].system_prompt),
-            comment_agent=OpenAIInvestigationAgent(
+            comment_agent=OpenAICommentAgent(
                 gateway,
                 by_name["comment_insight"].system_prompt,
-                by_name["comment_insight"].model_role,
             ),
             translator=OpenAITranslator(gateway),
+            scope_reviewer=InstitutionScopeReviewer(gateway),
             comment_evaluator=OpenAICandidateEvaluator(gateway),
+            topic_discovery=TopicDiscovery(
+                search,
+                fetcher,
+                planner=OpenAITopicQueryPlanner(gateway),
+            ),
             usage=gateway,
             models_used=model_names,
-            closeables=[llm_factory, *(provider.client for provider in providers)],
+            closeables=[llm_factory, fetcher, *(provider.client for provider in providers)],
             max_outer_rounds=3,
             max_inner_rounds=max(by_name[name].max_inner_rounds for name in agents),
             budgets=budgets,
         )
-
-    async def close_resources() -> None:
-        await fetcher.client.aclose()
-
-    factory.aclose = close_resources  # type: ignore[attr-defined]
 
     return factory
 
@@ -527,6 +630,7 @@ def create_app(
                 "name": name,
                 "configured": bool(public_config["search"]["keys"].get(name)),
                 "breaker": "closed",
+                "local_quota": public_config["search"]["quota"].get(name),
             }
             for name in provider_order
         ]
@@ -646,6 +750,8 @@ def create_app(
                     "langsearch": LangSearchProvider,
                     "zhipu": ZhipuSearchProvider,
                     "qianfan": QianfanSearchProvider,
+                    "bocha": BochaSearchProvider,
+                    "exa": ExaSearchProvider,
                     "tavily": TavilySearchProvider,
                     "serper": SerperSearchProvider,
                 }.get(name)
@@ -722,12 +828,26 @@ def create_app(
                 recoverable=True,
             )
         if not decision.allowed:
-            return error_response(
-                "POLICY_BLOCKED",
-                decision.reason,
-                422,
-                details={"category": decision.category},
-            )
+            if decision.category == INSTITUTION_SCOPE_CATEGORY:
+                if payload.investigation_scope == "general":
+                    return error_response(
+                        "SCOPE_CONFIRMATION_REQUIRED",
+                        "公共调查范围尚不明确。请确认只调查公开事件并保护个人隐私后继续。",
+                        409,
+                        recoverable=True,
+                        details={
+                            "category": decision.category,
+                            "proposed_scope": "public_event",
+                            "scope_label": "调查公开事件背景、公开结论、传播和争议；普通个人匿名化，不挖掘私人信息。",
+                        },
+                    )
+            else:
+                return error_response(
+                    "POLICY_BLOCKED",
+                    "该请求涉及普通个人的身份、私人纠纷或个人指控，不能开展此类调查。",
+                    422,
+                    details={"category": decision.category},
+                )
         if is_demo:
             allowed = await database.consume_quota(
                 f"demo:{client_key}",
@@ -741,6 +861,8 @@ def create_app(
                     429,
                     recoverable=True,
                 )
+        if decision.category == PUBLIC_EVENT_CATEGORY and payload.investigation_scope == "general":
+            payload = payload.model_copy(update={"investigation_scope": "public_event"})
         payload = payload.model_copy(
             update={
                 "request_kind": "topic_discovery"
@@ -760,6 +882,7 @@ def create_app(
             "status": task.status,
             "events_url": f"/api/tasks/{task.id}/events",
             "created_at": task.created_at,
+            "investigation_scope": task.investigation_scope,
         }
         if not is_demo:
             return body
@@ -861,7 +984,16 @@ def create_app(
             "task_id": task.id,
             "phase": task.phase,
             "original_query": task.event_query,
-            "items": checkpoint.get("candidates", []),
+            "items": [
+                _normalize_topic_candidate(item)
+                for item in checkpoint.get("candidates", [])
+                if isinstance(item, dict)
+            ],
+            "attempts": checkpoint.get("attempts", []),
+            "provider_coverage": checkpoint.get("provider_coverage"),
+            "effective_time_range": checkpoint.get("effective_time_range"),
+            "used_default_time_range": checkpoint.get("used_default_time_range", False),
+            "manual_preflight": checkpoint.get("manual_preflight"),
             "manual_entry_allowed": True,
         }
 
@@ -878,13 +1010,19 @@ def create_app(
         checkpoint = await database.checkpoint(task_id, "topic:selection") or {}
         candidate_id = str(payload.get("candidate_id") or "")
         manual_query = str(payload.get("event_query") or "").strip()
-        selected = next(
+        force = payload.get("force") is True
+        selected_candidate = next(
             (
-                str(item.get("query") or item.get("title") or "").strip()
+                item
                 for item in checkpoint.get("candidates", [])
-                if str(item.get("id")) == candidate_id
+                if isinstance(item, dict) and str(item.get("id")) == candidate_id
             ),
-            "",
+            None,
+        )
+        selected = (
+            str(selected_candidate.get("query") or selected_candidate.get("title") or "").strip()
+            if selected_candidate
+            else ""
         )
         resolved_query = selected or manual_query
         if not resolved_query or len(resolved_query) > 200:
@@ -895,22 +1033,101 @@ def create_app(
             return error_response(
                 "TOPIC_SELECTION_TOO_BROAD", "填写的仍是宽泛主题，请补充具体事件或争议点。", 422
             )
-        claimed = await database.claim_task_status(task_id, ("paused",), "running", "resuming")
+        manual_preflight = checkpoint.get("manual_preflight") or {}
+        force_allowed = (
+            not selected
+            and force
+            and manual_preflight.get("status") == "unverified"
+            and str(manual_preflight.get("query") or "").strip() == manual_query
+        )
+        if force and not force_allowed:
+            return error_response(
+                "TOPIC_FORCE_NOT_ALLOWED",
+                "只有同一条手工事件通过来源预检仍无结果后，才能明确以线索继续。",
+                409,
+            )
+        needs_preflight = bool(manual_query and not selected and not force)
+        next_phase = "topic_preflight" if needs_preflight else "resuming"
+        claimed = await database.claim_task_status(task_id, ("paused",), "running", next_phase)
         if not claimed:
             return error_response("TOPIC_SELECTION_CONFLICT", "任务已被其他请求处理。", 409)
         await database.set_resolved_event_query(task_id, resolved_query)
+        effective_range = checkpoint.get("effective_time_range") or {}
+        if not task.time_range_from and not task.time_range_to and effective_range:
+            await database.set_task_time_range(
+                task_id,
+                str(effective_range.get("date_from") or "") or None,
+                str(effective_range.get("date_to") or "") or None,
+            )
+        if needs_preflight:
+            await database.save_checkpoint(
+                task_id,
+                "topic:preflight",
+                {
+                    "phase": "topic_preflight",
+                    "original_query": task.event_query,
+                    "resolved_event_query": resolved_query,
+                },
+            )
+        else:
+            await database.save_checkpoint(
+                task_id,
+                "topic:selected",
+                {
+                    "phase": "outer",
+                    "next_outer_round": 1,
+                    "original_query": task.event_query,
+                    "resolved_event_query": resolved_query,
+                    "forced_unverified": bool(force_allowed),
+                    "selected_candidate": selected_candidate,
+                },
+            )
+        background.add_task(run_safely, request, task_id, resume=True)
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "phase": next_phase,
+            "resolved_event_query": resolved_query,
+            "preflight_required": needs_preflight,
+        }
+
+    @app.post("/api/tasks/{task_id}/topic-discovery", status_code=202)
+    async def retry_topic_discovery(
+        task_id: str, request: Request, background: BackgroundTasks, payload: dict[str, Any]
+    ):
+        database, _ = services(request)
+        task = await existing_task(task_id, request)
+        if task.status != "paused" or task.phase != "topic_selection":
+            return error_response(
+                "TOPIC_SELECTION_NOT_READY", "任务当前不在具体事件选择阶段。", 409
+            )
+        checkpoint = await database.checkpoint(task_id, "topic:selection") or {}
+        if payload.get("window") != "three_years" or not checkpoint.get("used_default_time_range"):
+            return error_response(
+                "TOPIC_DISCOVERY_RETRY_INVALID",
+                "当前任务不能扩展到三年窗口；显式时间范围不会被系统改写。",
+                422,
+            )
+        current_range = checkpoint.get("effective_time_range") or {}
+        date_to = str(current_range.get("date_to") or datetime.now().date().isoformat())
+        date_from = (datetime.fromisoformat(date_to).date() - timedelta(days=1095)).isoformat()
+        claimed = await database.claim_task_status(
+            task_id, ("paused",), "running", "topic_discovery"
+        )
+        if not claimed:
+            return error_response("TOPIC_SELECTION_CONFLICT", "任务已被其他请求处理。", 409)
         await database.save_checkpoint(
             task_id,
-            "topic:selected",
-            {
-                "phase": "outer",
-                "next_outer_round": 1,
-                "original_query": task.event_query,
-                "resolved_event_query": resolved_query,
-            },
+            "topic:retry",
+            {"phase": "topic_discovery", "date_from": date_from, "date_to": date_to},
         )
         background.add_task(run_safely, request, task_id, resume=True)
-        return {"task_id": task_id, "status": "running", "resolved_event_query": resolved_query}
+        return {
+            "task_id": task_id,
+            "status": "running",
+            "phase": "topic_discovery",
+            "effective_time_range": {"date_from": date_from, "date_to": date_to},
+        }
 
     async def continue_after_comment_selection(
         request: Request, task_id: str, candidate_ids: list[str]
@@ -950,6 +1167,7 @@ def create_app(
                 "phase": "comments_ready",
                 "completed": summary.completed if summary else 0,
                 "failed": summary.failed if summary else 0,
+                "skipped": not candidate_ids,
             },
         )
         await database.set_task_status(task_id, "running", "comment_analysis")
@@ -1098,9 +1316,21 @@ def create_app(
         )
         report = await database.get_report_for_task(task_id)
         checkpoint = await database.latest_checkpoint(task_id)
+        outcome = await database.checkpoint(task_id, "investigation:outcome")
+        recovery = await database.checkpoint(task_id, "report:quality_recovery")
+        report_quality = json.loads(report["ir_json"]).get("quality", {}) if report else {}
         return {
             "task_id": task_id,
+            "investigation_outcome": outcome,
+            "recovery": recovery,
+            "chapter_status": report_quality.get("chapter_status", {}),
+            "release_label": report_quality.get("release_label"),
+            "timing": await task_timing(database, task_id),
+            "call_diagnostics": {
+                k: v for k, v in (await database.llm_diagnostics(task_id)).items() if k != "calls"
+            },
             "event_query": row["event_query"],
+            "investigation_scope": row["investigation_scope"],
             "resolved_event_query": row["resolved_event_query"],
             "status": row["status"],
             "phase": row["phase"],
@@ -1128,6 +1358,66 @@ def create_app(
             "topic_selection_required": row["phase"] == "topic_selection",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+        }
+
+    @app.get("/api/tasks/{task_id}/progress")
+    async def task_progress(
+        task_id: str,
+        request: Request,
+        _task: Annotated[TaskRecord, Depends(existing_task)],
+    ):
+        database, events = services(request)
+        # Capture the lower watermark first. Clients reject an older snapshot when
+        # newer SSE events arrive while these read-only queries are in flight.
+        sequence = await events.high_water(task_id)
+        task = await database.get_task(task_id)
+        timing = await task_timing(database, task_id)
+        rows = await database.fetch_all(
+            "SELECT verification_state, COUNT(*) AS n FROM claim WHERE task_id=? "
+            "GROUP BY verification_state",
+            (task_id,),
+        )
+        verification = {row["verification_state"]: row["n"] for row in rows}
+        diagnostics = await database.llm_diagnostics(task_id)
+        usage = await database.usage_checkpoint(task_id)
+        last = await database.fetch_one(
+            "SELECT ts FROM event_log WHERE task_id=? AND seq=?", (task_id, sequence)
+        )
+        return {
+            "task_id": task_id,
+            "seq": sequence,
+            "status": task.status if task else _task.status,
+            "phase": task.phase if task else _task.phase,
+            "timing": timing,
+            "last_event_at": last["ts"] if last else None,
+            "verification": {"total": sum(verification.values()), **verification},
+            "model_calls": {k: v for k, v in diagnostics.items() if k != "calls"},
+            "budget": {
+                "tokens_used": max(usage.get("tokens_used", 0), task.tokens_used if task else 0),
+                "calls": max(usage.get("calls", 0), diagnostics["recorded_requests"]),
+                "tokens_limit": getattr(request.app.state, "budgets", DEFAULT_BUDGET_TABLE)[
+                    (task or _task).depth
+                ].token_limit,
+                "tokens_reserved": sum(
+                    call.get("reservation_tokens", 0)
+                    for call in diagnostics["calls"]
+                    if call.get("status") in {"queued", "inflight"}
+                ),
+            },
+        }
+
+    @app.get("/api/tasks/{task_id}/diagnostics")
+    async def task_diagnostics(task_id: str, request: Request):
+        database, _ = services(request)
+        if await database.get_task(task_id) is None:
+            return error_response(
+                "TASK_NOT_FOUND", "任务不存在。", 404, details={"task_id": task_id}
+            )
+        return {
+            "task_id": task_id,
+            "timing": await task_timing(database, task_id),
+            "model_calls": await database.llm_diagnostics(task_id),
+            "usage": await database.usage_checkpoint(task_id),
         }
 
     @app.post("/api/tasks/{task_id}/resume", status_code=202)
@@ -1267,9 +1557,9 @@ def create_app(
     ) -> AsyncIterable[ServerSentEvent]:
         database, events = services(request)
         try:
-            after = since_seq if since_seq is not None else int(last_event_id or 0)
+            after = max(since_seq or 0, int(last_event_id or 0), 0)
         except ValueError:
-            after = 0
+            after = since_seq or 0
         queue = events.subscribe(task_id)
         try:
             high_water = await events.high_water(task_id)
@@ -1362,11 +1652,13 @@ def create_app(
             return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
         if await database.report_under_review(report_id):
             return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
-        target = data_dir / "reports" / f"{report_id}.pdf"
+        html = render_html(migrate_report(json.loads(report["ir_json"])), view="full")
+        # 模板与品牌变化也需要更新 PDF，不能继续命中旧外观的缓存。
+        render_digest = hashlib.sha256(html.encode("utf-8")).hexdigest()[:16]
+        target = data_dir / "reports" / f"{report_id}-{render_digest}.pdf"
         target_exists = await asyncio.to_thread(target.is_file)
         if not target_exists:
             try:
-                html = render_html(migrate_report(json.loads(report["ir_json"])), view="full")
                 await request.app.state.pdf_exporter.export(html, target)
                 await database.set_report_pdf(report_id, str(target))
             except Exception as exc:
@@ -1434,6 +1726,13 @@ def create_app(
         row = await database.evidence_by_pk(evidence_pk)
         if row is None:
             return error_response("EVIDENCE_NOT_FOUND", "证据不存在。", 404)
+        task = await database.get_task(row["task_id"])
+        if task and task.investigation_scope in {"institution", "public_event"}:
+            return error_response(
+                "SNAPSHOT_FORBIDDEN",
+                "隐私保护调查不开放未脱敏原文快照；请使用报告中的公开来源链接。",
+                403,
+            )
         if row["fetch_status"] != "fetched":
             return error_response("SNAPSHOT_NOT_AVAILABLE", "该证据没有原文快照。", 404)
         if row["kind"] == "social_comments":

@@ -56,6 +56,10 @@ class ChromiumPdfExporter:
                 page = await instance.new_page()
                 await page.set_content(html, wait_until="load")
                 await page.emulate_media(media="print")
+                # Full PDF includes facts hidden behind the interactive disclosure rows.
+                await page.evaluate(
+                    "() => document.querySelectorAll('details').forEach(card => card.open = true)"
+                )
                 await page.pdf(
                     path=str(target),
                     format="A4",
@@ -110,6 +114,10 @@ class EvidencePackageBuilder:
         )
         if row is None:
             raise ValueError("report not found")
+        task = await self.database.get_task(row["task_id"])
+        institution_scope = bool(
+            task and task.investigation_scope in {"institution", "public_event"}
+        )
         report = migrate_report(json.loads(row["ir_json"]))
         html = render_html(report, view="full")
         manifest = {
@@ -131,6 +139,18 @@ class EvidencePackageBuilder:
             {"items": []},
         )
         for item in appendix.get("items", []):
+            if institution_scope:
+                manifest["evidence"].append(
+                    {
+                        "evidence_ref": item.get("evidence_ref"),
+                        "title": f"公开来源 {item.get('evidence_ref')}",
+                        "url": item.get("url"),
+                        "content_sha256": item.get("content_sha256"),
+                        "kind": item.get("kind", "web"),
+                        "snapshot_file": None,
+                    }
+                )
+                continue
             evidence_pk = item.get("snapshot_pk")
             if item.get("fetch_status") != "fetched" or not evidence_pk:
                 continue

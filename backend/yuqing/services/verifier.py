@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
-from yuqing.core.llm.gateway import is_upstream_failure, sanitize_upstream_message
+from yuqing.core.llm.gateway import (
+    LLMBudgetExhausted,
+    is_upstream_failure,
+    sanitize_upstream_message,
+)
 from yuqing.services.source_tiers import bundled_classifier
 from yuqing.services.verification import (
     EntityEvidence,
@@ -37,12 +42,36 @@ class EvidenceVerifier(Protocol):
     ) -> VerificationRelation: ...
 
 
+def _cited_span(material: str, quote: str) -> str | None:
+    """Return the original source span when a model only normalizes layout whitespace."""
+
+    if not quote or len(quote) > 2000:
+        return None
+    if quote in material:
+        return quote
+    compact_quote = "".join(char for char in quote if not char.isspace())
+    if len(compact_quote) < 8:
+        return None
+    compact_material = []
+    offsets = []
+    for index, char in enumerate(material):
+        if not char.isspace():
+            compact_material.append(char)
+            offsets.append(index)
+    start = "".join(compact_material).find(compact_quote)
+    if start < 0:
+        return None
+    return material[offsets[start] : offsets[start + len(compact_quote) - 1] + 1]
+
+
 class ClaimVerifierService:
     def __init__(self, database: Database, verifier: EvidenceVerifier):
         self.database = database
         self.verifier = verifier
 
-    async def verify_claim(self, claim: ClaimRecord) -> ClaimRecord:
+    async def verify_claim(
+        self, claim: ClaimRecord, *, reuse_completed: bool = False
+    ) -> ClaimRecord:
         rows = await self.database.claim_evidence_rows(claim.pk)
         stances: list[EntityEvidence] = []
         completed = True
@@ -52,16 +81,39 @@ class ClaimVerifierService:
                 evidence_data["extra"] = json.loads(evidence_data["extra"])
             evidence = EvidenceRecord.model_validate(evidence_data)
             try:
-                for attempt in range(2):
-                    result = await self.verifier.verify(claim, evidence)
-                    material = evidence.content_text or evidence.snippet or ""
-                    cited_verified = bool(result.cited_sentence) and (
-                        result.cited_sentence in material
+                cached = (
+                    reuse_completed
+                    and row["relation"]
+                    and not str(row["verify_reason"] or "").startswith(
+                        ("核验失败", UPSTREAM_FAILURE_NOTE)
                     )
-                    if result.relation == "not_mentioned" or cited_verified:
-                        break
-                    if attempt == 1:
-                        raise ValueError("非 not_mentioned 关系缺少可回溯的 cited_sentence")
+                )
+                if cached:
+                    result = VerificationRelation(
+                        relation=row["relation"],
+                        reason=row["verify_reason"] or "",
+                        cited_sentence=row["cited_sentence"] or "",
+                        is_correction=bool(row["is_correction"]),
+                    )
+                    cited_verified = bool(row["cited_verified"])
+                gateway = getattr(self.verifier, "gateway", None)
+                context = (
+                    gateway.logical_call(stage="verification")
+                    if hasattr(gateway, "logical_call")
+                    else nullcontext()
+                )
+                with context:
+                    for attempt in range(0 if cached else 2):
+                        result = await self.verifier.verify(claim, evidence)
+                        material = evidence.content_text or evidence.snippet or ""
+                        exact_span = _cited_span(material, result.cited_sentence)
+                        cited_verified = exact_span is not None
+                        if exact_span is not None:
+                            result = result.model_copy(update={"cited_sentence": exact_span})
+                        if result.relation == "not_mentioned" or cited_verified:
+                            break
+                        if attempt == 1:
+                            raise ValueError("非 not_mentioned 关系缺少可回溯的 cited_sentence")
             except Exception as exc:
                 completed = False
                 prefix = UPSTREAM_FAILURE_NOTE if is_upstream_failure(exc) else "核验失败"
@@ -73,6 +125,8 @@ class ClaimVerifierService:
                     cited_sentence="",
                     cited_verified=False,
                 )
+                if isinstance(exc, LLMBudgetExhausted) or is_upstream_failure(exc):
+                    break
                 continue
             await self.database.set_evidence_relation(
                 claim.pk,

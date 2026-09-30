@@ -40,7 +40,7 @@ async def test_policy_gate_retries_once_when_output_invalid(monkeypatch):
     gateway = FlakyGateway(
         [
             {"answer": '{"allowed": true, "reason": "政策事项", "category": "政策"}'},
-            {"allowed": True, "reason": "政策事项", "category": "政策"},
+            {"allowed": True, "reason": "政策事项", "category": "public"},
         ]
     )
     monkeypatch.setattr("yuqing.services.public_interest.ConfigService", StubConfigService)
@@ -52,6 +52,29 @@ async def test_policy_gate_retries_once_when_output_invalid(monkeypatch):
     assert decision.allowed is True
     assert len(gateway.prompts) == 2
     assert "上一次输出不是合法 JSON 对象" in gateway.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_policy_gate_requires_named_category_and_retries_invalid_pair(monkeypatch):
+    gateway = FlakyGateway(
+        [
+            {"allowed": True, "reason": "类别矛盾", "category": "institution_scope"},
+            {
+                "allowed": False,
+                "reason": "可限定为机构公开回应",
+                "category": "institution_scope",
+            },
+        ]
+    )
+    monkeypatch.setattr("yuqing.services.public_interest.ConfigService", StubConfigService)
+    monkeypatch.setattr("yuqing.services.public_interest.LLMGateway", lambda _f: gateway)
+    monkeypatch.setattr("yuqing.services.public_interest.LLMClientFactory", StubFactory)
+
+    decision = await assess_public_interest(None, "某高校公开回应争议", None)
+
+    assert decision.category == "institution_scope"
+    assert decision.allowed is False
+    assert len(gateway.prompts) == 2
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
@@ -80,6 +81,7 @@ class Database:
         task_migrations = {
             "resolved_event_query": "TEXT",
             "request_kind": "TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery'))",
+            "investigation_scope": "TEXT NOT NULL DEFAULT 'general' CHECK (investigation_scope IN ('general','institution','public_event'))",
             "source_scope": "TEXT NOT NULL DEFAULT 'auto' CHECK (source_scope IN ('auto','domestic','global'))",
             "source_languages": 'TEXT NOT NULL DEFAULT \'["zh","en"]\'',
             "comment_mode": "TEXT NOT NULL DEFAULT 'off' CHECK (comment_mode IN ('off','smart','manual','hybrid'))",
@@ -88,6 +90,37 @@ class Database:
         for name, declaration in task_migrations.items():
             if name not in task_columns:
                 connection.execute(f"ALTER TABLE task ADD COLUMN {name} {declaration}")
+        task_sql = connection.execute("SELECT sql FROM sqlite_master WHERE name='task'").fetchone()[
+            0
+        ]
+        if "'public_event'" not in task_sql:
+            # SQLite cannot widen a CHECK in place. Keep child FKs and rows intact.
+            connection.commit()
+            connection.execute("PRAGMA foreign_keys=OFF")
+            upgraded = re.sub(
+                r"CREATE TABLE(?: IF NOT EXISTS)?\s+[\"`]?task[\"`]?",
+                "CREATE TABLE task_scope_upgrade",
+                task_sql,
+                count=1,
+                flags=re.I,
+            )
+            upgraded = re.sub(
+                r"'general'\s*,\s*'institution'", "'general','institution','public_event'", upgraded
+            )
+            try:
+                connection.execute("BEGIN")
+                connection.execute(upgraded)
+                connection.execute("INSERT INTO task_scope_upgrade SELECT * FROM task")
+                connection.execute("DROP TABLE task")
+                connection.execute("ALTER TABLE task_scope_upgrade RENAME TO task")
+                if connection.execute("PRAGMA foreign_key_check").fetchone():
+                    raise RuntimeError("task scope migration violates foreign keys")
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.execute("PRAGMA foreign_keys=ON")
         evidence_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(evidence)").fetchall()
         }
@@ -178,15 +211,16 @@ class Database:
         task_id = f"t_{datetime.now():%Y%m%d}_{uuid.uuid4().hex[:8]}"
         await self.execute_write(
             """INSERT INTO task(
-                 id,event_query,resolved_event_query,request_kind,user_note,time_range_from,time_range_to,depth,source_scope,
+                 id,event_query,resolved_event_query,request_kind,user_note,investigation_scope,time_range_from,time_range_to,depth,source_scope,
                  source_languages,comment_mode,comment_urls,status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
             (
                 task_id,
                 data.event_query,
                 None,
                 data.request_kind,
                 data.user_note,
+                data.investigation_scope,
                 data.time_range_from,
                 data.time_range_to,
                 data.depth,
@@ -213,10 +247,18 @@ class Database:
         value["comment_urls"] = json.loads(value.get("comment_urls") or "[]")
         return TaskRecord.model_validate(value)
 
-    async def set_resolved_event_query(self, task_id: str, value: str) -> None:
+    async def set_resolved_event_query(self, task_id: str, value: str | None) -> None:
         await self.execute_write(
             "UPDATE task SET resolved_event_query=?,updated_at=? WHERE id=?",
-            (value.strip(), now_iso(), task_id),
+            (value.strip() if value is not None else None, now_iso(), task_id),
+        )
+
+    async def set_task_time_range(
+        self, task_id: str, date_from: str | None, date_to: str | None
+    ) -> None:
+        await self.execute_write(
+            "UPDATE task SET time_range_from=?,time_range_to=?,updated_at=? WHERE id=?",
+            (date_from, date_to, now_iso(), task_id),
         )
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
@@ -256,7 +298,7 @@ class Database:
         self, task_id: str, *, tokens_used: int, cost_estimate: float
     ) -> None:
         await self.execute_write(
-            "UPDATE task SET tokens_used=?,cost_estimate=?,updated_at=? WHERE id=?",
+            "UPDATE task SET tokens_used=MAX(tokens_used,?),cost_estimate=MAX(cost_estimate,?),updated_at=? WHERE id=?",
             (tokens_used, cost_estimate, now_iso(), task_id),
         )
 
@@ -460,6 +502,35 @@ class Database:
         )
         return self._evidence_record(row) if row else None
 
+    async def mark_selected_institution_source(
+        self, task_id: str, local_id: str, institution_name: str
+    ) -> None:
+        """Mark a fetched institutional page as the selected event's own statement."""
+
+        def operation(connection: sqlite3.Connection) -> None:
+            self._assert_investigation_open(connection, task_id)
+            row = connection.execute(
+                "SELECT url,content_text,source_name,fetch_status FROM evidence "
+                "WHERE task_id=? AND local_id=?",
+                (task_id, local_id),
+            ).fetchone()
+            if row is None:
+                return
+            host = (urlsplit(row["url"]).hostname or "").lower()
+            if (
+                row["fetch_status"] == "fetched"
+                and host.endswith(".edu.cn")
+                and row["source_name"] == institution_name
+                and institution_name in (row["content_text"] or "")
+            ):
+                connection.execute(
+                    "UPDATE evidence SET source_role='party',source_tier=MIN(source_tier,2) "
+                    "WHERE task_id=? AND local_id=?",
+                    (task_id, local_id),
+                )
+
+        await self.write(operation)
+
     @staticmethod
     def _evidence_record(row: sqlite3.Row) -> EvidenceRecord:
         value = dict(row)
@@ -497,10 +568,9 @@ class Database:
             if len(data.evidence_ids) > max_evidence_per_claim:
                 raise ValueError(f"当前深度单条 claim 最多绑定 {max_evidence_per_claim} 条证据")
             existing_claim = connection.execute(
-                "SELECT local_id FROM claim WHERE task_id=? AND text=?", (data.task_id, data.text)
+                "SELECT pk,local_id,agent,statement_kind,analysis_data FROM claim WHERE task_id=? AND text=?",
+                (data.task_id, data.text),
             ).fetchone()
-            if existing_claim:
-                return str(existing_claim[0])
             evidence_rows = connection.execute(
                 f"SELECT pk, local_id, snippet, content_text, fetch_status FROM evidence WHERE task_id=? AND local_id IN ({','.join('?' for _ in data.evidence_ids)})",
                 (data.task_id, *data.evidence_ids),
@@ -508,6 +578,67 @@ class Database:
             evidence_by_id = {row[1]: row for row in evidence_rows}
             if set(evidence_by_id) != set(data.evidence_ids):
                 raise ValueError("claim references unknown evidence")
+            quotes = {quote.evidence_id: quote for quote in data.quotes}
+
+            def insert_links(claim_pk: str, refs: list[str], start_order: int) -> None:
+                for order, evidence_id in enumerate(refs, start=start_order):
+                    evidence = evidence_by_id[evidence_id]
+                    quote_data = quotes.get(evidence_id)
+                    quote = quote_data.quote if quote_data else evidence[2]
+                    quote_type = (
+                        quote_data.quote_type
+                        if quote_data
+                        else ("paraphrase" if evidence[4] == "fetched" else "snippet")
+                    )
+                    begin = finish = None
+                    verified = 0
+                    if quote_type == "verbatim":
+                        content = evidence[3] or ""
+                        begin = content.find(quote or "")
+                        if begin < 0:
+                            raise ValueError("verbatim quote is not present in content")
+                        finish = begin + len(quote or "")
+                        verified = 1
+                    elif quote_type == "snippet":
+                        normalized_quote = " ".join((quote or "").replace("\u3000", " ").split())
+                        normalized_snippet = " ".join(
+                            (evidence[2] or "").replace("\u3000", " ").split()
+                        )
+                        if normalized_quote != normalized_snippet:
+                            raise ValueError("snippet quote does not equal evidence snippet")
+                    connection.execute(
+                        """INSERT INTO claim_evidence(claim_pk,evidence_pk,quote,quote_type,quote_start,quote_end,quote_verified,ord)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (claim_pk, evidence[0], quote, quote_type, begin, finish, verified, order),
+                    )
+
+            if existing_claim:
+                if existing_claim[2] != data.agent or existing_claim[3] != data.statement_kind:
+                    return str(existing_claim[1])
+                prior = connection.execute(
+                    """SELECT e.local_id FROM claim_evidence ce JOIN evidence e ON e.pk=ce.evidence_pk
+                       WHERE ce.claim_pk=? ORDER BY ce.ord""",
+                    (existing_claim[0],),
+                ).fetchall()
+                prior_ids = {row[0] for row in prior}
+                new_ids = [ref for ref in data.evidence_ids if ref not in prior_ids]
+                if len(prior) + len(new_ids) > max_evidence_per_claim:
+                    raise ValueError(f"当前深度单条 claim 最多绑定 {max_evidence_per_claim} 条证据")
+                if new_ids:
+                    insert_links(existing_claim[0], new_ids, len(prior))
+                    connection.execute(
+                        """UPDATE claim SET badge=NULL,verdict=NULL,verify_reason=NULL,
+                           verification_state='pending',independent_sources=0,max_source_tier=NULL,
+                           verifier_model=NULL,verified_at=NULL WHERE pk=?""",
+                        (existing_claim[0],),
+                    )
+                old_data = json.loads(existing_claim[4] or "{}")
+                if data.analysis_data and not old_data:
+                    connection.execute(
+                        "UPDATE claim SET analysis_data=? WHERE pk=?",
+                        (json.dumps(data.analysis_data, ensure_ascii=False), existing_claim[0]),
+                    )
+                return str(existing_claim[1])
             count = connection.execute(
                 "SELECT COUNT(*) FROM claim WHERE task_id=?", (data.task_id,)
             ).fetchone()[0]
@@ -537,37 +668,7 @@ class Database:
                     now_iso(),
                 ),
             )
-            quotes = {quote.evidence_id: quote for quote in data.quotes}
-            for order, evidence_id in enumerate(data.evidence_ids):
-                evidence = evidence_by_id[evidence_id]
-                quote_data = quotes.get(evidence_id)
-                quote = quote_data.quote if quote_data else evidence[2]
-                quote_type = (
-                    quote_data.quote_type
-                    if quote_data
-                    else ("paraphrase" if evidence[4] == "fetched" else "snippet")
-                )
-                start = end = None
-                verified = 0
-                if quote_type == "verbatim":
-                    content = evidence[3] or ""
-                    start = content.find(quote or "")
-                    if start < 0:
-                        raise ValueError("verbatim quote is not present in content")
-                    end = start + len(quote or "")
-                    verified = 1
-                elif quote_type == "snippet":
-                    normalized_quote = " ".join((quote or "").replace("\u3000", " ").split())
-                    normalized_snippet = " ".join(
-                        (evidence[2] or "").replace("\u3000", " ").split()
-                    )
-                    if normalized_quote != normalized_snippet:
-                        raise ValueError("snippet quote does not equal evidence snippet")
-                connection.execute(
-                    """INSERT INTO claim_evidence(claim_pk,evidence_pk,quote,quote_type,quote_start,quote_end,quote_verified,ord)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (claim_pk, evidence[0], quote, quote_type, start, end, verified, order),
-                )
+            insert_links(claim_pk, data.evidence_ids, 0)
             return local_id
 
         local_id = await self.write(operation)
@@ -748,6 +849,126 @@ class Database:
         )
         return json.loads(row["result_ref"]) if row else None
 
+    async def save_scope_review(self, task_id: str, fingerprint: str, value: dict) -> None:
+        await self.execute_write(
+            "INSERT OR REPLACE INTO scope_review VALUES(?,?,?)",
+            (task_id, fingerprint, json.dumps(value, ensure_ascii=False)),
+        )
+
+    async def get_scope_review(self, task_id: str, fingerprint: str) -> dict | None:
+        row = await self.fetch_one(
+            "SELECT payload FROM scope_review WHERE task_id=? AND fingerprint=?",
+            (task_id, fingerprint),
+        )
+        return json.loads(row[0]) if row else None
+
+    async def save_analysis_batch(
+        self, task_id: str, agent: str, fingerprint: str, value: dict
+    ) -> None:
+        await self.execute_write(
+            "INSERT OR REPLACE INTO analysis_batch VALUES(?,?,?,?)",
+            (task_id, agent, fingerprint, json.dumps(value, ensure_ascii=False)),
+        )
+
+    async def get_analysis_batch(self, task_id: str, agent: str, fingerprint: str) -> dict | None:
+        row = await self.fetch_one(
+            "SELECT payload FROM analysis_batch WHERE task_id=? AND agent=? AND fingerprint=?",
+            (task_id, agent, fingerprint),
+        )
+        return json.loads(row[0]) if row else None
+
+    async def record_llm_call(self, task_id: str, value: dict) -> None:
+        await self.execute_write(
+            "INSERT OR REPLACE INTO llm_call VALUES(?,?,?,?)",
+            (task_id, value["call_id"], value["attempt"], json.dumps(value, ensure_ascii=False)),
+        )
+
+    async def llm_diagnostics(self, task_id: str) -> dict:
+        rows = await self.fetch_all(
+            "SELECT payload FROM llm_call WHERE task_id=? ORDER BY rowid", (task_id,)
+        )
+        calls = [json.loads(row[0]) for row in rows]
+        now = datetime.now().astimezone()
+
+        def was_requested(call):
+            return call.get("status") != "queued" and not (
+                call.get("status") == "cancelled" and not call.get("requested_at")
+            )
+
+        by_stage = {}
+        activities = []
+        for call in calls:
+            stage = str(call.get("stage", "unknown"))
+            bucket = by_stage.setdefault(
+                stage,
+                {
+                    "requests": 0,
+                    "failed": 0,
+                    "retries": 0,
+                    "request_ms": 0,
+                    "queue_ms": 0,
+                },
+            )
+            if was_requested(call):
+                bucket["requests"] += 1
+            bucket["failed"] += call.get("status") == "failed"
+            bucket["retries"] += was_requested(call) and call.get("attempt", 1) > 1
+            bucket["request_ms"] += call.get("request_ms", 0)
+            bucket["queue_ms"] += call.get("queue_ms", 0)
+            if call.get("status") in {"queued", "inflight"}:
+                age = 0
+                try:
+                    started = datetime.fromisoformat(call["started_at"])
+                    age = max(0, (now - started).total_seconds())
+                except (KeyError, ValueError, TypeError):
+                    pass
+                activities.append(
+                    {
+                        "stage": stage,
+                        "role": call.get("role", "unknown"),
+                        "status": call["status"],
+                        "attempt": call.get("attempt", 1),
+                        "elapsed_seconds": round(age, 1),
+                    }
+                )
+        return {
+            "calls": calls,
+            "recorded_requests": sum(was_requested(c) for c in calls),
+            "recorded_tokens": sum(c["total_tokens"] for c in calls),
+            "queue_ms": sum(c["queue_ms"] for c in calls),
+            "request_ms": sum(c["request_ms"] for c in calls),
+            "failed_requests": sum(c.get("status") == "failed" for c in calls),
+            "retry_requests": sum(was_requested(c) and c.get("attempt", 1) > 1 for c in calls),
+            "queued_requests": sum(c.get("status") == "queued" for c in calls),
+            "inflight_requests": sum(c.get("status") == "inflight" for c in calls),
+            "activities": activities,
+            "by_stage": by_stage,
+        }
+
+    async def save_usage_checkpoint(self, task_id: str, value: dict) -> None:
+        def operation(connection):
+            row = connection.execute(
+                "SELECT payload FROM task_usage WHERE task_id=?", (task_id,)
+            ).fetchone()
+            previous = json.loads(row[0]) if row else {}
+            merged = {
+                k: max(int(previous.get(k, 0)), int(value.get(k, 0)))
+                for k in ("tokens_used", "calls")
+            }
+            connection.execute(
+                "INSERT OR REPLACE INTO task_usage VALUES(?,?)", (task_id, json.dumps(merged))
+            )
+            connection.execute(
+                "UPDATE task SET tokens_used=MAX(tokens_used,?) WHERE id=?",
+                (merged["tokens_used"], task_id),
+            )
+
+        await self.write(operation)
+
+    async def usage_checkpoint(self, task_id: str) -> dict:
+        row = await self.fetch_one("SELECT payload FROM task_usage WHERE task_id=?", (task_id,))
+        return json.loads(row[0]) if row else {}
+
     async def save_report(
         self,
         task_id: str,
@@ -777,23 +998,46 @@ class Database:
     async def set_report_pdf(self, report_id: str, pdf_path: str) -> None:
         await self.execute_write("UPDATE report SET pdf_path=? WHERE id=?", (pdf_path, report_id))
 
-    async def consume_quota(self, scope: str, period_key: str, limit: int) -> bool:
+    async def consume_quota_bundle(self, entries: Sequence[tuple[str, str, int, int]]) -> bool:
+        """Atomically reserve provider quota across daily/monthly/lifetime windows."""
+
         def operation(connection: sqlite3.Connection) -> bool:
-            row = connection.execute(
-                "SELECT used FROM provider_quota WHERE provider=? AND period_key=?",
-                (scope, period_key),
-            ).fetchone()
-            used = int(row[0]) if row else 0
-            if used >= limit:
-                return False
-            connection.execute(
-                """INSERT INTO provider_quota(provider,period_key,used) VALUES(?,?,1)
-                   ON CONFLICT(provider,period_key) DO UPDATE SET used=used+1""",
-                (scope, period_key),
-            )
+            for scope, period_key, limit, amount in entries:
+                row = connection.execute(
+                    "SELECT used FROM provider_quota WHERE provider=? AND period_key=?",
+                    (scope, period_key),
+                ).fetchone()
+                used = int(row[0]) if row else 0
+                if amount < 1 or used + amount > limit:
+                    return False
+            for scope, period_key, _limit, amount in entries:
+                connection.execute(
+                    """INSERT INTO provider_quota(provider,period_key,used) VALUES(?,?,?)
+                       ON CONFLICT(provider,period_key) DO UPDATE SET used=used+excluded.used""",
+                    (scope, period_key, amount),
+                )
             return True
 
         return await self.write(operation)
+
+    async def consume_quota(self, scope: str, period_key: str, limit: int) -> bool:
+        return await self.consume_quota_bundle([(scope, period_key, limit, 1)])
+
+    async def record_provider_usage(self, scope: str, period_key: str, amount: int) -> None:
+        if amount <= 0:
+            return
+        await self.execute_write(
+            """INSERT INTO provider_quota(provider,period_key,used) VALUES(?,?,?)
+               ON CONFLICT(provider,period_key) DO UPDATE SET used=used+excluded.used""",
+            (scope, period_key, amount),
+        )
+
+    async def provider_usage(self, scope: str, period_key: str) -> int:
+        row = await self.fetch_one(
+            "SELECT used FROM provider_quota WHERE provider=? AND period_key=?",
+            (scope, period_key),
+        )
+        return int(row["used"]) if row else 0
 
     async def request_takedown(self, report_id: str, reason: str) -> None:
         await self.execute_write(

@@ -12,11 +12,13 @@ SourceScope = Literal["auto", "domestic", "global"]
 CommentMode = Literal["off", "smart", "manual", "hybrid"]
 EvidenceKind = Literal["web", "local_dataset", "social_comments"]
 RequestKind = Literal["event", "topic_discovery"]
+InvestigationScopeKind = Literal["general", "institution", "public_event"]
 
 
 class TaskCreate(BaseModel):
     event_query: str = Field(min_length=1, max_length=200)
     user_note: str | None = None
+    investigation_scope: InvestigationScopeKind = "general"
     depth: Depth = "standard"
     time_range: "TimeRange | None" = None
     source_scope: SourceScope = "auto"
@@ -55,6 +57,7 @@ class TaskRecord(BaseModel):
     resolved_event_query: str | None = None
     request_kind: RequestKind = "event"
     user_note: str | None = None
+    investigation_scope: InvestigationScopeKind = "general"
     depth: Depth
     time_range_from: str | None = None
     time_range_to: str | None = None
@@ -109,6 +112,7 @@ class EvidenceRecord(BaseModel):
     source_role: SourceRole
     source_tier: int
     published_at: str | None
+    retrieval_query: str | None = None
     fetch_status: FetchStatus
     content_text: str | None
     snapshot_path: str | None

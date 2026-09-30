@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
+import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -9,18 +12,24 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Protocol
 
+from yuqing.core.history_cards import unique_history_cards
 from yuqing.render.html import render_html
-from yuqing.render.validator import validate_report
+from yuqing.render.validator import prune_citation_backlinks, validate_report
 from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
+from yuqing.services.history_comparison import independent_case_evidence
+from yuqing.services.institution_scope import PROTECTED_SCOPES, InstitutionScopeReviewer
 from yuqing.services.investigation_scope import ReportReleaseAssessment
 from yuqing.services.report_analysis import (
     assemble_analysis,
     deduplicate_limitations,
+    distinct_facts,
     event_timeline,
     report_context,
+    select_priority_timeline_nodes,
 )
 from yuqing.services.report_builder import BriefReportBuilder, EntailmentVerifier
+from yuqing.services.task_diagnostics import task_timing
 from yuqing.services.translation import Translator
 from yuqing.storage.db import Database
 
@@ -40,34 +49,393 @@ class FullReportBuilder:
         reporter: ReportSectionAgent | None = None,
         historical_data: HistoricalDataService | None = None,
         translator: Translator | None = None,
+        scope_reviewer: InstitutionScopeReviewer | None = None,
     ):
         self.database = database
         self.reports_dir = Path(reports_dir)
-        self.brief = BriefReportBuilder(database, reports_dir, entailment_verifier)
+        self.brief = BriefReportBuilder(
+            database, reports_dir, entailment_verifier, scope_reviewer=scope_reviewer
+        )
         self.reporter = reporter
         self.historical_data = historical_data or HistoricalDataService(database)
         self.translator = translator
+        self.scope_reviewer = scope_reviewer
+
+    @staticmethod
+    def redact_review_diagnostics(report: dict[str, Any]) -> None:
+        # Model review prose may quote unreviewed source identities. Keep safe structure.
+        semantic = report.get("quality", {}).get("semantic_review", {})
+        for chapter in semantic.get("chapters", {}).values():
+            for reason in chapter.get("reasons", []):
+                if isinstance(reason, dict) and "reason" in reason:
+                    reason["reason"] = "未通过证据与语义审查；详细记录保留在本地检查点。"
+
+    @staticmethod
+    def _hide_scoped_source_text(report: dict[str, Any]) -> None:
+        """Keep source links while removing unreviewed source text from every export."""
+
+        FullReportBuilder.redact_review_diagnostics(report)
+        report["task"]["user_note"] = None
+        report["task"].pop("original_query", None)
+        report["task"].pop("resolved_event_query", None)
+
+        def hide_quotes(value):
+            if isinstance(value, dict):
+                if value.get("type") == "metric_cards":
+                    return
+                for key in ("quote", "support_quote", "cited_sentence", "support_excerpt"):
+                    if key in value:
+                        value[key] = None
+                for v in value.values():
+                    hide_quotes(v)
+            elif isinstance(value, list):
+                for v in value:
+                    hide_quotes(v)
+
+        hide_quotes(report["blocks"])
+        for block in report.get("blocks", []):
+            if block.get("type") == "evidence_appendix":
+                for item in block.get("items", []):
+                    item["title"] = f"公开来源 {item['evidence_ref']}"
+                    item["source_name"] = "公开来源"
+                    item["publisher_entity"] = None
+                    item["snapshot_pk"] = None
+                    item["original_excerpt"] = None
+                    item["machine_translation_zh"] = None
+                    item["measurement_quotes"] = []
+                    for citation in item.get("citations", []):
+                        citation["quote"] = None
+                        citation["quote_redacted"] = True
+            if block.get("type") in {"fact_check_table", "historical_facts"}:
+                for item in block.get("items", []):
+                    item["rumor_text"] = None
+                    item["correction_text"] = None
+                    item["verify_reason"] = None
+                    for citation in item.get("citations", []):
+                        citation.update(
+                            quote=None, quote_type="redacted", quote_start=None, quote_end=None
+                        )
+
+    async def _retain_reviewed_blocks(self, report, task, *, normalize_source_labels=True):
+        """A failed optional review cannot replace already reviewed authoritative facts."""
+        texts = set()
+        ignored_keys = {
+            "url",
+            "origin_url",
+            "snapshot_path",
+            "content_sha256",
+            "diagnostics",
+            "samples",
+        }
+
+        def collect(value, key=""):
+            if key in ignored_keys:
+                return set()
+            found = set()
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    found.update(collect(v, k))
+            elif isinstance(value, list):
+                for v in value:
+                    found.update(collect(v, key))
+            elif isinstance(value, str) and any("\u4e00" <= c <= "\u9fff" for c in value):
+                found.add(value)
+            return found
+
+        # Facts and citation cards were screened before assembly; do not re-decide them.
+        protected_types = {
+            "fact_check_table",
+            "historical_facts",
+            "evidence_appendix",
+            "report_header",
+        }
+        units = []
+        for block in report["blocks"]:
+            if block["type"] in protected_types:
+                continue
+            if isinstance(block.get("items"), list):
+                for item in block["items"]:
+                    part = collect(item)
+                    units.append((block, item, part))
+                    texts.update(part)
+                metadata = collect(
+                    {k: v for k, v in block.items() if k not in {"items", "samples"}}
+                )
+                units.append((block, None, metadata))
+                texts.update(metadata)
+            elif block["type"] == "executive_summary":
+                for field in ("what", "why", "so_what"):
+                    for item in block.get(field, []):
+                        if field == "what" and item.get("claim_ref"):
+                            continue
+                        part = collect(item)
+                        units.append((block[field], item, part))
+                        texts.update(part)
+            else:
+                part = collect(block)
+                units.append((block, None, part))
+                texts.update(part)
+        core_texts = set().union(
+            *(
+                part
+                for owner, item, part in units
+                if isinstance(owner, list)
+                or isinstance(owner, dict)
+                and owner.get("section") in {"01", "02", "04", "07"}
+            )
+        )
+        ordered = sorted(texts, key=lambda text: (text not in core_texts, text))
+        if self.scope_reviewer:
+            self.scope_reviewer.bind(self.database, task.id, task.investigation_scope)
+            decisions = await self.scope_reviewer.review(ordered, kind="report_text")
+            if normalize_source_labels:
+                approved_labels = {
+                    text: decision.text
+                    for text, decision in zip(ordered, decisions, strict=True)
+                    if decision.allowed and decision.text != text
+                }
+                changes = self._redact_source_labels(report, approved_labels)
+                if changes:
+                    # Only source display labels change. Re-collect and review the new
+                    # representations; facts, semantic analysis and relation IDs stay intact.
+                    await self._retain_reviewed_blocks(report, task, normalize_source_labels=False)
+                    report["quality"]["scope_review"]["redacted_source_labels"] = changes
+                    return
+            safe = {
+                text
+                for text, d in zip(ordered, decisions, strict=True)
+                if d.allowed and d.text == text
+            }
+            rejected = sum(d.status == "rejected" for d in decisions)
+            incomplete = sum(
+                d.status == "incomplete" or d.allowed and d.text != text
+                for text, d in zip(ordered, decisions, strict=True)
+            )
+        else:
+            safe, rejected, incomplete = set(), 0, len(ordered)
+        removed_blocks = set()
+        for owner, item, part in units:
+            if part <= safe:
+                continue
+            if isinstance(owner, list):
+                if item in owner:
+                    owner.remove(item)
+            elif item is not None:
+                if item in owner["items"]:
+                    owner["items"].remove(item)
+            else:
+                removed_blocks.add(owner["block_id"])
+        report["blocks"] = [b for b in report["blocks"] if b["block_id"] not in removed_blocks]
+        report["blocks"] = [
+            b
+            for b in report["blocks"]
+            if not (b["type"] in {"analysis", "action_plan", "metric_cards"} and not b.get("items"))
+        ]
+        quality = report.setdefault("quality", {})
+        quality["analysis_items"] = sum(
+            len(b.get("items", []))
+            for b in report["blocks"]
+            if b["type"] in {"analysis", "action_plan"}
+        )
+        quality["scope_review"] = {
+            "policy_version": "public-event-v1",
+            "rejected_texts": rejected,
+            "incomplete_texts": incomplete,
+            "incomplete_reasons": dict(
+                Counter(d.reason for d in decisions if d.status == "incomplete")
+            )
+            if self.scope_reviewer
+            else {"reviewer_unavailable": incomplete},
+            "diagnostics": list(
+                {
+                    json.dumps(d.diagnostic, sort_keys=True): d.diagnostic
+                    for d in decisions
+                    if d.diagnostic
+                }.values()
+            )
+            if self.scope_reviewer
+            else [],
+        }
+        if rejected or incomplete:
+            core_removed = any(
+                owner.get("section") in {"01", "02", "04", "07"} and part - safe
+                for owner, item, part in units
+                if isinstance(owner, dict)
+            ) or any(part - safe for owner, item, part in units if isinstance(owner, list))
+            if core_removed or not report["metrics"]["key_claims_rendered"]:
+                quality["release_label"] = (
+                    "evidence_brief"
+                    if report["metrics"]["key_claims_rendered"]
+                    else "retrieval_diagnostic"
+                )
+            if core_removed:
+                quality["release_gate_missing"] = list(
+                    dict.fromkeys(
+                        [
+                            *quality.get("release_gate_missing", []),
+                            "scope_review_incomplete" if incomplete else "scope_content_rejected",
+                        ]
+                    )
+                )
+            limits = next((b for b in report["blocks"] if b["type"] == "limitations"), None)
+            if limits is None:
+                limits = {
+                    "block_id": "b_08_scope_limits",
+                    "type": "limitations",
+                    "section": "08",
+                    "in_brief": True,
+                    "items": [],
+                }
+                report["blocks"].append(limits)
+            for block in report["blocks"]:
+                if block["type"] == "report_header":
+                    block["subtitle"] = (
+                        "证据简报 · 部分内容审查未完成"
+                        if quality["release_label"] == "evidence_brief"
+                        else block["subtitle"]
+                    )
+            limits["items"].append(
+                {
+                    "id": "L98",
+                    "category": "范围与隐私审查",
+                    "text": f"明确排除 {rejected} 段内容；{incomplete} 段尚未完成审查或脱敏后核验，暂不展示。已通过审查的事实与章节保留。",
+                }
+            )
+            reasons = sorted(
+                {d.get("message", "审查结果未取得") for d in quality["scope_review"]["diagnostics"]}
+            )
+            if reasons:
+                limits["items"][-1]["text"] += (
+                    " 未完成原因：" + "；".join(reasons) + "。可从已保存材料恢复审查。"
+                )
+
+    @staticmethod
+    def _redact_source_labels(report, approved_labels):
+        evidence_ids = {
+            item["evidence_ref"]
+            for block in report["blocks"]
+            if block["type"] == "evidence_appendix"
+            for item in block.get("items", [])
+        }
+        changes = 0
+
+        def visit(value, *, material_timeline=False):
+            nonlocal changes
+            if isinstance(value, dict):
+                refs = set(value.get("evidence_refs", []))
+                refs.update(
+                    value[key]
+                    for key in ("evidence_ref", "evidence_id")
+                    if isinstance(value.get(key), str)
+                )
+                if refs and refs <= evidence_ids:
+                    keys = {"title", "framing", "publisher", "source_name", "publisher_entity"}
+                    if material_timeline:
+                        keys.add("text")  # This chart displays source titles, not claim bodies.
+                    for key in keys:
+                        original = value.get(key)
+                        if isinstance(original, str) and original in approved_labels:
+                            value[key] = approved_labels[original]
+                            changes += 1
+                for child in value.values():
+                    visit(child, material_timeline=material_timeline)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child, material_timeline=material_timeline)
+
+        for block in report["blocks"]:
+            if block["type"] in {"propagation_network", "history_compare"}:
+                visit(block)
+            elif block.get("block_id") == "b_02_correction_timeline":
+                visit(block, material_timeline=True)
+        return changes
+
+    async def _scope_report_is_safe(self, report: dict[str, Any]) -> bool:
+        if self.scope_reviewer is None:
+            return False
+        texts: set[str] = set()
+
+        def collect(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for child_key, child_value in value.items():
+                    collect(child_value, child_key)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child, key)
+            elif (
+                isinstance(value, str)
+                and key not in {"url", "origin_url", "snapshot_path", "content_sha256"}
+                and any("\u4e00" <= char <= "\u9fff" for char in value)
+            ):
+                texts.add(value)
+
+        collect(report)
+        if any(len(value) > 3000 for value in texts):
+            return False
+        return all(await self.scope_reviewer.accepted(sorted(texts), kind="report_text"))
 
     async def build(
+        self, task_id: str, *, forum=(), orchestration_limitations=(), diagnostic_only=False
+    ):
+        task = await self.database.get_task(task_id)
+        gateway = getattr(self.scope_reviewer, "gateway", None)
+        cap = getattr(gateway, "token_limit", None)
+        protected = task and task.investigation_scope in PROTECTED_SCOPES and cap is not None
+        if protected:
+            used = gateway.tokens_used
+            gateway.token_limit = used + max(0, cap - used) * 3 // 4
+        try:
+            return await self._build(
+                task_id,
+                forum=forum,
+                orchestration_limitations=orchestration_limitations,
+                diagnostic_only=diagnostic_only,
+                scope_review_cap=cap if protected else None,
+            )
+        finally:
+            if protected:
+                gateway.token_limit = cap
+
+    async def _build(
         self,
         task_id: str,
         *,
         forum: Sequence[ForumMessage] = (),
         orchestration_limitations: Sequence[str] = (),
         diagnostic_only: bool = False,
+        scope_review_cap: int | None = None,
     ) -> tuple[str, dict[str, Any], str]:
         task = await self.database.get_task(task_id)
         if task is None:
             raise ValueError("task not found")
+        if hasattr(self.reporter, "bind"):
+            self.reporter.bind(self.database, task_id)
         report_id, report, path = await self.brief.build(task_id)
+        scoped_fallback = (
+            copy.deepcopy(report) if task.investigation_scope in PROTECTED_SCOPES else None
+        )
         evidence = await self.database.list_evidence(task_id)
         claims = await self.database.list_claims(task_id)
+        if scoped_fallback is not None:
+            approved_refs = {
+                item["claim_ref"]
+                for block in report["blocks"]
+                if block["type"] == "fact_check_table"
+                for item in block["items"]
+            }
+            claims = [claim for claim in claims if claim.local_id in approved_refs]
         has_explicit_window = bool(task.time_range_from or task.time_range_to)
         main_evidence = [
             item
             for item in evidence
-            if (item.extra or {}).get("scope_status") in {"main", "foreign_supplement"}
+            if (item.extra or {}).get("scope_status")
+            in {"main", "foreign_supplement", "event_context"}
             or (not has_explicit_window and not (item.extra or {}).get("scope_status"))
+        ]
+        in_window_evidence = [
+            item
+            for item in main_evidence
+            if (item.extra or {}).get("scope_status") != "event_context"
         ]
         main_evidence_ids = {item.local_id for item in main_evidence}
         by_type = {block["type"]: block for block in report["blocks"]}
@@ -91,6 +459,7 @@ class FullReportBuilder:
                     "fetch_status": item.fetch_status,
                     "snapshot_pk": item.pk if item.fetch_status == "fetched" else None,
                     "content_sha256": item.content_sha256,
+                    "content_origin": (item.extra or {}).get("content_origin"),
                     "kind": item.kind,
                     "lang": item.lang or "unknown",
                     "original_excerpt": (item.content_text or item.snippet or "")[:1200],
@@ -98,6 +467,7 @@ class FullReportBuilder:
                     "scope_label": (item.extra or {}).get("scope_label"),
                 }
             )
+        bound_source_ids = {ref for claim in claims for ref in claim.evidence_ids}
         for appendix in appendix_items:
             source = evidence_by_id.get(appendix.get("evidence_ref"))
             if source is None:
@@ -108,6 +478,7 @@ class FullReportBuilder:
                 "scope_status", (source.extra or {}).get("scope_status", "unclassified")
             )
             appendix.setdefault("scope_label", (source.extra or {}).get("scope_label"))
+            appendix.setdefault("content_origin", (source.extra or {}).get("content_origin"))
             appendix.setdefault(
                 "original_excerpt", (source.content_text or source.snippet or "")[:1200]
             )
@@ -115,7 +486,7 @@ class FullReportBuilder:
                 self.translator is not None
                 and (source.lang or "zh").split("-", 1)[0].lower() != "zh"
                 and appendix["original_excerpt"]
-                and appendix.get("citations")
+                and source.local_id in bound_source_ids
                 and not appendix.get("machine_translation_zh")
             ):
                 try:
@@ -135,11 +506,13 @@ class FullReportBuilder:
                 }
             ),
             time_span_days=self._time_span_days(evidence),
-            main_evidence_total=len(main_evidence),
+            main_evidence_total=len(in_window_evidence),
+            event_context_evidence_total=len(main_evidence) - len(in_window_evidence),
             background_evidence_total=len(evidence) - len(main_evidence),
         )
         header = by_type["report_header"]
-        header["event_title"] = task.resolved_event_query or task.event_query
+        if task.investigation_scope not in PROTECTED_SCOPES:
+            header["event_title"] = task.resolved_event_query or task.event_query
         report["task"]["original_query"] = task.event_query
         report["task"]["resolved_event_query"] = task.resolved_event_query
         snapshot = json.loads(task.config_snapshot) if task.config_snapshot else {}
@@ -167,6 +540,30 @@ class FullReportBuilder:
                 }
             )
 
+        historical_claims = {
+            claim.local_id: claim for claim in claims if claim.agent == "history_insight"
+        }
+        historical_facts = [
+            item
+            for item in by_type["fact_check_table"]["items"]
+            if item.get("origin_agent") == "history_insight"
+            and item.get("verification_state") == "complete"
+            and item.get("badge") != "refuted"
+            and (claim := historical_claims.get(item["claim_ref"])) is not None
+            and bool(
+                independent_case_evidence(
+                    claim,
+                    evidence_by_id,
+                    task.resolved_event_query or task.event_query,
+                    task.created_at,
+                )
+                & {
+                    c["evidence_ref"]
+                    for c in item.get("citations", [])
+                    if c.get("relation") == "support"
+                }
+            )
+        ]
         fact_items = [
             item
             for item in by_type["fact_check_table"]["items"]
@@ -212,6 +609,12 @@ class FullReportBuilder:
                         "date": row["published_at"],
                         "text": row["title"],
                         "source_name": row["source_name"] or row["publisher_entity"],
+                        "window_label": (
+                            "重点窗口外的本事件材料"
+                            if (evidence_by_id[row["evidence_id"]].extra or {}).get("scope_status")
+                            == "event_context"
+                            else None
+                        ),
                         "evidence_refs": [row["evidence_id"]],
                         "claim_refs": [],
                         "relations": Counter(),
@@ -222,7 +625,7 @@ class FullReportBuilder:
         timeline_items = []
         dated = sorted(timeline_sources.values(), key=lambda value: value["date"])
         # 长时段保留首尾，不能只截最早材料而漏掉最新进展。
-        selected_dates = dated if len(dated) <= 12 else dated[:4] + dated[-8:]
+        selected_dates = select_priority_timeline_nodes(dated)
         for item in selected_dates:
             item["claim_refs"] = sorted(set(item["claim_refs"]))
             item["relations"] = dict(item["relations"])
@@ -239,7 +642,7 @@ class FullReportBuilder:
             "fallback_text": "被引用材料缺少可用发布日期，无法构建可靠的纠偏时间线。"
             if not timeline_items
             else None,
-            "note": "按被引用材料的发布日期排列，不等于事件发生日期或首发时间；仅显示有核验关联的材料，长时段展示首尾节点，不代表全网声量。",
+            "note": "按被引用材料的发布日期排列；窗口外材料单独标明。发布日期不等于事件发生日期或首发时间；仅显示有核验关联的材料，不代表全网声量。",
         }
 
         total_claims = len(fact_items)
@@ -346,9 +749,122 @@ class FullReportBuilder:
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
+        rendered_bindings = {
+            item["claim_ref"]: {citation["evidence_ref"] for citation in item.get("citations", [])}
+            for item in fact_items
+        }
         publication_network, publication_nodes, propagation_edges = self._publication_network(
-            claims, evidence_by_id, main_evidence_ids, by_type["limitations"]
+            claims,
+            evidence_by_id,
+            main_evidence_ids,
+            rendered_bindings,
+            by_type["limitations"],
+            task.resolved_event_query or task.event_query,
         )
+        if not diagnostic_only and hasattr(self.reporter, "recover_relations"):
+            nodes_by_id = {n["evidence_id"]: n for n in publication_network["nodes"]}
+            source_context = self._relation_source_context(main_evidence, nodes_by_id)
+            fingerprint = hashlib.sha256(
+                json.dumps(source_context, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+            prior_relations = await self.database.checkpoint(task_id, "report:relations") or {}
+            source_fingerprints = {
+                s["evidence_ref"]: hashlib.sha256(
+                    json.dumps(s, ensure_ascii=False, sort_keys=True).encode()
+                ).hexdigest()
+                for s in source_context
+            }
+            if (
+                prior_relations.get("fingerprint") == fingerprint
+                and prior_relations.get("status") == "complete"
+            ):
+                recovered = prior_relations.get("edges", [])
+                diagnostics = prior_relations.get("diagnostics", [])
+            else:
+                recovered = await self.reporter.recover_relations(source_context)
+                diagnostics = getattr(self.reporter, "relation_diagnostics", [])
+                retained = [
+                    e
+                    for e in prior_relations.get("edges", [])
+                    if e.get("review_status") == "accepted"
+                    and all(
+                        source_fingerprints.get(ref) is not None
+                        and source_fingerprints[ref]
+                        == prior_relations.get("source_fingerprints", {}).get(ref)
+                        for ref in {
+                            e["from_evidence_id"],
+                            e["to_evidence_id"],
+                            e.get("support_evidence_id"),
+                        }
+                    )
+                ]
+                recovered = list(
+                    {
+                        (e["from_evidence_id"], e["to_evidence_id"], e["relation"]): e
+                        for e in [*retained, *recovered]
+                    }.values()
+                )
+                await self.database.save_checkpoint(
+                    task_id,
+                    "report:relations",
+                    {
+                        "phase": "verified",
+                        "fingerprint": fingerprint,
+                        "version": 2,
+                        "source_fingerprints": source_fingerprints,
+                        "candidates": getattr(self.reporter, "relation_candidates", []),
+                        "edges": recovered,
+                        "diagnostics": diagnostics,
+                        "status": "partial"
+                        if any(d.get("category") != "review_rejected" for d in diagnostics)
+                        else "complete",
+                    },
+                )
+            publication_network["diagnostics"] = diagnostics
+            eligible_sources = {item["evidence_ref"] for item in source_context}
+            recovered = [
+                edge
+                for edge in recovered
+                if edge.get("review_status") == "accepted"
+                and edge.get("from_evidence_id") in eligible_sources
+                and edge.get("to_evidence_id") in eligible_sources
+                and edge.get("support_evidence_id") in eligible_sources
+            ]
+            for edge in recovered:
+                for evidence_id, node_type in (
+                    (edge["from_evidence_id"], "original"),
+                    (edge["to_evidence_id"], "repost"),
+                ):
+                    if evidence_id in nodes_by_id:
+                        continue
+                    source = evidence_by_id[evidence_id]
+                    node = {
+                        "evidence_id": evidence_id,
+                        "publisher": source.publisher_entity
+                        or source.source_name
+                        or source.source_domain,
+                        "published_at": source.published_at,
+                        "node_type": node_type,
+                        "framing": (source.title or "发布记录")[:300],
+                        "evidence_refs": [evidence_id],
+                        "review_status": "accepted",
+                    }
+                    nodes_by_id[evidence_id] = node
+                    publication_network["nodes"].append(node)
+            publication_network["edges"] = recovered
+            publication_nodes = len(publication_network["nodes"])
+            propagation_edges = len(recovered)
+            if not recovered:
+                publication_network["fallback_text"] = (
+                    "已列出可回查的发布记录；尚未证明这些节点之间的转载或回应关系。"
+                )
+            if recovered:
+                publication_network["fallback_text"] = None
+                publication_network["in_brief"] = True
+                publication_network["data_basis"] = "typed_claim_and_reviewed_relation_evidence"
+                by_type["limitations"]["items"] = [
+                    item for item in by_type["limitations"]["items"] if item.get("id") != "L16"
+                ]
         propagation = [publication_network, evidence_funnel, verification_matrix]
         numeric_hot_points = [item for item in hot_points if item.heat_value is not None]
         if hot_points and not numeric_hot_points:
@@ -446,7 +962,7 @@ class FullReportBuilder:
             "fallback_text": "尚未形成通过引用检查的综合议题分析；已有事实见核查表，不能从调查席位发言推算公众立场或情感比例。",
         }
         comment_rows = await self.database.fetch_all(
-            """SELECT s.platform,c.status,c.collected_count,c.sampling_method,s.url,s.title
+            """SELECT s.platform,c.status,c.collected_count,c.sampling_method,c.error,s.url,s.title
                FROM comment_collection c JOIN social_candidate s ON s.id=c.candidate_id
                WHERE c.task_id=? ORDER BY c.started_at""",
             (task_id,),
@@ -472,6 +988,27 @@ class FullReportBuilder:
             if not comment_rows
             else None,
         }
+        structured_comments = next(
+            (
+                (m.payload or {}).get("comment_analysis")
+                for m in reversed(comment_messages)
+                if (m.payload or {}).get("comment_analysis")
+            ),
+            None,
+        )
+        if structured_comments:
+            comment_insight.update(
+                items=structured_comments.get("items", []),
+                samples=structured_comments.get("samples", []),
+                coverage=structured_comments.get("coverage", {}),
+                warnings=structured_comments.get("warnings", []),
+                diagnostics=structured_comments.get("diagnostics", []),
+                analysis_status=structured_comments.get("status", "unknown"),
+                analysis_version=structured_comments.get("version", 1),
+                fallback_text=None
+                if structured_comments.get("items")
+                else "未形成通过原始样本审查的主题；采集和分类覆盖见下方记录。",
+            )
         evidence_counts = Counter(item.lang or "unknown" for item in evidence)
         available_languages = {language for language, count in evidence_counts.items() if count > 0}
         requested = task.source_languages
@@ -493,6 +1030,7 @@ class FullReportBuilder:
         local_cards = [
             {
                 "event_name": item.event_name,
+                "case_type": "analogous",
                 "event_time": item.event_time_start,
                 "summary": item.summary,
                 "outcome": item.dimensions["最终结局"],
@@ -503,6 +1041,116 @@ class FullReportBuilder:
             }
             for item in local_history
         ]
+        for item in historical_facts:
+            claim = historical_claims[item["claim_ref"]]
+            case = claim.analysis_data["historical_case"]
+            eligible_refs = independent_case_evidence(
+                claim,
+                evidence_by_id,
+                task.resolved_event_query or task.event_query,
+                task.created_at,
+            )
+            supported_refs = [
+                citation["evidence_ref"]
+                for citation in item.get("citations", [])
+                if citation.get("relation") == "support"
+                and citation["evidence_ref"] in eligible_refs
+            ]
+            if not supported_refs:
+                continue
+            source = evidence_by_id[supported_refs[0]]
+            status = "已核验陈述" if item.get("badge") == "verified" else "来源记载，独立核实不足"
+            local_cards.append(
+                {
+                    "event_name": case["name"],
+                    "case_type": case.get("case_type", "analogous"),
+                    "event_time": f"资料发布：{str(source.published_at)[:10]}",
+                    "summary": f"{status}：{item['text']}",
+                    "outcome": case["outcome"],
+                    "comparison": (
+                        (
+                            f"可核查关联：{case.get('connection', '')}。"
+                            if case.get("case_type") == "related_prior"
+                            else ""
+                        )
+                        + f"相似机制：{case['similarity']}。"
+                        f"关键差异：{case['difference']}。"
+                        "该案例不能预测当前事件走向。"
+                    ),
+                    "dimensions": {
+                        "公开结果（来源记载）": case["outcome"],
+                        "核验状态": status,
+                    },
+                    "provenance": source.source_name or source.source_domain or "来源待核",
+                    "claim_ref": item["claim_ref"],
+                    "evidence_refs": supported_refs,
+                }
+            )
+        local_cards = unique_history_cards(local_cards)
+        accepted_history_refs = {
+            citation["evidence_ref"]
+            for item in historical_facts
+            for citation in item.get("citations", [])
+        }
+        considered_history_refs = {
+            item.local_id
+            for item in evidence
+            if (item.extra or {}).get("scope_status") == "history"
+        }
+        excluded_history = []
+        for source in evidence:
+            if (
+                source.local_id not in considered_history_refs
+                or source.local_id in accepted_history_refs
+                or (source.extra or {}).get("scope_status") != "history"
+            ):
+                continue
+            if not source.published_at or (source.extra or {}).get("date_provenance") not in {
+                "page_metadata",
+                "page_visible",
+                "trusted_structured",
+                "user_provided",
+            }:
+                reason = (
+                    "待核实历史案例线索：来源发布日期未从原网页确认，不能判断观察时点是否已公开"
+                )
+            elif str(source.published_at)[:10] > task.created_at[:10]:
+                reason = "公开时间晚于本任务启动日"
+            elif (task.resolved_event_query or task.event_query) in (
+                f"{source.title or ''} {(source.content_text or '')[:1600]}"
+            ):
+                reason = "仍属本事件报道，不能充当独立对照"
+            elif source.local_id not in {
+                ref
+                for claim in claims
+                if claim.agent == "history_insight"
+                for ref in claim.evidence_ids
+            }:
+                reason = "已取得来源，但尚未形成通过核验的独立案例陈述"
+            else:
+                reason = "尚未建立独立案例身份、相似机制和公开结果的完整依据"
+            excluded_history.append(
+                {
+                    "title": source.title,
+                    "published_at": source.published_at,
+                    "reason": reason,
+                    "evidence_refs": [source.local_id],
+                }
+            )
+        excluded_history.sort(
+            key=lambda item: (
+                0
+                if item["reason"].startswith("已取得来源")
+                else 1
+                if item["reason"].startswith("尚未建立")
+                else 2
+                if item["reason"].startswith("仍属")
+                else 3
+                if item["reason"].startswith("公开时间")
+                else 4,
+                item["published_at"] or "",
+            )
+        )
         history = {
             "block_id": "b_06_history",
             "type": "history_compare",
@@ -510,7 +1158,13 @@ class FullReportBuilder:
             "in_brief": False,
             "title": "历史对照",
             "cards": local_cards,
-            "fallback_text": "未取得通过可比性审查的历史对照；同一事件的重复报道不作为比较案例。"
+            "excluded_candidates": excluded_history[:8],
+            "fallback_text": (
+                f"已复查 {len(excluded_history)} 份历史席位引用材料，尚无通过独立事件、时间与可比机制审查的案例；"
+                "下列材料说明排除原因，不能把本事件旧闻或任务启动后才公开的结果写成历史比较。"
+                if excluded_history
+                else "未取得通过可比性审查的独立历史对照；需补充任务启动时已公开的原始通报或裁判文书。"
+            )
             if not local_cards
             else None,
         }
@@ -523,12 +1177,34 @@ class FullReportBuilder:
             "fallback_text": "本轮未形成有充分依据的行动研判。请先补齐核心回应原文与当前进展，再决定处置重点；当前产物仅可作为证据简报。",
         }
 
+        analysis_facts = [
+            item
+            for item in primary_fact_items
+            if item.get("verification_state") == "complete"
+            and (
+                item.get("badge") == "verified"
+                or (
+                    item.get("badge") == "unverified"
+                    and any(c.get("relation") == "support" for c in item.get("citations", []))
+                )
+            )
+        ]
+        analysis_facts.extend(historical_facts)
+        analysis_source_ids = {
+            citation["evidence_ref"]
+            for item in analysis_facts
+            for citation in item.get("citations", [])
+        }
+        analysis_sources = [item for item in evidence if item.local_id in analysis_source_ids]
         enrichment: dict[str, Any] = {}
         if self.reporter is not None and not diagnostic_only:
             try:
-                enrichment = await self.reporter.enrich(
-                    report_context(report["task"], fact_items, main_evidence, forum)
-                )
+                context = report_context(report["task"], analysis_facts, analysis_sources, forum)
+                context["comment_insights"] = comment_insight.get("items", [])
+                context["propagation_edges"] = propagation_edges
+                if hasattr(self.reporter, "bind"):
+                    self.reporter.bind(self.database, task_id)
+                enrichment = await self.reporter.enrich(context)
                 if not isinstance(enrichment, dict):
                     enrichment = {}
                 warnings = enrichment.get("section_warnings") or []
@@ -550,8 +1226,40 @@ class FullReportBuilder:
                     }
                 )
         summary, analysis_blocks, quality = assemble_analysis(
-            enrichment, primary_fact_items, main_evidence
+            enrichment,
+            analysis_facts,
+            analysis_sources,
+            propagation_edges=propagation_edges,
         )
+        if (
+            not diagnostic_only
+            and quality["rejected_items"]
+            and not summary["so_what"]
+            and hasattr(self.reporter, "repair_actions")
+        ):
+            original_rejections = dict(quality["rejected_items"])
+            try:
+                repaired = await self.reporter.repair_actions(context, original_rejections)
+                if repaired.get("analyses"):
+                    enrichment["analyses"] = [
+                        a for a in enrichment.get("analyses", []) if a.get("section") != "07"
+                    ] + repaired["analyses"]
+                    summary, analysis_blocks, quality = assemble_analysis(
+                        enrichment,
+                        analysis_facts,
+                        analysis_sources,
+                        propagation_edges=propagation_edges,
+                    )
+                quality["action_repair"] = {
+                    "status": "accepted" if summary["so_what"] else "rejected",
+                    "initial_rejections": original_rejections,
+                }
+            except Exception as exc:
+                quality["action_repair"] = {
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "initial_rejections": original_rejections,
+                }
         event_nodes = event_timeline(
             primary_fact_items,
             date_from=task.time_range_from,
@@ -562,9 +1270,20 @@ class FullReportBuilder:
                 title="关键事件与机构回应时点",
                 items=event_nodes,
                 fallback_text=None,
-                note="时点仅取自陈述正文明确写出的年月日，徽章保留该陈述的核验状态，不以网页发布日期替代事件日期。同日最多展示两个节点；完整陈述与其他来源可在核查记录展开。",
+                note="时点仅取自陈述正文明确写出的年月日；窗口外前史与后续进展单独标明。徽章保留陈述核验状态，不以网页发布日期替代事件日期。同日最多展示两个节点。",
             )
+        if not summary["what"]:
+            # A diagnostic still explains which attributed records were obtained.
+            summary["what"] = [
+                {"claim_ref": item["claim_ref"], "text": item["text"]}
+                for item in distinct_facts(primary_fact_items)
+            ]
         by_type["executive_summary"].update(summary)
+        if not any(item.get("badge") == "verified" for item in primary_fact_items):
+            by_type["executive_summary"]["lede"] = (
+                "以下列出已取得来源中的主要记载及其核验状态；目前尚不足以确认为事件事实，"
+                "分析仅在明确的证据和条件范围内成立。"
+            )
         by_type["fact_check_table"]["priority_claim_refs"] = [
             item["claim_ref"] for item in summary["what"]
         ]
@@ -576,14 +1295,14 @@ class FullReportBuilder:
         recommendation_count = sum(
             bool(item.get("evidence_refs"))
             for block in analysis_blocks
-            if block.get("type") == "analysis" and block.get("section") == "07"
+            if block.get("type") in {"analysis", "action_plan"} and block.get("section") == "07"
             for item in block.get("items", [])
         )
         release = ReportReleaseAssessment.evaluate(
             concrete_event=bool(task.resolved_event_query or task.request_kind == "event"),
             main_evidence=len(main_evidence),
             verifiable_key_claims=definitive_claims,
-            in_window_timeline_nodes=len(event_nodes),
+            event_timeline_nodes=len(event_nodes),
             publication_nodes=publication_nodes,
             propagation_edges=propagation_edges,
             summary_has_what=bool(summary["what"]),
@@ -591,6 +1310,53 @@ class FullReportBuilder:
             summary_has_action=bool(summary["so_what"]),
             evidence_bound_recommendations=recommendation_count,
         )
+        if (
+            release.label == "retrieval_diagnostic"
+            and not diagnostic_only
+            and any(
+                item.get("verification_state") == "complete"
+                and any(c.get("relation") == "support" for c in item.get("citations", []))
+                for item in primary_fact_items
+            )
+        ):
+            release = ReportReleaseAssessment("evidence_brief", release.missing)
+        history_ready = bool(local_cards) or any(b.get("section") == "06" for b in analysis_blocks)
+        comment_coverage = comment_insight.get("coverage", {})
+        comments_ready = await self.database.checkpoint(task_id, "comments:ready")
+        comments_skipped = bool(comments_ready is not None and not comment_rows)
+        comment_status = (
+            "disabled"
+            if task.comment_mode == "off" or comments_skipped
+            else "partial"
+            if comment_insight.get("items")
+            and (
+                comment_coverage.get("unclassified", 0)
+                or comment_coverage.get("relevant_without_reviewed_theme", 0)
+            )
+            else "complete"
+            if comment_insight.get("items") or comment_insight.get("analysis_status") == "complete"
+            else "failed"
+        )
+        quality["chapter_status"] = {
+            "history": {
+                "status": "complete" if history_ready else "missing",
+                "message": "已形成可回查的独立案例"
+                if history_ready
+                else "未形成合格独立案例，已保留候选及排除原因",
+            },
+            "comments": {
+                "status": comment_status,
+                "message": "用户已跳过新评论采集"
+                if comments_skipped
+                else "未启用评论调查"
+                if comment_status == "disabled"
+                else "评论仅代表已采集样本；覆盖与未完成部分见评论章节",
+                "coverage": comment_coverage,
+            },
+        }
+        quality["investigation_outcome"] = await self.database.checkpoint(
+            task_id, "investigation:outcome"
+        ) or {"end_reason": "unknown"}
         if diagnostic_only:
             release = ReportReleaseAssessment("retrieval_diagnostic", release.missing)
         quality["release_label"] = release.label
@@ -602,7 +1368,9 @@ class FullReportBuilder:
             "retrieval_diagnostic": "检索诊断 · 当前材料不足以生成舆情专报",
         }[release.label]
         analysis_sections = {
-            block["section"] for block in analysis_blocks if block["type"] == "analysis"
+            block["section"]
+            for block in analysis_blocks
+            if block["type"] in {"analysis", "action_plan"}
         }
         if quality["rejected_items"]:
             by_type["limitations"]["items"].append(
@@ -618,12 +1386,17 @@ class FullReportBuilder:
             "section": "00",
             "in_brief": True,
             "title": "阅读范围与决策边界",
-            "text": f"调查主题：{task.resolved_event_query or task.event_query}。材料时间范围：{task.time_range_from or '未指定起点'} 至 {task.time_range_to or '未指定终点'}。"
+            "text": f"调查主题：{header['event_title']}。"
+            + (
+                f"优先调查时间窗口：{task.time_range_from or '未指定起点'} 至 {task.time_range_to or '未指定终点'}；必要的本事件前史、后续进展与独立对照另行标注。"
+                if has_explicit_window
+                else "未指定调查时间范围；按证据核验结果呈现本事件经过及独立历史对照。"
+            )
             + (
                 "已通过完整专报发布门；分析判断与已核验事实分开呈现，仍需关注各条不确定性。"
                 if release.label == "full_report"
                 else (
-                    "当前仅输出检索诊断，没有足够的范围内主证据与可核验关键陈述。"
+                    "当前仅输出检索诊断，没有足够的本事件证据与可核验关键陈述。"
                     if release.label == "retrieval_diagnostic"
                     else "已形成有依据的分析条目，但当前仍是证据简报；事实链、传播关系或行动依据尚不完整。"
                 )
@@ -661,12 +1434,47 @@ class FullReportBuilder:
             *analysis_blocks,
             *([] if "05" in analysis_sections else [viewpoint]),
             comment_insight,
+            *(
+                [
+                    {
+                        "block_id": "b_06_basis",
+                        "type": "historical_facts",
+                        "section": "06",
+                        "in_brief": False,
+                        "title": "历史案例依据（与当前事件分开）",
+                        "items": historical_facts,
+                    }
+                ]
+                if historical_facts
+                else []
+            ),
             *([history] if local_cards or "06" not in analysis_sections else []),
             *([] if "07" in analysis_sections else [recommendations]),
             by_type["limitations"],
             data_quality,
             by_type["evidence_appendix"],
         ]
+        if scoped_fallback is not None:
+            if scope_review_cap is not None:
+                self.scope_reviewer.gateway.token_limit = scope_review_cap
+            self._hide_scoped_source_text(report)
+            await self._retain_reviewed_blocks(report, task)
+            for block in report["blocks"]:
+                if block["type"] == "evidence_appendix":
+                    for item in block["items"]:
+                        item["measurement_quotes"] = [
+                            m["quote"]
+                            for b in report["blocks"]
+                            if b["type"] == "metric_cards"
+                            for m in b["items"]
+                            if item["evidence_ref"] in m["evidence_refs"]
+                        ]
+        diagnostics = await self.database.llm_diagnostics(task_id)
+        report.setdefault("quality", {})["call_diagnostics"] = {
+            k: v for k, v in diagnostics.items() if k != "calls"
+        }
+        report["quality"]["timing"] = await task_timing(self.database, task_id)
+        prune_citation_backlinks(report)
         validated = validate_report(report).report
         await asyncio.to_thread(
             Path(path).write_text, render_html(validated, view="full"), encoding="utf-8"
@@ -674,12 +1482,78 @@ class FullReportBuilder:
         return report_id, validated, path
 
     @staticmethod
+    def _relation_source_context(
+        main_evidence: Sequence[Any], nodes_by_id: dict[str, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Include bounded, dated source-credit pages outside existing media claims."""
+
+        selected = [
+            item
+            for item in main_evidence
+            if item.local_id in nodes_by_id and item.fetch_status == "fetched"
+        ]
+        publisher_names = {
+            name
+            for item in selected
+            for name in (item.publisher_entity, item.source_name)
+            if name and len(name) >= 2
+        }
+        extras = [
+            item
+            for item in main_evidence
+            if item.local_id not in nodes_by_id
+            and item.fetch_status == "fetched"
+            and item.published_at
+            and re.search(
+                r"来源\s*[：:|｜]|新华社.{0,8}日电|转载自|据[^\n。；，]{2,24}(?:消息|报道)",
+                (item.content_text or "")[:500],
+            )
+        ]
+        extras.sort(
+            key=lambda item: (
+                not any(name in (item.content_text or "")[:500] for name in publisher_names),
+                item.source_tier or 9,
+                item.local_id,
+            )
+        )
+        credited = extras[:8]
+        credited_text = "\n".join((item.content_text or "")[:500] for item in credited)
+        existing_ids = {item.local_id for item in [*selected, *credited]}
+        originals = [
+            item
+            for item in main_evidence
+            if item.local_id not in existing_ids
+            and item.fetch_status == "fetched"
+            and item.published_at
+            and any(
+                name and len(name) >= 2 and name in credited_text
+                for name in (item.publisher_entity, item.source_name)
+            )
+        ][:4]
+        return [
+            {
+                "evidence_ref": item.local_id,
+                "title": item.title,
+                "publisher": item.publisher_entity or item.source_name or item.source_domain,
+                "url": item.url,
+                "published_at": item.published_at,
+                "excerpt": (item.content_text or "")[:1600],
+            }
+            for item in [*selected, *credited, *originals]
+        ]
+
+    @staticmethod
     def _publication_network(
         claims: Sequence[Any],
         evidence_by_id: dict[str, Any],
         main_evidence_ids: set[str],
+        rendered_bindings: dict[str, set[str]],
         limitations: dict[str, Any],
+        event_query: str = "",
     ) -> tuple[dict[str, Any], int, int]:
+        institution_markers = re.findall(
+            r"[\u4e00-\u9fff]{2,10}(?:大学|学院|医院|政府|公司|集团)", event_query
+        )
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         for claim in claims:
@@ -694,8 +1568,14 @@ class FullReportBuilder:
             if (
                 source is None
                 or evidence_id not in main_evidence_ids
-                or evidence_id not in claim.evidence_ids
+                or evidence_id not in rendered_bindings.get(claim.local_id, set())
                 or node.get("node_type") not in {"original", "repost", "response", "independent"}
+            ):
+                continue
+            if institution_markers and not any(
+                marker
+                in f"{source.title or ''} {(source.content_text or source.snippet or '')[:2500]}"
+                for marker in institution_markers
             ):
                 continue
             nodes[evidence_id] = {

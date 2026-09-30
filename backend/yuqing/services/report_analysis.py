@@ -25,24 +25,44 @@ ANALYSIS_FIELDS = (
 def event_timeline(
     facts: list[dict], *, date_from: str | None = None, date_to: str | None = None
 ) -> list[dict]:
-    """仅使用陈述开头明确写出的年月日，不从网页发布日期猜事件发生日。"""
+    """Use an explicit action date at the start or just after its named actor."""
     candidates = []
     for fact in distinct_facts(facts, limit=len(facts) or 1):
         if fact.get("origin_agent") == "history_insight":
             continue
         match = re.match(r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", fact["text"])
         if not match:
+            match = re.match(
+                r"^[^\d，。；;：:]{2,24}?(?:于|在)?\s*"
+                r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+                r"(?=\s*(?:发布|公布|通报|回应|宣布|召开|作出|启动|提交|披露))",
+                fact["text"],
+            )
+        if not match:
+            match = re.match(
+                r"^[^\d，。；;：:]{2,24}?(?:于|在)\s*"
+                r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+                r"(?=[^。；;]{0,40}(?:发布|公布|通报|回应|宣布|召开|作出|启动|提交|披露|判决|裁定|维持|撤销))",
+                fact["text"],
+            )
+        if not match:
             continue
         try:
             stamp = date(*(int(part) for part in match.groups())).isoformat()
         except ValueError:
             continue
-        if (date_from and stamp < date_from[:10]) or (date_to and stamp > date_to[:10]):
-            continue
+        window_label = (
+            "重点窗口前的本事件经过"
+            if date_from and stamp < date_from[:10]
+            else "重点窗口后的本事件进展"
+            if date_to and stamp > date_to[:10]
+            else None
+        )
         candidates.append(
             {
                 "date": stamp,
                 "text": fact["text"],
+                "window_label": window_label,
                 "claim_refs": [fact["claim_ref"]],
                 "evidence_refs": [c["evidence_ref"] for c in fact.get("citations", [])],
                 "badge": fact.get("badge", "unverified"),
@@ -57,7 +77,31 @@ def event_timeline(
             chosen.append(item)
             per_day[item["date"]] += 1
     chosen.sort(key=lambda item: item["date"])
-    return chosen if len(chosen) <= 12 else chosen[:4] + chosen[-8:]
+    return select_priority_timeline_nodes(chosen)
+
+
+def select_priority_timeline_nodes(items: list[dict], limit: int = 12) -> list[dict]:
+    """Keep the user's focus window visible when a long before/after history is shown."""
+    if len(items) <= limit:
+        return items
+    focused = [item for item in items if not item.get("window_label")]
+    if not focused:
+        return items[:4] + items[-(limit - 4) :]
+    if len(focused) >= limit:
+        return focused[:4] + focused[-(limit - 4) :]
+    before = [
+        item for item in items if item.get("window_label") and item["date"] < focused[0]["date"]
+    ]
+    after = [
+        item for item in items if item.get("window_label") and item["date"] > focused[-1]["date"]
+    ]
+    selected = list(focused)
+    while len(selected) < limit and (before or after):
+        if before:
+            selected.append(before.pop())
+        if after and len(selected) < limit:
+            selected.append(after.pop(0))
+    return sorted(selected, key=lambda item: item["date"])
 
 
 def _text(value: Any, limit: int = 600) -> str:
@@ -115,7 +159,12 @@ def report_context(
     )[:32]
     inventory = []
     for source in ordered:
-        content = source.content_text if source.fetch_status == "fetched" else source.snippet
+        content_origin = (getattr(source, "extra", None) or {}).get("content_origin")
+        content = (
+            source.content_text
+            if source.fetch_status == "fetched" or content_origin == "provider_fulltext"
+            else source.snippet
+        )
         content = content or ""
         sentences = re.split(r"(?<=[。！？\n])", content)
         measurements = [s.strip()[:220] for s in sentences if MEASUREMENT.search(s)][:2]
@@ -129,7 +178,8 @@ def report_context(
                 "source_role": source.source_role,
                 "published_at": source.published_at,
                 "fetch_status": source.fetch_status,
-                "excerpt": content[:350],
+                "content_origin": content_origin,
+                "excerpt": content[:2400],
                 "measurement_passages": measurements,
             }
         )
@@ -163,7 +213,11 @@ def report_context(
 
 
 def assemble_analysis(
-    enrichment: Any, facts: list[dict], evidence: Sequence[Any]
+    enrichment: Any,
+    facts: list[dict],
+    evidence: Sequence[Any],
+    *,
+    propagation_edges: int | None = None,
 ) -> tuple[dict, list[dict], dict]:
     """丢弃越权字段和失配引用；事实观察始终来自权威陈述，数字只能逐字来自原文。"""
     result = enrichment if isinstance(enrichment, dict) else {}
@@ -174,7 +228,9 @@ def assemble_analysis(
     rejected["authoritative_override"] = len(authoritative & result.keys())
     rejected += Counter()  # 去掉零值，报告只说明实际发生的拦截。
     selected = [fact_map[r] for r in _refs(result.get("summary_claim_refs")) if r in fact_map][:6]
-    selected = distinct_facts(selected or facts)
+    selected = distinct_facts(
+        [f for f in (selected or facts) if f.get("origin_agent") != "history_insight"]
+    )
     summary = {
         "what": [{"claim_ref": f["claim_ref"], "text": f["text"]} for f in selected],
         "why": [],
@@ -200,6 +256,7 @@ def assemble_analysis(
         if section == "06" and (
             len(refs) < 2
             or not any(fact_map[r].get("origin_agent") == "history_insight" for r in refs)
+            or not any(fact_map[r].get("origin_agent") != "history_insight" for r in refs)
         ):
             rejected["history_comparison_basis"] += 1
             continue
@@ -210,6 +267,13 @@ def assemble_analysis(
             fields[k] for k in ("title", "interpretation", "implication", "uncertainty")
         ) or (section == "07" and not all(fields[k] for k in ("action", "owner", "trigger"))):
             rejected["analysis_incomplete"] += 1
+            continue
+        if propagation_edges == 0 and re.search(
+            r"(?:争议|舆论|谣言|传闻|网传|不实信息|讨论).{0,12}"
+            r"(?:扩散|放大|升温|降温|收敛|转向|增加|减少)",
+            fields["interpretation"] + " " + fields["implication"],
+        ):
+            rejected["unsupported_propagation_effect"] += 1
             continue
         # 模型不能借“编辑判断”编新数值、比例或概率。连建议时限也用自然条件而非臆定数字。
         basis = "\n".join(fact_map[r]["text"] for r in refs)
@@ -250,6 +314,24 @@ def assemble_analysis(
                 "evidence_refs": requested or bound,
             }
         )
+    # If the dedicated action chapter fails review, reuse only actions already
+    # accepted with a substantive chapter. They retain the same evidence and
+    # uncertainty; this adds no fresh assertion or unreviewed recommendation.
+    if not sections["07"]:
+        for source_section in ("04", "05"):
+            for item in sections[source_section]:
+                if all(item.get(key) for key in ("action", "owner", "trigger")):
+                    sections["07"].append(
+                        {
+                            **item,
+                            "title": f"行动建议：{item['title']}",
+                            "derived_from_section": source_section,
+                        }
+                    )
+                if len(sections["07"]) >= 2:
+                    break
+            if sections["07"]:
+                break
     blocks = []
     for section, title in (
         ("04", "传播路径与回应缺口"),
@@ -257,7 +339,39 @@ def assemble_analysis(
         ("06", "历史案例的可比性与启示"),
         ("07", "决策重点与行动建议"),
     ):
-        if sections[section]:
+        if (
+            section == "07"
+            and sections[section]
+            and all(item.get("derived_from_section") for item in sections[section])
+        ):
+            blocks.append(
+                {
+                    "block_id": "b_07_action_plan",
+                    "type": "action_plan",
+                    "section": "07",
+                    "in_brief": True,
+                    "title": "据已审分析形成的行动清单",
+                    "is_editorial": True,
+                    "editorial_basis": "仅提取第 04 或 05 章已通过审查的行动、负责职能、触发条件与不确定性，不新增事实判断",
+                    "items": [
+                        {
+                            key: item[key]
+                            for key in (
+                                "title",
+                                "action",
+                                "owner",
+                                "trigger",
+                                "uncertainty",
+                                "claim_refs",
+                                "evidence_refs",
+                                "derived_from_section",
+                            )
+                        }
+                        for item in sections[section]
+                    ],
+                }
+            )
+        elif sections[section]:
             blocks.append(
                 {
                     "block_id": f"b_{section}_analysis",
@@ -278,7 +392,7 @@ def assemble_analysis(
             "uncertainty": item["uncertainty"],
             "is_editorial": True,
         }
-        for section in ("04", "05")
+        for section in (("04", "05") if sections["04"] or sections["05"] else ("07",))
         for item in sections[section]
     ][:4]
     summary["so_what"] = [
@@ -293,7 +407,7 @@ def assemble_analysis(
     ][:4]
     metric_items = []
     measures = result.get("measurements", [])
-    metric_seen = set()
+    metric_seen: dict[tuple, dict] = {}
     for item in measures[:8] if isinstance(measures, list) else []:
         if not isinstance(item, dict):
             rejected["measurement_shape"] += 1
@@ -326,10 +440,17 @@ def assemble_analysis(
         ):
             rejected["measurement_not_grounded"] += 1
             continue
-        key = (source.publisher_entity or source.source_domain, value, label)
+        if label == value:
+            prefix = re.split(r"[。；！？]", quote[: quote.index(value)])[-1].strip(" ，、：")
+            if prefix:
+                label = prefix[-48:]
+        # Same disclosure can be syndicated under different publishers. Only merge
+        # identical passages bound to overlapping facts; equal numbers alone are not enough.
+        key = (re.sub(r"\s+", "", quote), value, label, tuple(sorted(linked)))
         if key in metric_seen:
+            previous = metric_seen[key]
+            previous["evidence_refs"] = list(dict.fromkeys([*previous["evidence_refs"], ref]))
             continue
-        metric_seen.add(key)
         metric_items.append(
             {
                 "label": label,
@@ -346,15 +467,16 @@ def assemble_analysis(
                 "verification_note": "来源披露值，已与取得的原文逐字匹配；未独立复算，不代表全网总体，不可跨来源直接相加",
             }
         )
+        metric_seen[key] = metric_items[-1]
     if metric_items:
         blocks.insert(
             0,
             {
                 "block_id": "b_04_measurements",
                 "type": "metric_cards",
-                "section": "04",
-                "in_brief": True,
-                "title": "与事件相关的来源披露数据",
+                "section": "03",
+                "in_brief": False,
+                "title": "事件事实中的来源披露数据",
                 "data_basis": "quoted_evidence",
                 "items": metric_items,
             },

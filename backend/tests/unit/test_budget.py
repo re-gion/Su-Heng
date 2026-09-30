@@ -20,6 +20,15 @@ def test_three_depths_are_present_and_monotonic():
         assert values == sorted(values), f"{field} 未随档位递增：{values}"
 
 
+def test_default_budgets_cover_observed_standard_runs_and_history_fetches():
+    assert [DEFAULT_BUDGET_TABLE[d].token_limit for d in ("quick", "standard", "deep")] == [
+        300_000,
+        1_400_000,
+        2_000_000,
+    ]
+    assert DEFAULT_BUDGET_TABLE["standard"].fetch_calls > 45
+
+
 @pytest.mark.parametrize("depth", ["quick", "standard", "deep"])
 def test_verify_budget_tracks_the_claim_cap(depth):
     budget = DEFAULT_BUDGET_TABLE[depth]

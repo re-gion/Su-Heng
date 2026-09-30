@@ -1,6 +1,8 @@
 import copy
 import json
+import re
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
@@ -119,6 +121,16 @@ def test_reference_fixture_passes_contract_and_renders_clickable_citations():
     assert "matchMedia('(max-width:900px)')" in html
     assert "link.addEventListener('click',()=>activate(link.dataset.sectionTarget))" in html
     assert "threshold:0" in html
+    assert 'class="back-to-top" type="button" aria-label="返回顶部"' in html
+    assert "window.scrollTo({top:0,behavior:" in html
+    assert ".back-to-top{display:none!important}" in html
+
+    # 导出的单文件必须包含实际字标与 favicon，脱离服务后仍可显示。
+    for encoded in re.findall(r'(?:src|href)="data:image/svg\+xml,([^"]+)"', html):
+        assert "<svg" in unquote(encoded)
+    assert 'class="report-brand"' in html
+    assert 'alt="溯衡"' in html
+    assert html.count("data:image/svg+xml,") == 2
 
 
 def test_incomplete_verification_is_shown_apart_from_unsupported_evidence():
@@ -180,7 +192,7 @@ def test_funnel_renders_zero_as_zero_instead_of_blank():
 
 @pytest.mark.parametrize(
     ("schema_version", "min_reader_minor"),
-    [("0.6", 6), ("1.0", 0)],
+    [("0.9", 9), ("1.0", 0)],
 )
 def test_incompatible_ir_versions_fail_clearly(schema_version, min_reader_minor):
     report = load_fixture()
@@ -209,8 +221,8 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
 
     migrated = migrate_report(report)
 
-    assert migrated["schema_version"] == "0.5"
-    assert migrated["min_reader_minor"] == 5
+    assert migrated["schema_version"] == "0.8"
+    assert migrated["min_reader_minor"] == 8
     card = next(
         card
         for block in migrated["blocks"]
@@ -221,7 +233,15 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
     assert card["comparison"] == "旧版对照内容"
     assert card["evidence_refs"] == ["E001"]
     assert card["provenance"] == "历史报告迁移"
-    assert migrated["migration_history"] == ["0.1->0.2", "0.2->0.3", "0.3->0.4", "0.4->0.5"]
+    assert migrated["migration_history"] == [
+        "0.1->0.2",
+        "0.2->0.3",
+        "0.3->0.4",
+        "0.4->0.5",
+        "0.5->0.6",
+        "0.6->0.7",
+        "0.7->0.8",
+    ]
 
 
 def test_v03_report_migrates_to_reader_that_understands_analytical_blocks():
@@ -231,9 +251,15 @@ def test_v03_report_migrates_to_reader_that_understands_analytical_blocks():
 
     migrated = migrate_report(report)
 
-    assert migrated["schema_version"] == "0.5"
-    assert migrated["min_reader_minor"] == 5
-    assert migrated["migration_history"] == ["0.3->0.4", "0.4->0.5"]
+    assert migrated["schema_version"] == "0.8"
+    assert migrated["min_reader_minor"] == 8
+    assert migrated["migration_history"] == [
+        "0.3->0.4",
+        "0.4->0.5",
+        "0.5->0.6",
+        "0.6->0.7",
+        "0.7->0.8",
+    ]
 
 
 def test_unknown_report_ir_is_rejected_instead_of_silently_rendered():
@@ -279,3 +305,142 @@ def test_negative_contract_cases_are_rejected(mutate):
     mutate(report)
     with pytest.raises(ReportValidationError):
         validate_report(report)
+
+
+def test_new_analysis_blocks_are_visible_in_full_html():
+    report = copy.deepcopy(load_fixture())
+    report["blocks"].extend(
+        [
+            {
+                "block_id": "relationship",
+                "type": "propagation_network",
+                "section": "04",
+                "title": "媒体发布与回应关系",
+                "nodes": [],
+                "edges": [],
+                "fallback_text": "尚未取得可核实的关系边。",
+            },
+            {
+                "block_id": "history_basis",
+                "type": "historical_facts",
+                "section": "06",
+                "title": "历史案例依据",
+                "items": [block(report, "fact_check_table")["items"][0]],
+            },
+            {
+                "block_id": "action_plan",
+                "type": "action_plan",
+                "section": "07",
+                "title": "行动清单",
+                "items": [
+                    {
+                        "title": "核对公开通报",
+                        "action": "复核原文",
+                        "owner": "调查人员",
+                        "trigger": "取得原文后",
+                        "uncertainty": "当前仅有摘要",
+                        "evidence_refs": ["E001"],
+                    }
+                ],
+            },
+        ]
+    )
+    html = render_html(report, view="full")
+    assert 'id="relationship"' in html
+    assert 'id="history-facts"' in html
+    assert 'id="action_plan"' in html
+    assert 'id="report-section-07"' in html
+
+
+def test_history_cards_are_deduplicated_when_rendering_an_old_report():
+    report = copy.deepcopy(load_fixture())
+    report["blocks"].append(
+        {
+            "block_id": "history-cases",
+            "type": "history_compare",
+            "section": "06",
+            "cards": [
+                {
+                    "event_name": "同一历史事件",
+                    "case_type": "analogous",
+                    "evidence_refs": ["E001"],
+                    "summary": "简述",
+                },
+                {
+                    "event_name": "同一历史事件",
+                    "case_type": "analogous",
+                    "evidence_refs": ["E002"],
+                    "summary": "更完整的简述",
+                },
+            ],
+        }
+    )
+
+    html = render_html(report, view="full")
+
+    assert html.count("<h3>同一历史事件</h3>") == 1
+    assert 'href="#evidence-E001"' in html
+    assert 'href="#evidence-E002"' in html
+
+
+def test_direct_single_source_support_is_explained_without_upgrading_verdict():
+    report = copy.deepcopy(load_fixture())
+    item = block(report, "fact_check_table")["items"][0]
+    item.update(
+        badge="unverified",
+        verification_state="complete",
+        independent_sources=1,
+        evidence_grade="fulltext",
+    )
+    item["citations"][0]["relation"] = "support"
+
+    html = render_html(report, view="full")
+
+    assert "原文直接支持（单源）" in html
+    assert 'class="badge single_source_supported"' in html
+
+    item["verification_state"] = "incomplete"
+    assert 'class="badge single_source_supported"' not in render_html(report, view="full")
+    item["verification_state"] = "complete"
+    item["badge"] = "verified"  # 裁判性官方单源等旧结论保持数据库原徽章。
+    assert 'class="badge verified"' in render_html(report, view="full")
+
+
+def test_comment_platform_markup_is_readable_and_raw_text_remains_auditable():
+    report = copy.deepcopy(load_fixture())
+    raw = '谢谢<img alt="[太开心]" src="https://face.example/long-file-name.png" />'
+    report["blocks"].append(
+        {
+            "block_id": "comments",
+            "type": "comment_insight",
+            "section": "05",
+            "sample_notice": "仅限样本",
+            "warnings": ["部分主题曾失败", "部分主题曾失败"],
+            "diagnostics": [
+                {
+                    "stage": "comment_classification",
+                    "status": 400,
+                    "message": "请求参数不受支持",
+                    "batch": "batch-1",
+                }
+            ],
+            "items": [
+                {
+                    "title": "表达方式",
+                    "sample_count": 1,
+                    "platform_counts": {"weibo": 1},
+                    "text": "表达方式存在差异。",
+                    "quotes": [{"id": "M1", "text": raw, "platform": "weibo"}],
+                    "evidence_refs": ["E001"],
+                }
+            ],
+            "samples": [{"id": "M1", "text": raw, "platform": "weibo", "evidence_ref": "E001"}],
+        }
+    )
+    html = render_html(report, view="full")
+    assert "谢谢[太开心]" in html
+    assert "查看采集原文标记" in html
+    assert html.count("部分主题曾失败") == 1
+    assert "逐条分类 · HTTP 400" in html
+    assert "调用诊断（已脱敏）" in html
+    assert "&lt;img alt=&quot;[太开心]&quot;" in html

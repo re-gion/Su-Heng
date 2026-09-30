@@ -37,3 +37,8 @@
   padding: 3px 6px;
   background: #155b73;
 }
+.scope-confirmation{grid-column:2/-1;padding:18px;border:1px solid #ba9b55;border-left:5px solid #b37b18;background:#fff7e4;color:#49360f}
+.scope-confirmation h3{margin:0 0 8px;font-size:18px}
+.scope-confirmation p{margin:7px 0;line-height:1.6}
+.scope-confirmation>div{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+@media(max-width:700px){.scope-confirmation{grid-column:1/-1}}

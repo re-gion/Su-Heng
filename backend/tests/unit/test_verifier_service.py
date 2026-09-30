@@ -4,6 +4,7 @@ from yuqing.services.verifier import (
     UPSTREAM_FAILURE_NOTE,
     ClaimVerifierService,
     VerificationRelation,
+    _cited_span,
 )
 from yuqing.storage.db import Database
 from yuqing.storage.models import ClaimCreate, EvidenceCreate, TaskCreate
@@ -22,6 +23,12 @@ class EmptyThenValidVerifier:
             reason="fixture",
             cited_sentence="" if self.calls == 1 else evidence.snippet,
         )
+
+
+def test_cited_span_restores_source_layout_without_changing_characters():
+    material = "通报称：\n学校已成立工作组，对整个事件进行调查。"
+    assert _cited_span(material, "通报称：学校已成立工作组，对整个事件进行调查。") == material
+    assert _cited_span(material, "通报称：学校已成立工作组并完成调查。") is None
 
 
 @pytest.mark.asyncio

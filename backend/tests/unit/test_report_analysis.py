@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from yuqing.agents.reporter import OpenAIReportAgent
+from yuqing.core.llm.gateway import LLMOutputTruncated
 from yuqing.services.full_report import FullReportBuilder
 from yuqing.services.historical_data import HotSnapshotPoint
 from yuqing.services.report_analysis import (
@@ -12,6 +13,7 @@ from yuqing.services.report_analysis import (
     deduplicate_limitations,
     event_timeline,
     report_context,
+    select_priority_timeline_nodes,
 )
 
 
@@ -61,6 +63,23 @@ def inputs():
         [source],
         {"summary_claim_refs": ["C001"], "analyses": [analysis], "measurements": [measurement]},
     )
+
+
+def test_long_timeline_keeps_user_focus_and_surrounding_context():
+    items = [
+        {"date": f"2024-{month:02d}-01", "window_label": "重点窗口前的本事件经过"}
+        for month in range(1, 5)
+    ]
+    items += [{"date": f"2025-{month:02d}-01", "window_label": None} for month in (6, 7)]
+    items += [
+        {"date": f"2026-{month:02d}-01", "window_label": "重点窗口后的本事件进展"}
+        for month in range(1, 9)
+    ]
+    selected = select_priority_timeline_nodes(items)
+    assert len(selected) == 12
+    assert {"2025-06-01", "2025-07-01"} <= {item["date"] for item in selected}
+    assert any(item["window_label"] == "重点窗口前的本事件经过" for item in selected)
+    assert any(item["window_label"] == "重点窗口后的本事件进展" for item in selected)
 
 
 def test_observation_and_measurement_are_grounded_and_unverified_is_visible():
@@ -159,7 +178,7 @@ async def test_live_report_agent_requires_semantic_review_and_fails_closed():
     result = await OpenAIReportAgent(gateway, "system").enrich(
         report_context({}, facts, sources, [])
     )
-    assert gateway.roles.count("reporter") == 4
+    assert gateway.roles.count("reporter") == 3
     assert gateway.roles.count("verifier") == 1
     assert result["analyses"] == []
     assert result["measurements"]
@@ -183,11 +202,132 @@ async def test_empty_reporter_json_is_rejected_for_each_chapter():
     result = await OpenAIReportAgent(gateway, "system").enrich(
         report_context({}, facts, sources, [])
     )
-    assert gateway.roles == ["reporter"] * 4
+    assert gateway.roles == ["reporter"] * 3
     assert result["analyses"] == []
-    assert result["analysis_review"]["status"] == "not_required"
-    assert len(result["section_warnings"]) == 4
+    assert result["analysis_review"]["status"] == "unavailable"
+    assert len(result["section_warnings"]) == 3
     assert all("ValueError" in warning for warning in result["section_warnings"])
+
+
+@pytest.mark.asyncio
+async def test_reporter_prioritizes_actions_and_bounds_each_chapter_context():
+    class Gateway:
+        def __init__(self):
+            self.prompts = []
+
+        async def complete_json(self, role, _system, user, **_kwargs):
+            assert role == "reporter"
+            self.prompts.append(user)
+            return {"analyses": [], "summary_claim_refs": [], "measurements": []}
+
+    gateway = Gateway()
+    context = {
+        "task": {"event_query": "机构公开事件"},
+        "facts": [
+            {
+                "claim_ref": f"C{i:03d}",
+                "text": "机构在通报中说明处置决定。",
+                "badge": "verified" if i == 1 else "unverified",
+                "verification_state": "complete",
+                "origin_agent": "fact_investigator",
+                "citations": [{"evidence_ref": f"E{i:03d}", "relation": "support"}],
+            }
+            for i in range(1, 33)
+        ],
+        "sources": [
+            {"evidence_ref": f"E{i:03d}", "excerpt": "公开通报正文" * 300} for i in range(1, 33)
+        ],
+        "open_questions": ["处置进度需持续核查。"],
+    }
+
+    await OpenAIReportAgent(gateway, "system").enrich(context)
+
+    assert "第07章" in gateway.prompts[0]
+    assert all(len(prompt) < 25_000 for prompt in gateway.prompts)
+
+
+@pytest.mark.asyncio
+async def test_truncated_action_chapter_retries_with_smaller_context():
+    facts, sources, draft = inputs()
+    prompts = []
+
+    class Gateway:
+        async def complete_json(self, role, _system, user, **_kwargs):
+            if role == "verifier":
+                return {"accepted_indexes": [0], "rejections": []}
+            if "第07章" in user:
+                prompts.append(user)
+                if len(prompts) == 1:
+                    raise LLMOutputTruncated("模型输出达到长度上限")
+                return copy.deepcopy(draft)
+            return {"analyses": [], "summary_claim_refs": [], "measurements": []}
+
+    context = report_context({}, facts, sources, [])
+    context["sources"][0]["excerpt"] *= 100
+    result = await OpenAIReportAgent(Gateway(), "system").enrich(context)
+    assert len(prompts) == 2
+    assert len(prompts[1]) < len(prompts[0])
+    assert result["analyses"]
+    assert not any("07" in warning for warning in result["section_warnings"])
+
+
+@pytest.mark.asyncio
+async def test_reporter_rejects_claim_that_full_source_lacks_text_when_only_preview_is_given():
+    class Gateway:
+        async def complete_json(self, *_args, **_kwargs):
+            raise AssertionError("确定性拒绝后不应调用模型审查")
+
+    result = await OpenAIReportAgent(Gateway(), "system")._review(
+        {
+            "facts": [{"claim_ref": "C001", "text": "校方公布调查进度。"}],
+            "sources": [
+                {"evidence_ref": "E001", "excerpt": "通报前段", "excerpt_is_preview": True}
+            ],
+        },
+        {
+            "analyses": [
+                {
+                    "section": "07",
+                    "title": "通报节选未含最终结论",
+                    "claim_refs": ["C001"],
+                    "interpretation": "原网页缺少复核结论。",
+                }
+            ]
+        },
+    )
+
+    assert result["analyses"] == []
+    assert result["analysis_review"]["rejected"] == 1
+    assert "预览" in result["analysis_review"]["reasons"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_reporter_does_not_turn_internal_preview_into_external_action():
+    class Gateway:
+        async def complete_json(self, *_args, **_kwargs):
+            raise AssertionError("确定性拒绝后不应调用模型审查")
+
+    result = await OpenAIReportAgent(Gateway(), "system")._review(
+        {
+            "facts": [{"claim_ref": "C001", "text": "校方公布调查进度。"}],
+            "sources": [
+                {"evidence_ref": "E001", "excerpt": "通报前段", "excerpt_is_preview": True}
+            ],
+        },
+        {
+            "analyses": [
+                {
+                    "section": "07",
+                    "title": "核对公开材料",
+                    "claim_refs": ["C001"],
+                    "action": "要求校方核对通报全文与本报告预览的差异。",
+                    "uncertainty": "本报告抓取的文本是预览节选。",
+                }
+            ]
+        },
+    )
+    assert result["analyses"] == []
+    assert result["analysis_review"]["rejected"] == 1
 
 
 @pytest.mark.asyncio
@@ -466,3 +606,61 @@ def test_event_timeline_requires_explicit_valid_start_date_and_excludes_history(
     ]
     assert timeline[0]["claim_refs"] == ["C001"]
     assert timeline[-1]["evidence_refs"] == ["E015"]
+
+
+def test_event_timeline_keeps_same_event_outside_priority_window_with_labels():
+    facts = [
+        {
+            "claim_ref": f"C{index:03d}",
+            "text": f"2025年{month}月1日，机构公布本事件的第{index}阶段结果。",
+            "origin_agent": "fact_investigator",
+            "badge": "verified",
+            "citations": [{"evidence_ref": f"E{index:03d}"}],
+        }
+        for index, month in enumerate((5, 7, 9), start=1)
+    ]
+    timeline = event_timeline(facts, date_from="2025-07-01", date_to="2025-07-31")
+    assert [item["date"] for item in timeline] == ["2025-05-01", "2025-07-01", "2025-09-01"]
+    assert [item["window_label"] for item in timeline] == [
+        "重点窗口前的本事件经过",
+        None,
+        "重点窗口后的本事件进展",
+    ]
+
+
+def test_event_timeline_reads_dated_institution_action_after_actor_name():
+    facts = [
+        {
+            "claim_ref": "C001",
+            "text": "2023年10月11日，学校成立工作组调查该事件。",
+            "origin_agent": "fact_investigator",
+            "badge": "unverified",
+            "citations": [{"evidence_ref": "E001"}],
+        },
+        {
+            "claim_ref": "C002",
+            "text": "武汉大学2025年9月20日通报称，复核发现论文存在规范问题。",
+            "origin_agent": "fact_investigator",
+            "badge": "verified",
+            "citations": [{"evidence_ref": "E002"}],
+        },
+        {
+            "claim_ref": "C003",
+            "text": "事件后来持续受到关注；2025年9月21日网页发布。",
+            "origin_agent": "fact_investigator",
+            "badge": "unverified",
+            "citations": [{"evidence_ref": "E003"}],
+        },
+        {
+            "claim_ref": "C004",
+            "text": "武汉市中级人民法院于2025年9月17日就该案二审判决维持一审判决。",
+            "origin_agent": "fact_investigator",
+            "badge": "verified",
+            "citations": [{"evidence_ref": "E004"}],
+        },
+    ]
+    assert [item["date"] for item in event_timeline(facts)] == [
+        "2023-10-11",
+        "2025-09-17",
+        "2025-09-20",
+    ]

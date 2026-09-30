@@ -3,8 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = "0.5"
-CURRENT_READER_MINOR = 5
+CURRENT_SCHEMA_VERSION = "0.8"
+CURRENT_READER_MINOR = 8
 
 
 class UnsupportedReportVersion(ValueError):
@@ -18,7 +18,7 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
     version = str(value.get("schema_version") or "")
     if version == CURRENT_SCHEMA_VERSION:
         return value
-    if version not in {"0.1", "0.2", "0.3", "0.4"}:
+    if version not in {"0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7"}:
         raise UnsupportedReportVersion(f"不支持报告 IR {version or 'unknown'}")
     history = list(value.get("migration_history") or [])
     if version == "0.1":
@@ -42,8 +42,20 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
         version = "0.3"
     if version == "0.3" and "0.3->0.4" not in history:
         history.append("0.3->0.4")
-    if "0.4->0.5" not in history:
+    if version not in {"0.5", "0.6", "0.7"} and "0.4->0.5" not in history:
         history.append("0.4->0.5")
+    if version not in {"0.6", "0.7"} and "0.5->0.6" not in history:
+        history.append("0.5->0.6")
+    if version != "0.7":
+        history.append("0.6->0.7")
+    history.append("0.7->0.8")
+    quality = value.setdefault("quality", {})
+    quality.setdefault("chapter_status", {})
+    quality.setdefault("scope_review", {"status": "unknown", "message": "旧报告未记录逐项范围审查"})
+    quality.setdefault("call_diagnostics", {"recorded_requests": 0, "recorded_tokens": None})
+    quality.setdefault(
+        "investigation_outcome", {"end_reason": "unknown", "message": "旧报告未记录调查结束原因"}
+    )
     value["schema_version"] = CURRENT_SCHEMA_VERSION
     value["min_reader_minor"] = CURRENT_READER_MINOR
     value["migration_history"] = history

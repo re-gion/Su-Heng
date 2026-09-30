@@ -1,4 +1,6 @@
 import json
+from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -6,6 +8,7 @@ import pytest
 from yuqing.core.search.base import SearchParams, SearchResult
 from yuqing.core.search.chain import SearchChain, SearchChainExhausted
 from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
+from yuqing.services.investigation_scope import InvestigationScope
 
 
 class Provider:
@@ -33,6 +36,24 @@ class SequenceClient:
         response = self.responses[self.calls]
         self.calls += 1
         return response
+
+
+def test_chinese_search_uses_exa_before_limited_domestic_backups():
+    chain = SearchChain(
+        [
+            Provider(name, result=[])
+            for name in ("langsearch", "exa", "qianfan", "bocha", "tavily", "serper")
+        ]
+    )
+
+    assert [
+        provider.name
+        for provider in chain.providers_for(SearchParams(query="武汉大学图书馆事件", lang="zh"))
+    ] == ["langsearch", "exa", "qianfan", "bocha"]
+    assert [
+        provider.name
+        for provider in chain.providers_for(SearchParams(query="campus case", lang="en"))
+    ] == ["exa", "tavily", "serper"]
 
 
 @pytest.mark.asyncio
@@ -126,7 +147,63 @@ async def test_search_chain_falls_back_and_exposes_degradation():
     assert result[0].provider == "fallback"
     assert chain.last_provider == "fallback"
     assert chain.last_degraded_from == "primary"
+    assert chain.last_continued_from == "primary"
     assert chain.statuses()[0]["breaker"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_search_chain_default_breaker_recovers_after_15_seconds(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(
+        "yuqing.core.search.chain.time",
+        SimpleNamespace(monotonic=lambda: now[0]),
+    )
+    primary = Provider("primary", error=RuntimeError("temporary"))
+    fallback = Provider("fallback", result=[])
+    chain = SearchChain([primary, fallback], failure_threshold=1)
+
+    await chain.search(SearchParams(query="第一次"))
+    assert chain.statuses()[0]["breaker"] == "open"
+
+    now[0] = 114.9
+    await chain.search(SearchParams(query="等待期间"))
+    assert primary.calls == 1
+    assert chain.last_diagnostics[0]["reason"] == "breaker_open"
+
+    now[0] = 115.0
+    primary.error = None
+    primary.result = []
+    await chain.search(SearchParams(query="恢复后"))
+    assert primary.calls == 2
+    assert chain.statuses()[0]["breaker"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_search_chain_treats_local_quota_guard_as_policy_not_provider_failure():
+    class LocalQuotaGuard(RuntimeError):
+        kind = "local_quota_guard"
+
+    primary = Provider("primary", error=LocalQuotaGuard("本地常规额度保护线已到达"))
+    fallback = Provider(
+        "fallback",
+        result=[
+            SearchResult(
+                url="https://example.com",
+                title="结果",
+                snippet="摘要",
+                provider="fallback",
+            )
+        ],
+    )
+    chain = SearchChain([primary, fallback], failure_threshold=1)
+
+    result = await chain.search(SearchParams(query="测试"))
+
+    assert result[0].provider == "fallback"
+    assert chain.last_degraded_from is None
+    assert chain.last_continued_from == "primary"
+    assert chain.last_diagnostics[0]["reason"] == "local_quota_guard"
+    assert chain.statuses()[0]["breaker"] == "closed"
 
 
 @pytest.mark.asyncio
@@ -160,7 +237,451 @@ async def test_search_chain_enforces_domain_filter_and_tries_next_provider():
     assert [item.url for item in results] == ["https://www.bilibili.com/video/BV1xx411c7mD"]
     assert primary.calls == fallback.calls == 1
     assert chain.last_provider == "fallback"
-    assert chain.last_degraded_from == "primary"
+    assert chain.last_degraded_from is None
+    assert chain.last_continued_from == "primary"
+
+
+@pytest.mark.asyncio
+async def test_search_chain_tries_next_provider_when_caller_rejects_irrelevant_results():
+    primary = Provider(
+        "primary",
+        result=[
+            SearchResult(
+                url="https://example.cn/unrelated",
+                title="同一机构的无关页面",
+                snippet="不含具体事件语义",
+                provider="primary",
+            )
+        ],
+    )
+    fallback = Provider(
+        "fallback",
+        result=[
+            SearchResult(
+                url="https://example.cn/relevant",
+                title="具体事件调查复核通报",
+                snippet="包含具体事件语义",
+                provider="fallback",
+            )
+        ],
+    )
+    chain = SearchChain([primary, fallback])
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件"),
+        lambda item: "调查复核" in item.title,
+    )
+
+    assert [item.provider for item in results] == ["fallback"]
+    assert primary.calls == fallback.calls == 1
+    assert chain.last_provider == "fallback"
+    assert chain.last_degraded_from is None
+    assert chain.last_continued_from == "primary"
+    assert chain.last_diagnostics[0]["status"] == "relevance_filtered_empty"
+
+
+@pytest.mark.asyncio
+async def test_search_chain_counts_fallback_requests_against_task_budget():
+    primary = Provider("langsearch", result=[])
+    fallback = Provider("qianfan", result=[])
+    chain = SearchChain([primary, fallback])
+    reservations = 0
+
+    async def reserve():
+        nonlocal reservations
+        if reservations >= 1:
+            return False
+        reservations += 1
+        return True
+
+    result = await chain.search_filtered(
+        SearchParams(query="具体事件"), lambda _: True, before_call=reserve
+    )
+
+    assert result == []
+    assert primary.calls == 1
+    assert fallback.calls == 0
+    assert reservations == 1
+    assert chain.last_diagnostics[-1]["status"] == "budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_chinese_event_reaches_exa_without_spending_qianfan():
+    free = Provider(
+        "langsearch",
+        result=[
+            SearchResult(
+                url="https://zh.wikipedia.org/wiki/example-history-dispute",
+                title="武汉大学校史争议",
+                snippet="武汉大学校方回应称，校舍和图书资料的继承有大量史实。",
+                provider="langsearch",
+                lang="zh",
+            )
+        ],
+    )
+    exa = Provider(
+        "exa",
+        result=[
+            SearchResult(
+                url="https://www.news.cn/politics/20250920/report.html",
+                title="武大通报图书馆事件调查复核情况",
+                snippet="武汉大学通报图书馆事件调查复核情况。",
+                provider="exa",
+                lang="zh",
+            )
+        ],
+    )
+    limited = Provider("qianfan", result=[])
+    scope = InvestigationScope(
+        event_query="武汉大学通报图书馆事件调查复核情况",
+        languages=("zh",),
+        source_scope="domestic",
+    )
+    chain = SearchChain([free, exa, limited])
+
+    results = await chain.search_filtered(
+        SearchParams(query="武汉大学 图书馆事件 调查复核 官方通报", lang="zh"),
+        lambda item: scope.classify_result(item, agent="fact_investigator").accepted,
+    )
+
+    assert [item.provider for item in results] == ["exa"]
+    assert (free.calls, exa.calls, limited.calls) == (1, 1, 0)
+    assert chain.last_diagnostics[0]["status"] == "relevance_filtered_empty"
+
+
+@pytest.mark.asyncio
+async def test_langsearch_one_source_is_supplemented_by_exa_without_spending_qianfan():
+    langsearch = Provider(
+        "langsearch",
+        result=[
+            SearchResult(
+                url=f"https://www.zaobao.com.sg/story-{index}",
+                title=f"事件报道 {index}",
+                snippet="与事件相关",
+                provider="langsearch",
+            )
+            for index in (1, 2)
+        ],
+    )
+    exa = Provider(
+        "exa",
+        result=[
+            SearchResult(
+                url="https://www.zaobao.com.sg/story-1",
+                title="重复报道",
+                snippet="与事件相关",
+                provider="exa",
+            ),
+            SearchResult(
+                url="https://www.news.cn/event-report",
+                title="另一来源的报道",
+                snippet="与事件相关",
+                provider="exa",
+            ),
+        ],
+    )
+    qianfan = Provider("qianfan", result=[])
+    chain = SearchChain([langsearch, exa, qianfan])
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件", top_k=2, lang="zh"),
+        lambda item: True,
+        min_source_groups=2,
+        source_group=lambda item: (urlsplit(item.url).hostname or "").removeprefix("www."),
+    )
+
+    assert [item.url for item in results] == [
+        "https://www.zaobao.com.sg/story-1",
+        "https://www.news.cn/event-report",
+    ]
+    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 1, 0)
+    assert [item["status"] for item in chain.last_diagnostics] == [
+        "insufficient_coverage",
+        "success",
+    ]
+    assert chain.last_continued_from == "langsearch"
+
+
+@pytest.mark.asyncio
+async def test_langsearch_diverse_sources_do_not_spend_exa():
+    langsearch = Provider(
+        "langsearch",
+        result=[
+            SearchResult(
+                url=f"https://{host}/report",
+                title="相关报道",
+                snippet="与事件相关",
+                provider="langsearch",
+            )
+            for host in ("news.cn", "people.com.cn")
+        ],
+    )
+    exa = Provider("exa", result=[])
+    chain = SearchChain([langsearch, exa])
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件", lang="zh"),
+        lambda item: True,
+        min_source_groups=2,
+        source_group=lambda item: urlsplit(item.url).hostname or "",
+    )
+
+    assert len(results) == 2
+    assert (langsearch.calls, exa.calls) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_exa_budget_exhaustion_preserves_langsearch_lead():
+    langsearch = Provider(
+        "langsearch",
+        result=[
+            SearchResult(
+                url="https://www.zaobao.com.sg/story-1",
+                title="事件报道",
+                snippet="与事件相关",
+                provider="langsearch",
+            )
+        ],
+    )
+    exa = Provider("exa", result=[])
+    qianfan = Provider("qianfan", result=[])
+    chain = SearchChain([langsearch, exa, qianfan])
+    reservations = 0
+
+    async def reserve():
+        nonlocal reservations
+        reservations += 1
+        return reservations <= 1
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件", lang="zh"),
+        lambda item: True,
+        before_call=reserve,
+        min_source_groups=2,
+        source_group=lambda item: urlsplit(item.url).hostname or "",
+    )
+
+    assert [item.provider for item in results] == ["langsearch"]
+    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 0, 0)
+    assert chain.last_diagnostics[-1]["status"] == "budget_exhausted"
+    assert chain.last_provider == "langsearch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exa_error", [False, True])
+async def test_exa_without_new_material_tries_limited_api_and_keeps_langsearch(exa_error):
+    langsearch = Provider(
+        "langsearch",
+        result=[
+            SearchResult(
+                url="https://www.zaobao.com.sg/story-1",
+                title="事件报道",
+                snippet="与事件相关",
+                provider="langsearch",
+            )
+        ],
+    )
+    exa = Provider("exa", result=[], error=RuntimeError("temporary") if exa_error else None)
+    qianfan = Provider("qianfan", result=[])
+    chain = SearchChain([langsearch, exa, qianfan])
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件", lang="zh"),
+        lambda item: True,
+        min_source_groups=2,
+    )
+
+    assert [item.provider for item in results] == ["langsearch"]
+    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 1, 1)
+    assert chain.last_provider == "langsearch"
+
+
+@pytest.mark.asyncio
+async def test_chinese_sparse_sources_use_qianfan_then_stop_before_bocha():
+    langsearch = Provider(
+        "langsearch",
+        result=[
+            SearchResult(
+                url="https://news.cn/event",
+                title="事件报道",
+                snippet="与事件相关",
+                provider="langsearch",
+            )
+        ],
+    )
+    exa = Provider(
+        "exa",
+        result=[
+            SearchResult(
+                url="https://news.cn/event",
+                title="重复报道",
+                snippet="与事件相关",
+                provider="exa",
+            )
+        ],
+    )
+    qianfan = Provider(
+        "qianfan",
+        result=[
+            SearchResult(
+                url="https://people.com.cn/event",
+                title="另一发布主体的报道",
+                snippet="与事件相关",
+                provider="qianfan",
+            )
+        ],
+    )
+    bocha = Provider("bocha", result=[])
+    chain = SearchChain([langsearch, exa, qianfan, bocha])
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件", lang="zh"),
+        lambda item: True,
+        min_source_groups=2,
+        source_group=lambda item: urlsplit(item.url).hostname or "",
+    )
+
+    assert [item.provider for item in results] == ["langsearch", "qianfan"]
+    assert (langsearch.calls, exa.calls, qianfan.calls, bocha.calls) == (1, 1, 1, 0)
+    assert [item["status"] for item in chain.last_diagnostics] == [
+        "insufficient_coverage",
+        "insufficient_coverage",
+        "success",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chinese_sparse_sources_reach_bocha_with_task_budget():
+    langsearch = Provider("langsearch", result=[])
+    exa = Provider(
+        "exa",
+        result=[
+            SearchResult(
+                url="https://news.cn/event",
+                title="事件报道",
+                snippet="与事件相关",
+                provider="exa",
+            )
+        ],
+    )
+    qianfan = Provider("qianfan", result=[])
+    bocha = Provider(
+        "bocha",
+        result=[
+            SearchResult(
+                url="https://people.com.cn/event",
+                title="另一发布主体的报道",
+                snippet="与事件相关",
+                provider="bocha",
+            )
+        ],
+    )
+    chain = SearchChain([langsearch, exa, qianfan, bocha])
+    reservations = 0
+
+    async def reserve():
+        nonlocal reservations
+        reservations += 1
+        return True
+
+    results = await chain.search_filtered(
+        SearchParams(query="具体事件", lang="zh"),
+        lambda item: True,
+        before_call=reserve,
+        min_source_groups=2,
+        source_group=lambda item: urlsplit(item.url).hostname or "",
+    )
+
+    assert [item.provider for item in results] == ["exa", "bocha"]
+    assert (langsearch.calls, exa.calls, qianfan.calls, bocha.calls) == (1, 1, 1, 1)
+    assert reservations == 4
+
+
+@pytest.mark.asyncio
+async def test_english_sparse_sources_use_tavily_then_serper():
+    exa = Provider(
+        "exa",
+        result=[
+            SearchResult(
+                url="https://example.org/event",
+                title="Event report",
+                snippet="Relevant to the event",
+                provider="exa",
+            )
+        ],
+    )
+    tavily = Provider(
+        "tavily",
+        result=[
+            SearchResult(
+                url="https://example.org/another-report",
+                title="Another report from the same publisher",
+                snippet="Relevant to the event",
+                provider="tavily",
+            )
+        ],
+    )
+    serper = Provider(
+        "serper",
+        result=[
+            SearchResult(
+                url="https://other.org/event",
+                title="Independent publisher report",
+                snippet="Relevant to the event",
+                provider="serper",
+            )
+        ],
+    )
+    chain = SearchChain([exa, tavily, serper])
+
+    results = await chain.search_filtered(
+        SearchParams(query="specific event", lang="en"),
+        lambda item: True,
+        min_source_groups=2,
+        source_group=lambda item: urlsplit(item.url).hostname or "",
+    )
+
+    assert [item.provider for item in results] == ["exa", "serper", "tavily"]
+    assert (exa.calls, tavily.calls, serper.calls) == (1, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_history_case_from_exa_does_not_fall_through_to_tavily():
+    exa = Provider(
+        "exa",
+        result=[
+            SearchResult(
+                url="https://example.org/campus-discipline-case",
+                title="University publishes findings after student misconduct investigation",
+                snippet="A university reviewed student misconduct allegations and published its findings.",
+                provider="exa",
+                lang="en",
+            )
+        ],
+    )
+    tavily = Provider("tavily", result=[])
+    scope = InvestigationScope(
+        event_query="武汉大学通报图书馆事件调查复核情况",
+        languages=("zh",),
+        source_scope="domestic",
+    )
+    query = "university student misconduct investigation outcome case"
+    chain = SearchChain([exa, tavily])
+
+    results = await chain.search_filtered(
+        SearchParams(query=query, lang="en"),
+        lambda item: (
+            scope.classify_result(
+                item,
+                agent="history_insight",
+                phase="foreign_supplement",
+                search_query=query,
+            ).accepted
+        ),
+    )
+
+    assert [item.provider for item in results] == ["exa"]
+    assert (exa.calls, tavily.calls) == (1, 0)
 
 
 @pytest.mark.asyncio

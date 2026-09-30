@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -11,6 +11,7 @@ class SearchQuery(BaseModel):
     query: str = Field(min_length=1, max_length=200)
     language: str = Field(default="zh", min_length=2, max_length=15)
     region: str = Field(default="CN", min_length=2, max_length=8)
+    scope: Literal["window", "context"] = "window"
 
 
 class InvestigationPlan(BaseModel):

@@ -55,12 +55,42 @@ def _version_compatible(
     return major == reader_major and reader_minor >= required
 
 
+def prune_citation_backlinks(report: dict[str, Any]) -> None:
+    """Omitted claims cannot remain as clickable backlinks in source cards."""
+    bindings = {
+        item["claim_ref"]: {c["evidence_ref"] for c in item.get("citations", [])}
+        for block in report.get("blocks", [])
+        if block.get("type") in {"fact_check_table", "historical_facts"}
+        for item in block.get("items", [])
+    }
+    for block in report.get("blocks", []):
+        if block.get("type") == "evidence_appendix":
+            for item in block.get("items", []):
+                item["citations"] = [
+                    c
+                    for c in item.get("citations", [])
+                    if item["evidence_ref"] in bindings.get(c.get("claim_ref"), set())
+                ]
+
+
 def validate_report(report: dict[str, Any]) -> ValidationResult:
     value = copy.deepcopy(report)
     errors: list[str] = []
     warnings: list[str] = []
     if not _version_compatible(value):
         errors.append("R1: IR 版本不兼容，请升级渲染器或执行迁移")
+    quality = value.get("quality", {})
+    if not isinstance(quality, dict):
+        errors.append("quality 必须是对象")
+    elif "chapter_status" in quality:
+        states = quality["chapter_status"]
+        if not isinstance(states, dict) or any(
+            not isinstance(state, dict)
+            or state.get("status")
+            not in {"complete", "partial", "failed", "missing", "disabled", "unknown"}
+            for state in states.values()
+        ):
+            errors.append("chapter_status 必须包含有效的章节状态")
 
     blocks = value.get("blocks")
     if not isinstance(blocks, list):
@@ -76,7 +106,9 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
 
     appendix = next((block for block in blocks if block.get("type") == "evidence_appendix"), None)
     evidence_ids = {item.get("evidence_ref") for item in (appendix or {}).get("items", [])}
-    fact_blocks = [block for block in blocks if block.get("type") == "fact_check_table"]
+    fact_blocks = [
+        block for block in blocks if block.get("type") in {"fact_check_table", "historical_facts"}
+    ]
     fact_items = [item for block in fact_blocks for item in block.get("items", [])]
     claim_texts = {item.get("claim_ref"): item.get("text") for item in fact_items}
     candidate_count = value.get("metrics", {}).get("key_claims_candidate", 0)
@@ -106,10 +138,55 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
             for node in block.get("nodes", []) + block.get("items", []):
                 if not node.get("evidence_refs"):
                     errors.append(f"R8: 时间线节点 {node.get('date')} 缺少证据")
+        if block.get("type") == "action_plan":
+            for item in block.get("items", []):
+                refs = item.get("claim_refs") or []
+                bound = set().union(*(bindings.get(ref, set()) for ref in refs))
+                if (
+                    not refs
+                    or any(ref not in claim_texts for ref in refs)
+                    or not item.get("action")
+                    or not item.get("owner")
+                    or not item.get("trigger")
+                    or not item.get("uncertainty")
+                    or not item.get("evidence_refs")
+                    or not set(item["evidence_refs"]).issubset(bound)
+                ):
+                    errors.append("R22: 行动清单缺少已审依据或可执行条件")
+        if block.get("type") == "comment_insight" and block.get("analysis_version") == 1:
+            samples = {s.get("id"): s for s in block.get("samples", [])}
+            if len(samples) != len(block.get("samples", [])):
+                errors.append("R21: 评论样本编号重复")
+            for item in block.get("items", []):
+                refs = item.get("comment_refs", [])
+                valid = [samples[r] for r in refs if r in samples]
+                if (
+                    not refs
+                    or len(refs) != len(set(refs))
+                    or len(valid) != len(refs)
+                    or item.get("sample_count") != len(refs)
+                    or item.get("review_status") != "accepted"
+                ):
+                    errors.append("R21: 评论主题计数、引用或审查状态不完整")
+                if set(item.get("evidence_refs", [])) != {s.get("evidence_ref") for s in valid}:
+                    errors.append("R21: 评论主题来源绑定不匹配")
+                from collections import Counter
+
+                if item.get("platform_counts") != dict(Counter(s.get("platform") for s in valid)):
+                    errors.append("R21: 评论平台计数与实际样本不一致")
+                for quote in item.get("quotes", []):
+                    source = samples.get(quote.get("id"), {})
+                    if quote.get("id") not in refs or quote.get("text") != source.get("text"):
+                        errors.append("R21: 评论引语没有对应主题内原始样本")
         if block.get("type") == "history_compare":
             for card in block.get("cards", []):
                 if not card.get("evidence_refs"):
                     errors.append(f"R8: 历史卡片 {card.get('event_name')} 缺少证据")
+            for candidate in block.get("excluded_candidates", []):
+                if not candidate.get("reason") or not set(
+                    candidate.get("evidence_refs", [])
+                ).issubset(evidence_ids):
+                    errors.append("R8: 历史候选材料排除说明缺少有效依据")
         if block.get("type") == "executive_summary":
             for key in ("what", "why", "so_what"):
                 for item in block.get(key, []):

@@ -1,11 +1,17 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 from httpx import Request, Response
-from openai import InternalServerError
+from openai import InternalServerError, RateLimitError
 
-from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message
+from yuqing.core.llm.gateway import (
+    LLMGateway,
+    LLMOutputTruncated,
+    rate_limit_diagnostic,
+    sanitize_upstream_message,
+)
 
 
 class FlakyCompletions:
@@ -47,6 +53,43 @@ class Gateway504Completions:
                 )
             ],
         )
+
+
+class AccountQuotaCompletions:
+    def __init__(self):
+        self.calls = 0
+
+    async def create(self, **_kwargs):
+        self.calls += 1
+        response = Response(
+            429,
+            request=Request("POST", "https://relay.example/v1/chat/completions"),
+            json={"error": {"code": "insufficient_quota", "message": "secret account detail"}},
+        )
+        raise RateLimitError("secret account detail", response=response, body=response.json())
+
+
+class ConcurrentCompletions:
+    def __init__(self):
+        self.active = 0
+        self.peak = 0
+
+    async def create(self, **_kwargs):
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            await asyncio.sleep(0.03)
+            return SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=3),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"reply":"OK"}'),
+                        finish_reason="stop",
+                    )
+                ],
+            )
+        finally:
+            self.active -= 1
 
 
 class StaticCompletions:
@@ -101,7 +144,12 @@ class FakeFactory:
         self.client = SimpleNamespace(chat=SimpleNamespace(completions=self.completions))
 
     def config(self, _role):
-        return SimpleNamespace(model="fixture", temperature=0)
+        return SimpleNamespace(
+            model="fixture",
+            temperature=0,
+            base_url="https://relay.example/v1",
+            api_key="fixture-key",
+        )
 
     def get(self, _role):
         return self.client
@@ -167,19 +215,34 @@ async def test_length_truncation_grows_max_tokens_and_retries_once():
 
     assert result == {"reply": "OK"}
     assert factory.client.chat.completions.calls == [300, 1200]
-    assert gateway.calls == 1
+    assert gateway.calls == 2
+    assert gateway.tokens_used == 6
 
 
 @pytest.mark.asyncio
-async def test_length_retry_is_capped_at_8192_tokens():
+async def test_length_retry_can_exceed_8192_but_remains_bounded():
     factory = FakeFactory()
     factory.client.chat.completions = AlwaysTruncatedCompletions()
     gateway = LLMGateway(factory)
 
-    result = await gateway.complete_json("analyst_a", "system", "user", max_tokens=6000)
+    with pytest.raises(LLMOutputTruncated, match="长度上限"):
+        await gateway.complete_json("analyst_a", "system", "user", max_tokens=6000)
 
-    assert factory.client.chat.completions.calls == [6000, 8192]
-    assert result == {}
+    assert factory.client.chat.completions.calls == [6000, 24000, 32768]
+    assert gateway.tokens_used == 9
+
+
+@pytest.mark.asyncio
+async def test_length_retry_cannot_exceed_remaining_total_budget():
+    factory = FakeFactory()
+    factory.client.chat.completions = TruncatedThenOkCompletions()
+    gateway = LLMGateway(factory)
+    gateway.token_limit = 500
+    with pytest.raises(RuntimeError, match="token budget exhausted"):
+        await gateway.complete_json("analyst_a", "system", "user", max_tokens=300)
+    assert gateway.calls == 1
+    assert gateway.tokens_used == 3
+    assert factory.client.chat.completions.calls == [300]
 
 
 @pytest.mark.asyncio
@@ -192,7 +255,8 @@ async def test_tiny_budget_grows_through_multiple_steps():
 
     assert result == {"reply": "OK"}
     assert factory.client.chat.completions.calls == [32, 128, 512]
-    assert gateway.calls == 1
+    assert gateway.calls == 3
+    assert gateway.tokens_used == 9
 
 
 @pytest.mark.asyncio
@@ -227,3 +291,65 @@ def test_sanitize_keeps_non_upstream_exception_detail():
 
     exc = AppBug("claim 预算状态错乱：pk=3")
     assert sanitize_upstream_message(exc) == "AppBug: claim 预算状态错乱：pk=3"
+
+
+@pytest.mark.asyncio
+async def test_account_quota_429_is_classified_without_retry_or_leaking_body():
+    factory = FakeFactory()
+    quota = AccountQuotaCompletions()
+    factory.client.chat.completions = quota
+    gateway = LLMGateway(factory)
+
+    with pytest.raises(RateLimitError) as exc_info:
+        await gateway.complete_json("analyst_b", "system", "user")
+
+    assert quota.calls == 1
+    assert rate_limit_diagnostic(exc_info.value)["category"] == "account_quota"
+    message = sanitize_upstream_message(exc_info.value)
+    assert "账户" in message
+    assert "secret account detail" not in message
+
+
+def test_429_distinguishes_concurrency_and_retry_after_without_raw_body():
+    response = Response(
+        429,
+        headers={"Retry-After": "7"},
+        request=Request("POST", "https://relay.example/v1/chat/completions"),
+        json={"error": {"code": "concurrency_limit", "message": "key=private"}},
+    )
+    error = RateLimitError("key=private", response=response, body=response.json())
+
+    assert rate_limit_diagnostic(error) == {
+        "category": "concurrency",
+        "retry_after_seconds": 7,
+    }
+    assert "并发" in sanitize_upstream_message(error)
+    assert "private" not in sanitize_upstream_message(error)
+
+
+def test_429_without_provider_detail_stays_unclassified():
+    response = Response(
+        429,
+        request=Request("POST", "https://relay.example/v1/chat/completions"),
+        text="<html>credential=private</html>",
+    )
+    error = RateLimitError("credential=private", response=response, body=response.text)
+
+    assert rate_limit_diagnostic(error) == {"category": "unknown"}
+    assert "原因未指明" in sanitize_upstream_message(error)
+    assert "private" not in sanitize_upstream_message(error)
+
+
+@pytest.mark.asyncio
+async def test_gate_limits_inflight_calls_across_gateway_instances(monkeypatch):
+    monkeypatch.setenv("YUQING_LLM_MAX_INFLIGHT", "2")
+    factory = FakeFactory()
+    concurrent = ConcurrentCompletions()
+    factory.client.chat.completions = concurrent
+    gateways = [LLMGateway(factory) for _ in range(3)]
+
+    await asyncio.gather(
+        *(gateway.complete_json("analyst_a", "system", "user") for gateway in gateways)
+    )
+
+    assert concurrent.peak == 2
