@@ -1225,6 +1225,19 @@ async def test_v1_restart_after_investigation_resumes_and_publishes_report(runti
     report_done = [event.data for event in events if event.event == "report.done"]
     assert any(item.get("partial") and item.get("comment_pending") for item in report_done)
     assert report_done[-1].get("partial") is not True
+    # The core report must be published before optional comment privacy review
+    # starts; otherwise the two branches can compete for the same LLM budget.
+    partial_seq = next(
+        event.seq
+        for event in events
+        if event.event == "report.done" and event.data.get("comment_pending")
+    )
+    comment_phase_seq = next(
+        event.seq
+        for event in events
+        if event.event == "task.status" and event.data.get("phase") == "comment_analysis"
+    )
+    assert partial_seq < comment_phase_seq
     # Resuming saved comments must not attribute their analysis to the forum.
     assert "comment_analysis" in phases
     assert "forum" not in phases[phases.index("comment_selection") + 1 :]

@@ -301,6 +301,21 @@ class FullReportBuilder:
                     "text": f"明确排除 {rejected} 段内容；{incomplete} 段尚未完成审查或脱敏后核验，暂不展示。已通过审查的事实与章节保留。",
                 }
             )
+            reason_labels = {
+                "local_budget": "本地任务额度不足",
+                "call_failed": "模型调用失败",
+                "upstream_unavailable": "模型服务暂时不可用",
+                "invalid_output": "模型返回格式不合格",
+                "input_length": "待审文本超过单次输入上限",
+            }
+            reason_counts = quality["scope_review"].get("incomplete_reasons", {})
+            reason_text = "；".join(
+                f"{reason_labels.get(reason, reason)} {count} 段"
+                for reason, count in sorted(reason_counts.items())
+                if count
+            )
+            if reason_text:
+                limits["items"][-1]["text"] += " 分类原因：" + reason_text + "。"
             reasons = sorted(
                 {d.get("message", "审查结果未取得") for d in quality["scope_review"]["diagnostics"]}
             )

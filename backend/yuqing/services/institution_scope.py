@@ -219,11 +219,27 @@ class InstitutionScopeReviewer:
                 return exc
 
         # Responses may overlap; apply aliases and persist decisions in input order.
-        width = 2 if kind in {"comment", "report_text"} else 1
-        for start in range(0, len(pending), 12 * width):
+        # Near a phase budget boundary, two reservations can race and make the
+        # second batch incomplete even though one batch would still fit. Fall
+        # back to one request at a time when the gateway exposes its remaining
+        # budget; unconstrained test gateways keep the normal width of two.
+        cursor = 0
+        while cursor < len(pending):
+            width = 2 if kind in {"comment", "report_text"} else 1
+            limit = getattr(self.gateway, "token_limit", None)
+            if width == 2 and limit is not None:
+                available = (
+                    int(limit)
+                    - int(getattr(self.gateway, "tokens_used", 0))
+                    - int(getattr(self.gateway, "_tokens_reserved", 0))
+                )
+                if available < 2 * 2400:
+                    width = 1
             wave = [
-                pending[i : i + 12] for i in range(start, min(len(pending), start + 12 * width), 12)
+                pending[i : i + 12]
+                for i in range(cursor, min(len(pending), cursor + 12 * width), 12)
             ]
+            cursor += 12 * len(wave)
             tasks = [asyncio.create_task(request_batch(indices)) for indices in wave]
             try:
                 responses = await asyncio.gather(*tasks)
@@ -353,7 +369,7 @@ class InstitutionScopeReviewer:
                             )
             if stop_failure:
                 reason, exc = stop_failure
-                for index in pending[start + 12 * width :]:
+                for index in pending[cursor:]:
                     decisions[index] = ScopeReview(
                         "incomplete",
                         reason,

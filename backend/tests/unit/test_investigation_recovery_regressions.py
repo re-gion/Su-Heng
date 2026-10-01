@@ -407,6 +407,8 @@ async def test_optional_review_failure_preserves_authoritative_facts(runtime_dir
         assert report["blocks"][0]["items"][0]["text"] == "校方公布复核结果。"
         assert report["quality"]["scope_review"]["rejected_texts"] == 0
         assert report["quality"]["scope_review"]["incomplete_texts"] == 1
+        limits = next(block for block in report["blocks"] if block["type"] == "limitations")
+        assert "本地任务额度不足 1 段" in limits["items"][-1]["text"]
     finally:
         await database.close()
 

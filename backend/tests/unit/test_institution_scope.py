@@ -30,6 +30,31 @@ async def test_scope_batches_overlap_and_preserve_input_order(kind):
 
 
 @pytest.mark.asyncio
+async def test_scope_review_serializes_near_budget_boundary():
+    class NearBudgetGateway:
+        token_limit = 4000
+        tokens_used = 0
+        _tokens_reserved = 0
+        active = 0
+        peak = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            items = json.loads(prompt.split("\n", 1)[1])
+            return {"items": [{"id": item["id"], "allowed": True} for item in items]}
+
+    gateway = NearBudgetGateway()
+    decisions = await InstitutionScopeReviewer(gateway).review(
+        [f"公开材料{i}" for i in range(24)], kind="report_text"
+    )
+    assert gateway.peak == 1
+    assert all(item.allowed for item in decisions)
+
+
+@pytest.mark.asyncio
 async def test_parallel_reviews_keep_one_alias_even_when_second_batch_finishes_first():
     class Database:
         aliases = {}

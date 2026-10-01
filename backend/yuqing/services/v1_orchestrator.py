@@ -2616,19 +2616,12 @@ class V1Orchestrator:
                     },
                 )
             return
-        # Comment analysis is an enrichment branch. Start it as soon as the user
-        # has approved posts so it can overlap with deterministic verification;
-        # the core report no longer waits for a serial comment pass before doing
-        # its own work. The task is joined before report assembly so its findings
-        # remain part of the final IR when the optional branch completes.
+        # Comment analysis is an enrichment branch. It must start *after* the
+        # first core report has passed its final scope/privacy review: both
+        # branches use the same model endpoint and task budget, and running the
+        # optional review first can starve the core release gate and downgrade a
+        # usable report to an evidence brief.
         comment_analysis_task = None
-        if phase == "comments_ready":
-            await self.events.emit_task_status(
-                task_id, status="running", phase="comment_analysis", progress=70
-            )
-            comment_analysis_task = asyncio.create_task(
-                self._run_comment_insight(task_id, investigation_query, board)
-            )
         if checkpoint is None or checkpoint.get("phase") != "verified":
             self._set_llm_phase_limit(token_limit, "verification")
             await self.events.emit_task_status(
@@ -2765,7 +2758,10 @@ class V1Orchestrator:
             orchestration_limitations=self._limitations,
             diagnostic_only=diagnostic_only,
         )
-        if comment_analysis_task is not None:
+        if phase == "comments_ready":
+            # Publish the core report before starting optional comment work. The
+            # client can read a complete fact/propagation/action report while the
+            # comment branch is still running; its result is folded in below.
             # Publish the core report while the optional comment branch is still
             # running. A second build below folds completed comment findings into
             # the final report; both report.done events are safe because the
@@ -2786,18 +2782,40 @@ class V1Orchestrator:
                     "comment_pending": True,
                 },
             )
+            await self.events.emit_task_status(
+                task_id, status="running", phase="comment_analysis", progress=90
+            )
+            comment_analysis_task = asyncio.create_task(
+                self._run_comment_insight(task_id, investigation_query, board)
+            )
             try:
                 await comment_analysis_task
             except Exception as exc:
                 self._limitations.append(
                     f"评论增量分析未完成（{type(exc).__name__}），核心报告仍按事实证据生成。"
                 )
-            report_id, report, html_path = await self.reports.build(
-                task_id,
-                forum=board.history(),
-                orchestration_limitations=self._limitations,
-                diagnostic_only=diagnostic_only,
-            )
+            try:
+                candidate_id, candidate_report, candidate_path = await self.reports.build(
+                    task_id,
+                    forum=board.history(),
+                    orchestration_limitations=self._limitations,
+                    diagnostic_only=diagnostic_only,
+                )
+            except Exception as exc:
+                self._limitations.append(
+                    f"评论增量报告未能重新构建（{type(exc).__name__}），保留核心报告。"
+                )
+            else:
+                # Optional comments must never make a previously releasable core
+                # report worse because their own privacy review is partial. Keep
+                # the candidate only when the release gate is at least as good; a
+                # better candidate still brings completed comment findings into IR.
+                if self._quality_progress(candidate_report) >= self._quality_progress(report):
+                    report_id, report, html_path = candidate_id, candidate_report, candidate_path
+                else:
+                    self._limitations.append(
+                        "评论增量报告审查未完成，保留先前已通过核心发布门的报告。"
+                    )
         # Evaluate the assembled, reviewed report before deciding what to recover.
         # Persist each attempt, including failed attempts, so resume never resets the bound.
         progress = await self.database.checkpoint(task_id, "report:quality_recovery") or {}
