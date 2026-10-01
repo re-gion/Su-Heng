@@ -174,9 +174,25 @@ async def test_anonymous_source_labels_preserve_graph_without_rewriting_analysis
     scope = report["quality"]["scope_review"]
     assert scope["redacted_source_labels"] == 2
     if with_analysis:
-        assert analysis["interpretation"].startswith("张三")
-        assert not any(b["block_id"] == "analysis" for b in report["blocks"])
-        assert scope["incomplete_texts"] == 1
+        assert analysis["interpretation"].startswith("相关个人")
+        assert any(b["block_id"] == "analysis" for b in report["blocks"])
+        assert scope["incomplete_texts"] == 0
     else:
         assert scope["incomplete_texts"] == 0
         assert report["quality"]["release_label"] == "full_report"
+
+
+def test_missing_action_analysis_keeps_chapter_boundary():
+    report = {
+        "blocks": [
+            {"block_id": "summary", "type": "executive_summary", "section": "01"},
+            {"block_id": "limits", "type": "limitations", "section": "08"},
+        ]
+    }
+
+    assert FullReportBuilder._ensure_action_chapter(report)
+    chapter = next(block for block in report["blocks"] if block.get("section") == "07")
+    limits = next(block for block in report["blocks"] if block.get("type") == "limitations")
+    assert chapter["block_id"] == "b_07_recommendations_fallback"
+    assert report["blocks"].index(chapter) < report["blocks"].index(limits)
+    assert not FullReportBuilder._ensure_action_chapter(report)

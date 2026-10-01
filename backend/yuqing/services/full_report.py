@@ -71,6 +71,39 @@ class FullReportBuilder:
                     reason["reason"] = "未通过证据与语义审查；详细记录保留在本地检查点。"
 
     @staticmethod
+    def _ensure_action_chapter(report: dict[str, Any]) -> bool:
+        """Keep a visible chapter-07 boundary when optional analysis is removed.
+
+        Chapter 07 is assembled from model analysis when available.  A privacy
+        or budget review may remove that analysis after assembly, though.  A
+        deterministic, non-personal fallback keeps the report structure usable
+        and tells the reader exactly what still needs evidence.
+        """
+        if any(block.get("section") == "07" for block in report.get("blocks", [])):
+            return False
+        fallback = {
+            "block_id": "b_07_recommendations_fallback",
+            "type": "text",
+            "section": "07",
+            "in_brief": False,
+            "title": "研判与建议",
+            "text": (
+                "本轮未形成通过证据、范围与隐私审查的行动研判。"
+                "请补充可回查的事件事实、传播关系或公开回应后再生成可执行建议。"
+            ),
+        }
+        limitations_index = next(
+            (
+                index
+                for index, block in enumerate(report["blocks"])
+                if block.get("type") == "limitations"
+            ),
+            len(report["blocks"]),
+        )
+        report["blocks"].insert(limitations_index, fallback)
+        return True
+
+    @staticmethod
     def _hide_scoped_source_text(report: dict[str, Any]) -> None:
         """Keep source links while removing unreviewed source text from every export."""
 
@@ -201,16 +234,33 @@ class FullReportBuilder:
                     await self._retain_reviewed_blocks(report, task, normalize_source_labels=False)
                     report["quality"]["scope_review"]["redacted_source_labels"] = changes
                     return
-            safe = {
-                text
-                for text, d in zip(ordered, decisions, strict=True)
-                if d.allowed and d.text == text
+            approved_text = {
+                text: decision.text
+                for text, decision in zip(ordered, decisions, strict=True)
+                if decision.allowed and decision.text != text
             }
+
+            def apply_redactions(value):
+                if isinstance(value, dict):
+                    for key, child in list(value.items()):
+                        value[key] = apply_redactions(child)
+                    return value
+                if isinstance(value, list):
+                    return [apply_redactions(child) for child in value]
+                if isinstance(value, str):
+                    return approved_text.get(value, value)
+                return value
+
+            # A privacy-approved redaction is usable content. Apply the validated
+            # replacement to generated analysis/action text and keep the block;
+            # only rejected or genuinely incomplete decisions remove content.
+            if approved_text:
+                for block in report["blocks"]:
+                    if block["type"] not in protected_types:
+                        apply_redactions(block)
+            safe = {text for text, d in zip(ordered, decisions, strict=True) if d.allowed}
             rejected = sum(d.status == "rejected" for d in decisions)
-            incomplete = sum(
-                d.status == "incomplete" or d.allowed and d.text != text
-                for text, d in zip(ordered, decisions, strict=True)
-            )
+            incomplete = sum(d.status == "incomplete" for d in decisions)
         else:
             safe, rejected, incomplete = set(), 0, len(ordered)
         removed_blocks = set()
@@ -1493,6 +1543,7 @@ class FullReportBuilder:
                 self.scope_reviewer.gateway.token_limit = scope_review_cap
             self._hide_scoped_source_text(report)
             await self._retain_reviewed_blocks(report, task)
+            self._ensure_action_chapter(report)
             for block in report["blocks"]:
                 if block["type"] == "evidence_appendix":
                     for item in block["items"]:
