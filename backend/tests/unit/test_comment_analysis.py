@@ -113,6 +113,43 @@ async def test_all_comments_are_classified_and_quotes_come_from_members():
 
 
 @pytest.mark.asyncio
+async def test_comment_topics_include_decision_fields_and_deterministic_priority_stats():
+    class RichGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                data = json.loads(prompt.split("\n", 1)[1])
+                return {
+                    "themes": [
+                        {
+                            "title": "程序透明度",
+                            "group_ids": [data["groups"][0]["id"]],
+                            "interpretation": "评论反复要求说明处分依据。",
+                            "stance_analysis": "质疑者担心程序不透明，认可者强调需要先看完整材料。",
+                            "controversy": "分歧集中在处分依据是否已公开。",
+                            "risk_assessment": "若不回应，可能继续形成对程序公正的质疑。",
+                            "response_gap": "尚未看到完整的处分依据和复核路径。",
+                            "response_action": "由校方公开依据、时间线和复核入口。",
+                            "priority": "立即回应",
+                            "priority_reason": "具体回应缺口清晰且样本反复提及。",
+                            "uncertainty": "样本来自已确认帖子，不能代表整体意见。",
+                        }
+                    ]
+                }
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    source = rows(4)
+    source[1]["platform"] = "douyin"
+    source[2]["published_at"] = "2026-09-30T10:00:00Z"
+    result = await OpenAICommentAgent(RichGateway(), "comments").analyze("高校事件", source)
+    item = result["items"][0]
+    assert item["stance_counts"] == {"质疑": 4}
+    assert item["platform_counts"] == {"weibo": 3, "douyin": 1}
+    assert item["time_counts"]["时间未知"] == 3
+    assert result["priority_order"][0]["priority"] == "立即回应"
+    assert item["response_action"].startswith("由校方")
+
+
+@pytest.mark.asyncio
 async def test_added_comments_reuse_unchanged_classification():
     first = await OpenAICommentAgent(Gateway(), "comments").analyze("高校事件", rows(3))
     gateway = Gateway()

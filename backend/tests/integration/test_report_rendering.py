@@ -444,3 +444,56 @@ def test_comment_platform_markup_is_readable_and_raw_text_remains_auditable():
     assert "逐条分类 · HTTP 400" in html
     assert "调用诊断（已脱敏）" in html
     assert "&lt;img alt=&quot;[太开心]&quot;" in html
+
+
+def test_comment_insight_renders_action_priority_and_eight_part_analysis():
+    report = copy.deepcopy(load_fixture())
+    report["blocks"].append(
+        {
+            "block_id": "comments-rich",
+            "type": "comment_insight",
+            "section": "05",
+            "analysis_version": 4,
+            "title": "确认帖子评论样本洞察",
+            "sample_notice": "仅代表样本",
+            "priority_order": [
+                {
+                    "title": "程序透明度",
+                    "priority": "立即回应",
+                    "reason": "样本反复提出具体回应缺口。",
+                    "sample_count": 2,
+                }
+            ],
+            "items": [
+                {
+                    "title": "程序透明度",
+                    "interpretation": "评论反复要求说明处分依据。",
+                    "text": "评论反复要求说明处分依据。",
+                    "stance_analysis": "质疑者担心程序不透明。",
+                    "controversy": "争议集中在依据是否公开。",
+                    "risk_assessment": "若不回应，可能继续形成程序不公的质疑。",
+                    "response_gap": "尚未看到完整依据。",
+                    "response_action": "公开依据和复核入口。",
+                    "priority": "立即回应",
+                    "priority_reason": "回应缺口清晰。",
+                    "uncertainty": "仅限已确认帖子样本。",
+                    "sample_count": 1,
+                    "platform_counts": {"weibo": 1},
+                    "stance_counts": {"质疑": 1},
+                    "comment_refs": ["M1"],
+                    "evidence_refs": ["E001"],
+                    "quotes": [{"id": "M1", "text": "请公开处分依据", "platform": "weibo"}],
+                    "review_status": "accepted",
+                }
+            ],
+            "samples": [
+                {"id": "M1", "text": "请公开处分依据", "platform": "weibo", "evidence_ref": "E001"}
+            ],
+        }
+    )
+    report = validate_report(report).report
+    html = render_html(report, view="full")
+    assert "总体处置排序" in html
+    assert "不同立场与理由" in html
+    assert "建议回应动作" in html
+    assert "立即回应" in html

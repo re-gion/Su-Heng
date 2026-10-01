@@ -1085,6 +1085,7 @@ class FullReportBuilder:
                 items=structured_comments.get("items", []),
                 samples=structured_comments.get("samples", []),
                 coverage=structured_comments.get("coverage", {}),
+                priority_order=structured_comments.get("priority_order", []),
                 warnings=structured_comments.get("warnings", []),
                 diagnostics=structured_comments.get("diagnostics", []),
                 analysis_status=structured_comments.get("status", "unknown"),

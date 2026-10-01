@@ -703,6 +703,19 @@ def _generic_block(block: dict[str, Any]) -> str:
             + "</li>"
             for item in block.get("collections", [])
         )
+        priority_rows = "".join(
+            f"<li><strong>{_escape(item.get('priority') or '补充说明')}</strong>："
+            f"{_escape(item.get('title') or '未命名主题')}（{_escape(item.get('sample_count', 0))} 条样本）"
+            f"{_optional_field('依据', item.get('reason'))}</li>"
+            for item in block.get("priority_order", [])
+        )
+        priority_html = (
+            '<aside class="analysis-notice"><h3>总体处置排序</h3><ol>'
+            + priority_rows
+            + "</ol></aside>"
+            if priority_rows
+            else ""
+        )
         cards = []
         for item in block.get("items", []):
             quotes = "".join(
@@ -716,6 +729,11 @@ def _generic_block(block: dict[str, Any]) -> str:
                     f"{_escape(k)} {_escape(v)} 条"
                     for k, v in item.get("platform_counts", {}).items()
                 )
+                + "。立场分布："
+                + "、".join(
+                    f"{_escape(k)} {_escape(v)} 条"
+                    for k, v in item.get("stance_counts", {}).items()
+                )
                 + "。主题归类为分析判断，不代表总体比例。</p>"
                 if "sample_count" in item
                 else ""
@@ -723,9 +741,19 @@ def _generic_block(block: dict[str, Any]) -> str:
             cards.append(
                 '<article class="narrative-card">'
                 + (f"<h3>{_escape(item.get('title'))}</h3>" if item.get("title") else "")
+                + (
+                    f'<p class="priority-chip">处置优先级：{_escape(item.get("priority"))}</p>'
+                    if item.get("priority")
+                    else ""
+                )
                 + counts
                 + f"<p>{_escape(item.get('text'))}</p>"
+                + _optional_field("不同立场与理由", item.get("stance_analysis"))
+                + _optional_field("争议焦点", item.get("controversy"))
+                + _optional_field("可能风险", item.get("risk_assessment"))
                 + _optional_field("待回应的问题", item.get("response_gap"))
+                + _optional_field("建议回应动作", item.get("response_action"))
+                + _optional_field("排序依据", item.get("priority_reason"))
                 + _optional_field("分析边界", item.get("uncertainty"))
                 + quotes
                 + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
@@ -787,7 +815,7 @@ def _generic_block(block: dict[str, Any]) -> str:
         )
         return (
             f'<section id="comment-insight"><h2>{title}</h2><p class="sample-notice">'
-            f"{_escape(block.get('sample_notice'))}</p>{coverage_html}{display_note}{''.join(cards)}{warnings}{diagnostics}{fallback}"
+            f"{_escape(block.get('sample_notice'))}</p>{coverage_html}{priority_html}{display_note}{''.join(cards)}{warnings}{diagnostics}{fallback}"
             f"<details><summary>采集范围与逐条样本回查</summary><ul>{collections}</ul><ol>{''.join(samples)}</ol></details></section>"
         )
     collection = block.get("items") or block.get("cards") or []

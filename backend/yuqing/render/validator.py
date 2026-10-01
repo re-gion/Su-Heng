@@ -178,6 +178,47 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
                     source = samples.get(quote.get("id"), {})
                     if quote.get("id") not in refs or quote.get("text") != source.get("text"):
                         errors.append("R21: 评论引语没有对应主题内原始样本")
+        if block.get("type") == "comment_insight" and block.get("analysis_version", 1) >= 4:
+            samples = {s.get("id"): s for s in block.get("samples", [])}
+            priorities = {"立即回应", "补充说明", "持续观察"}
+            item_titles = set()
+            for item in block.get("items", []):
+                refs = item.get("comment_refs", [])
+                valid = [samples[r] for r in refs if r in samples]
+                required = (
+                    "title",
+                    "interpretation",
+                    "stance_analysis",
+                    "controversy",
+                    "risk_assessment",
+                    "response_gap",
+                    "response_action",
+                    "priority_reason",
+                    "uncertainty",
+                )
+                if any(not str(item.get(key) or "").strip() for key in required):
+                    errors.append("R23: 评论主题缺少完整的处置分析字段")
+                if item.get("priority") not in priorities:
+                    errors.append("R23: 评论主题处置优先级无效")
+                if (
+                    not refs
+                    or len(refs) != len(set(refs))
+                    or len(valid) != len(refs)
+                    or item.get("sample_count") != len(refs)
+                    or item.get("review_status") != "accepted"
+                ):
+                    errors.append("R23: 评论主题计数、引用或审查状态不完整")
+                if not isinstance(item.get("stance_counts"), dict) or not isinstance(
+                    item.get("platform_counts"), dict
+                ):
+                    errors.append("R23: 评论主题缺少程序统计的立场或平台分布")
+                item_titles.add(item.get("title"))
+            for priority in block.get("priority_order", []):
+                if (
+                    priority.get("title") not in item_titles
+                    or priority.get("priority") not in priorities
+                ):
+                    errors.append("R23: 总体处置排序未绑定已审主题")
         if block.get("type") == "history_compare":
             for card in block.get("cards", []):
                 if not card.get("evidence_refs"):
