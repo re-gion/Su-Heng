@@ -8,7 +8,7 @@ import json
 import re
 import uuid
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from yuqing.core.llm.gateway import LLMBudgetExhausted, LLMOutputTruncated, upstream_diagnostic
@@ -153,6 +153,22 @@ class OpenAICommentAgent:
     def __init__(self, gateway, system_prompt: str):
         self.gateway = gateway
         self.system_prompt = system_prompt
+
+    @contextmanager
+    def _classification_budget(self):
+        """Keep part of the existing phase allowance for synthesis and review."""
+        original = getattr(self.gateway, "token_limit", None)
+        if original is None:
+            yield
+            return
+        used = getattr(self.gateway, "tokens_used", 0)
+        absolute = getattr(self.gateway, "absolute_token_limit", None)
+        cap = min(original, absolute) if absolute is not None else original
+        self.gateway.token_limit = min(cap, used + max(0, cap - used) * 3 // 5)
+        try:
+            yield
+        finally:
+            self.gateway.token_limit = original
 
     async def analyze(
         self,
@@ -328,90 +344,93 @@ class OpenAICommentAgent:
         ]
         cursor = 0
         stopped = False
-        while cursor < len(batches) and not stopped:
-            if can_continue is not None and not await can_continue():
-                warnings.append("评论分析因任务停止或预算上限中止，未处理部分单独列明。")
-                break
-            # Split retries share one ledger, so never run those siblings concurrently.
-            wave = [batches[cursor]]
-            cursor += 1
-            if cursor < len(batches) and batches[cursor][2] is not wave[0][2]:
-                wave.append(batches[cursor])
+        with self._classification_budget():
+            while cursor < len(batches) and not stopped:
+                if can_continue is not None and not await can_continue():
+                    warnings.append("评论分析因任务停止或预算上限中止，未处理部分单独列明。")
+                    break
+                # Split retries share one ledger, so never run those siblings concurrently.
+                wave = [batches[cursor]]
                 cursor += 1
-            tasks = [asyncio.create_task(request_batch(batch, ledger)) for batch, _, ledger in wave]
-            try:
-                responses = await asyncio.gather(*tasks)
-            finally:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-            for (batch, attempt, ledger), response in zip(wave, responses, strict=True):
+                if cursor < len(batches) and batches[cursor][2] is not wave[0][2]:
+                    wave.append(batches[cursor])
+                    cursor += 1
+                tasks = [
+                    asyncio.create_task(request_batch(batch, ledger)) for batch, _, ledger in wave
+                ]
                 try:
-                    if isinstance(response, Exception):
-                        raise response
-                    assignments = response.get("assignments", [])
-                    ids = [a.get("id") for a in assignments if isinstance(a, dict)]
-                    expected = {s["id"] for s in batch}
-                    if len(ids) != len(expected) or set(ids) != expected:
-                        raise ValueError("incomplete membership")
-                    for a in assignments:
-                        if type(a.get("relevant")) is not bool or (
-                            a["relevant"]
-                            and (
-                                str(a.get("issue") or "").strip() not in COMMENT_ISSUES
-                                or str(a.get("stance") or "").strip() not in COMMENT_STANCES
+                    responses = await asyncio.gather(*tasks)
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                for (batch, attempt, ledger), response in zip(wave, responses, strict=True):
+                    try:
+                        if isinstance(response, Exception):
+                            raise response
+                        assignments = response.get("assignments", [])
+                        ids = [a.get("id") for a in assignments if isinstance(a, dict)]
+                        expected = {s["id"] for s in batch}
+                        if len(ids) != len(expected) or set(ids) != expected:
+                            raise ValueError("incomplete membership")
+                        for a in assignments:
+                            if type(a.get("relevant")) is not bool or (
+                                a["relevant"]
+                                and (
+                                    str(a.get("issue") or "").strip() not in COMMENT_ISSUES
+                                    or str(a.get("stance") or "").strip() not in COMMENT_STANCES
+                                )
+                            ):
+                                raise ValueError("invalid classification")
+                        for a in assignments:
+                            if (
+                                institution_scope
+                                and a["relevant"]
+                                and a["issue"] not in INSTITUTION_COMMENT_ISSUES
+                            ):
+                                a["relevant"] = False
+                                a["scope_excluded"] = True
+                            assignments_by_id[a["id"]] = a
+                            classified.add(a["id"])
+                            if a["relevant"]:
+                                topic = f"{a['issue']}｜{a['stance']}"
+                                labels.setdefault(topic, []).append(a["id"])
+                            else:
+                                irrelevant.add(a["id"])
+                    except Exception as exc:
+                        diagnostic = upstream_diagnostic(
+                            exc, stage="comment_classification", batch=batch[0]["id"]
+                        )
+                        if isinstance(exc, ValueError):
+                            diagnostic.update(
+                                category="invalid_output",
+                                message="分类结果未满足逐条成员或固定标签契约",
+                                expected_items=len(batch),
                             )
+                        diagnostics.append(diagnostic)
+                        if isinstance(exc, LLMBudgetExhausted):
+                            warnings.append(
+                                "评论分类额度不足，已为综合与主题审查保留阶段预算；成功分类保留，未处理样本可恢复。"
+                            )
+                            stopped = True
+                        elif (
+                            isinstance(exc, (ValueError, LLMOutputTruncated))
+                            and attempt < 5
+                            and len(batch) > 1
                         ):
-                            raise ValueError("invalid classification")
-                    for a in assignments:
-                        if (
-                            institution_scope
-                            and a["relevant"]
-                            and a["issue"] not in INSTITUTION_COMMENT_ISSUES
-                        ):
-                            a["relevant"] = False
-                            a["scope_excluded"] = True
-                        assignments_by_id[a["id"]] = a
-                        classified.add(a["id"])
-                        if a["relevant"]:
-                            topic = f"{a['issue']}｜{a['stance']}"
-                            labels.setdefault(topic, []).append(a["id"])
+                            middle = len(batch) // 2
+                            batches.extend(
+                                [
+                                    (batch[:middle], attempt + 1, ledger),
+                                    (batch[middle:], attempt + 1, ledger),
+                                ]
+                            )
                         else:
-                            irrelevant.add(a["id"])
-                except Exception as exc:
-                    diagnostic = upstream_diagnostic(
-                        exc, stage="comment_classification", batch=batch[0]["id"]
-                    )
-                    if isinstance(exc, ValueError):
-                        diagnostic.update(
-                            category="invalid_output",
-                            message="分类结果未满足逐条成员或固定标签契约",
-                            expected_items=len(batch),
-                        )
-                    diagnostics.append(diagnostic)
-                    if isinstance(exc, LLMBudgetExhausted):
-                        warnings.append(
-                            "评论分类因本地阶段预算不足中止，已完成分类保留，未处理样本可恢复。"
-                        )
-                        stopped = True
-                    elif (
-                        isinstance(exc, (ValueError, LLMOutputTruncated))
-                        and attempt < 5
-                        and len(batch) > 1
-                    ):
-                        middle = len(batch) // 2
-                        batches.extend(
-                            [
-                                (batch[:middle], attempt + 1, ledger),
-                                (batch[middle:], attempt + 1, ledger),
-                            ]
-                        )
-                    else:
-                        warnings.append(
-                            f"一批评论分类在有界重试后仍未完成（{type(exc).__name__}），未计入有效分析。"
-                        )
-                await persist()
+                            warnings.append(
+                                f"一批评论分类在有界重试后仍未完成（{type(exc).__name__}），未计入有效分析。"
+                            )
+                    await persist()
         coverage.update(
             classified=len(classified),
             irrelevant=len(irrelevant),

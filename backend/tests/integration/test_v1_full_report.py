@@ -31,6 +31,204 @@ class InstitutionReviewer:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reject_quote", [False, True])
+async def test_comment_priority_drops_theme_removed_by_final_privacy_review(
+    runtime_dir: Path, reject_quote: bool
+):
+    from yuqing.services.institution_scope import ScopeReview
+
+    class Reviewer(InstitutionReviewer):
+        async def review(self, texts, *, kind):
+            return [
+                ScopeReview("rejected", "policy", text)
+                if reject_quote and text == "希望解释复核依据"
+                else ScopeReview("incomplete", "local_budget", text)
+                if not reject_quote and "主题综合原话" in text
+                else ScopeReview("accepted", "policy", text)
+                for text in texts
+            ]
+
+    database = Database(runtime_dir / "comment-priority-privacy.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(
+            TaskCreate(
+                event_query="机构复核事项", comment_mode="smart", investigation_scope="public_event"
+            )
+        )
+        evidence = await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://example.test/notice",
+                title="公开通报",
+                snippet="机构发布复核结果。",
+            )
+        )
+        theme = {
+            "title": "解释复核依据",
+            "text": "主题综合原话仍需最终隐私审查",
+            "interpretation": "主题综合原话仍需最终隐私审查",
+            **{
+                key: "样本希望了解复核依据。"
+                for key in (
+                    "stance_analysis",
+                    "controversy",
+                    "risk_assessment",
+                    "response_gap",
+                    "response_action",
+                    "priority_reason",
+                    "uncertainty",
+                )
+            },
+            "priority": "补充说明",
+            "comment_refs": ["M1"],
+            "quotes": [
+                {
+                    "id": "M1",
+                    "text": "希望解释复核依据",
+                    "platform": "weibo",
+                    "evidence_ref": evidence.local_id,
+                }
+            ],
+            "sample_count": 1,
+            "stance_counts": {"质疑": 1},
+            "platform_counts": {"weibo": 1},
+            "time_counts": {"时间未知": 1},
+            "review_status": "accepted",
+            "evidence_refs": [evidence.local_id],
+        }
+        board = await ForumBoard.restore(database, task.id)
+        await board.post(
+            ForumMessageCreate(
+                task_id=task.id,
+                round=1,
+                agent="comment_insight",
+                type="summary",
+                content="已形成待最终审查的样本主题。",
+                payload={
+                    "comment_analysis": {
+                        "version": 4,
+                        "status": "complete",
+                        "items": [theme],
+                        "samples": [
+                            {
+                                "id": "M1",
+                                "text": "希望解释复核依据",
+                                "platform": "weibo",
+                                "evidence_ref": evidence.local_id,
+                            }
+                        ],
+                        "coverage": {
+                            "classified": 1,
+                            "irrelevant": 0,
+                            "unclassified": 0,
+                            "reviewed_themes": 1,
+                            "in_reviewed_themes": 1,
+                            "relevant_without_reviewed_theme": 0,
+                        },
+                        "priority_order": [
+                            {
+                                "title": theme["title"],
+                                "priority": theme["priority"],
+                                "reason": theme["priority_reason"],
+                                "sample_count": 1,
+                                "comment_refs": ["M1"],
+                            }
+                        ],
+                    }
+                },
+            )
+        )
+        _, report, _ = await FullReportBuilder(
+            database, runtime_dir / "reports", scope_reviewer=Reviewer()
+        ).build(task.id, forum=board.history())
+        block = next(b for b in report["blocks"] if b["type"] == "comment_insight")
+        assert block["items"] == []
+        assert block["priority_order"] == []
+        assert block["coverage"]["reviewed_themes"] == 0
+        assert report["quality"]["chapter_status"]["comments"]["status"] == "failed"
+        if reject_quote:
+            assert block["samples"] == []
+            assert block["coverage"]["final_scope_hidden_samples"] == 1
+            assert block["coverage"]["displayed_samples"] == 0
+            assert block["coverage"]["classified"] == 1
+            from yuqing.render.html import render_html
+
+            assert "希望解释复核依据" not in render_html(report)
+        else:
+            assert len(block["samples"]) == 1
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_reviewed_comment_themes_keep_incomplete_privacy_coverage_partial(runtime_dir: Path):
+    database = Database(runtime_dir / "partial-comment-privacy.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(
+            TaskCreate(event_query="机构公开复核", comment_mode="smart")
+        )
+        evidence = await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://example.test/notice",
+                title="机构复核通报",
+                snippet="机构已公开复核结果。",
+            )
+        )
+        board = await ForumBoard.restore(database, task.id)
+        await board.post(
+            ForumMessageCreate(
+                task_id=task.id,
+                round=1,
+                agent="comment_insight",
+                type="summary",
+                content="已审样本希望解释复核依据，另有样本隐私审查尚未完成。",
+                refs=[evidence.local_id],
+                payload={
+                    "comment_analysis": {
+                        "version": 1,
+                        "status": "complete",
+                        "items": [
+                            {
+                                "text": "希望解释复核依据",
+                                "evidence_refs": [evidence.local_id],
+                                "comment_refs": ["M1"],
+                                "sample_count": 1,
+                                "review_status": "accepted",
+                                "platform_counts": {"weibo": 1},
+                            }
+                        ],
+                        "samples": [
+                            {
+                                "id": "M1",
+                                "text": "希望解释复核依据",
+                                "platform": "weibo",
+                                "evidence_ref": evidence.local_id,
+                            }
+                        ],
+                        "coverage": {
+                            "classified": 1,
+                            "unclassified": 0,
+                            "relevant_without_reviewed_theme": 0,
+                            "scope_review_incomplete": 399,
+                        },
+                    }
+                },
+            )
+        )
+        _, report, _ = await FullReportBuilder(database, runtime_dir / "reports").build(
+            task.id, forum=board.history()
+        )
+        comments = report["quality"]["chapter_status"]["comments"]
+        assert comments["status"] == "partial"
+        assert comments["coverage"]["scope_review_incomplete"] == 399
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_institution_report_hides_personal_source_text_and_preserves_link(
     runtime_dir: Path, claim_limits: dict[str, int]
 ):

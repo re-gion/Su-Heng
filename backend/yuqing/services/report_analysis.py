@@ -179,7 +179,8 @@ def report_context(
                 "published_at": source.published_at,
                 "fetch_status": source.fetch_status,
                 "content_origin": content_origin,
-                "excerpt": content[:2400],
+                "excerpt": _focused_excerpt(content, source.local_id, facts),
+                "excerpt_is_preview": len(content) > 2400,
                 "measurement_passages": measurements,
             }
         )
@@ -189,17 +190,27 @@ def report_context(
     )[-10:]
     return {
         "task": task,
-        "audience": "高校或机构决策者",
+        "audience": "公众读者与高校或机构决策者：先解释事件与分歧，再提供有依据的处置建议",
         "facts": [
             {
                 **{
                     k: f.get(k)
-                    for k in ("claim_ref", "text", "badge", "verification_state", "origin_agent")
+                    for k in (
+                        "claim_ref",
+                        "text",
+                        "badge",
+                        "verdict",
+                        "verification_state",
+                        "origin_agent",
+                        "independent_sources",
+                        "evidence_grade",
+                    )
                 },
                 "citations": [
                     {
                         "evidence_ref": c["evidence_ref"],
                         "relation": c.get("relation"),
+                        "quote": _text(c.get("quote"), 240),
                     }
                     for c in f.get("citations", [])[:3]
                 ],
@@ -210,6 +221,32 @@ def report_context(
         "open_questions": gaps,
         "coverage": {"available_sources": len(evidence), "context_sources": len(inventory)},
     }
+
+
+def _focused_excerpt(content: str, source_ref: str, facts: list[dict]) -> str:
+    """Keep the source opening and passages actually used by the cited facts."""
+    if len(content) <= 2400:
+        return content
+    windows = [(0, 700)]
+    for fact in facts:
+        for citation in fact.get("citations", []):
+            if citation.get("evidence_ref") != source_ref:
+                continue
+            quote = citation.get("quote") or fact.get("text") or ""
+            if len(quote) < 8:
+                continue
+            offset = content.find(quote)
+            if offset >= 0:
+                windows.append((max(0, offset - 180), min(len(content), offset + len(quote) + 180)))
+    merged = []
+    for start, end in sorted(set(windows)):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    # Put cited passages first so a smaller chapter window still contains the basis.
+    merged.sort(key=lambda window: window[0] == 0)
+    return "\n…（中间内容省略）…\n".join(content[a:b] for a, b in merged)[:2400]
 
 
 def assemble_analysis(
@@ -239,7 +276,7 @@ def assemble_analysis(
     sections: dict[str, list[dict]] = {"04": [], "05": [], "06": [], "07": []}
     seen: set[str] = set()
     items = result.get("analyses", [])
-    for proposed in items[:12] if isinstance(items, list) else []:
+    for proposed in items[:16] if isinstance(items, list) else []:
         if not isinstance(proposed, dict):
             rejected["analysis_shape"] += 1
             continue
@@ -300,12 +337,13 @@ def assemble_analysis(
             continue
         unconfirmed = [r for r in refs if fact_map[r].get("badge") != "verified"]
         if unconfirmed:
-            fields["uncertainty"] = (
+            boundary = (
                 "所据陈述尚未全部证实（"
                 + "、".join(unconfirmed)
                 + "），以下研判以其后续成立为前提。"
-                + fields["uncertainty"]
             )
+            if not fields["uncertainty"].startswith(boundary):
+                fields["uncertainty"] = boundary + fields["uncertainty"]
         sections[section].append(
             {
                 **fields,
@@ -386,7 +424,7 @@ def assemble_analysis(
             )
     summary["why"] = [
         {
-            "text": f"{item['interpretation']} {item['implication']}",
+            "text": item["title"],
             "claim_refs": item["claim_refs"],
             "evidence_refs": item["evidence_refs"],
             "uncertainty": item["uncertainty"],
@@ -394,17 +432,17 @@ def assemble_analysis(
         }
         for section in (("04", "05") if sections["04"] or sections["05"] else ("07",))
         for item in sections[section]
-    ][:4]
+    ][:3]
     summary["so_what"] = [
         {
-            "text": f"{item['action']}（建议负责：{item['owner']}；触发条件：{item['trigger']}）",
+            "text": item["title"],
             "claim_refs": item["claim_refs"],
             "evidence_refs": item["evidence_refs"],
             "uncertainty": item["uncertainty"],
             "is_editorial": True,
         }
         for item in sections["07"]
-    ][:4]
+    ][:3]
     metric_items = []
     measures = result.get("measurements", [])
     metric_seen: dict[tuple, dict] = {}

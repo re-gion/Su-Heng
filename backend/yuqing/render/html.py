@@ -95,7 +95,12 @@ def _claim_link(claim_ref: str) -> str:
     return f'<a class="claim-link" href="#claim-{ref}" aria-label="查看事实 {ref}">[{ref}]</a>'
 
 
-def _summary(block: dict[str, Any], claim_badges: dict[str, str]) -> str:
+def _summary(
+    block: dict[str, Any],
+    claim_badges: dict[str, str],
+    analysis_targets: dict[str, str] | None = None,
+) -> str:
+    analysis_targets = analysis_targets or {}
     groups = []
     for key, title in (
         ("what", "关键进展及其核验状态"),
@@ -103,14 +108,26 @@ def _summary(block: dict[str, Any], claim_badges: dict[str, str]) -> str:
         ("so_what", "目前意味着什么"),
     ):
         rendered_items = []
+        if key == "so_what" and any(
+            item.get("text") in analysis_targets for item in block.get(key, [])
+        ):
+            title = "优先决策事项（分析判断）"
         for item in block.get(key, []):
             if item.get("is_editorial"):
                 refs = "".join(_claim_link(ref) for ref in item.get("claim_refs", []))
-                refs += "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
+                evidence_refs = "".join(
+                    _citation_link(ref) for ref in item.get("evidence_refs", [])
+                )
+                text = _escape(item.get("text"))
+                target = analysis_targets.get(item.get("text"))
+                if target:
+                    text = f'<a href="#{_escape(target)}">{text}</a>'
                 rendered_items.append(
                     '<li><span class="badge strength" title="有证据边界的分析判断">分析判断</span>'
-                    f"{_escape(item.get('text'))}{refs}"
-                    f'<small class="verify-state">不确定性：{_escape(item.get("uncertainty"))}</small></li>'
+                    f"{text}{refs}"
+                    '<details class="summary-boundary"><summary>依据、核验边界与不确定性</summary>'
+                    f'<small class="verify-state">{_escape(item.get("uncertainty"))}</small>'
+                    f"<p>{evidence_refs}</p></details></li>"
                 )
                 continue
             claim_ref = str(item.get("claim_ref") or "")
@@ -210,11 +227,18 @@ def _fact_table(block: dict[str, Any]) -> str:
 
 
 def _limitations(block: dict[str, Any]) -> str:
-    items = "".join(
-        f"<li><strong>{_escape(item.get('category'))}</strong>：{_escape(item.get('text'))}</li>"
-        for item in block.get("items", [])
+    current, process = [], []
+    for item in block.get("items", []):
+        line = f"<li><strong>{_escape(item.get('category'))}</strong>：{_escape(item.get('text'))}</li>"
+        (process if item.get("category") == "协作编排" else current).append(line)
+    history = (
+        '<details class="process-limitations"><summary>调查过程记录与阶段缺口</summary>'
+        "<p>以下是调查各阶段的记录；最终发布状态与现存缺口见报告结论及质量说明。</p>"
+        f"<ul>{''.join(process)}</ul></details>"
+        if process
+        else ""
     )
-    return f'<section id="limitations"><h2>局限性声明</h2><ul>{items}</ul></section>'
+    return f'<section id="limitations"><h2>局限性声明</h2><ul>{"".join(current)}</ul>{history}</section>'
 
 
 def _appendix(block: dict[str, Any]) -> str:
@@ -472,13 +496,20 @@ def _analysis(block: dict[str, Any]) -> str:
     for item in block.get("items", []):
         refs = "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
         claims = "".join(_claim_link(ref) for ref in item.get("claim_refs", []))
+        actions = "".join(
+            (
+                _optional_field("建议行动", item.get("action"), "analysis-action"),
+                _optional_field("责任主体", item.get("owner")),
+                _optional_field("触发条件", item.get("trigger")),
+            )
+        )
+        if actions and block.get("section") != "07":
+            actions = f'<details class="analysis-related-action"><summary>对应行动条件</summary>{actions}</details>'
         body = "".join(
             (
                 _optional_field("解释", item.get("interpretation")),
                 _optional_field("影响", item.get("implication")),
-                _optional_field("建议行动", item.get("action"), "analysis-action"),
-                _optional_field("责任主体", item.get("owner")),
-                _optional_field("触发条件", item.get("trigger")),
+                actions,
                 _optional_field("不确定性", item.get("uncertainty"), "analysis-uncertainty"),
             )
         )
@@ -686,12 +717,20 @@ def _generic_block(block: dict[str, Any]) -> str:
                     ("unclassified", "未完成分类"),
                     ("in_reviewed_themes", "进入已审主题"),
                     ("relevant_without_reviewed_theme", "相关但未形成已审主题"),
+                    ("displayed_samples", "最终可展示样本"),
+                    ("final_scope_hidden_samples", "最终展示审查未通过"),
                 )
+                if key not in {"displayed_samples", "final_scope_hidden_samples"} or key in coverage
             )
             + "</p>"
             if coverage
             else ""
         )
+        if coverage.get("final_scope_hidden_samples"):
+            coverage_html += (
+                '<p class="sample-notice">最终展示审查未通过的样本及其关联主题不展示；'
+                "原采集和分类记录保留，因此历史分类数量与当前可展示数量不同。</p>"
+            )
         collections = "".join(
             f"<li><strong>{_escape(item.get('platform'))}</strong> · {_escape(item.get('title'))} · "
             f"{_escape(item.get('collected_count'))} 条 · {_escape(item.get('sampling_method'))}"
@@ -834,7 +873,11 @@ def _generic_block(block: dict[str, Any]) -> str:
     return f'<section id="{_escape(block.get("block_id"))}"><h2>{title}</h2>{items}{fallback}</section>'
 
 
-def _render_block(block: dict[str, Any], claim_badges: dict[str, str]) -> str:
+def _render_block(
+    block: dict[str, Any],
+    claim_badges: dict[str, str],
+    analysis_targets: dict[str, str] | None = None,
+) -> str:
     block_type = block.get("type")
     if block.get("section") == "09" and block_type in {"chart", "kpi_grid"}:
         return (
@@ -845,7 +888,7 @@ def _render_block(block: dict[str, Any], claim_badges: dict[str, str]) -> str:
             + "</details>"
         )
     if block_type == "executive_summary":
-        return _summary(block, claim_badges)
+        return _summary(block, claim_badges, analysis_targets)
     if block_type == "fact_check_table":
         return _fact_table(block)
     if block_type == "limitations":
@@ -900,10 +943,17 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
         if item.get("claim_ref")
     }
     grouped: dict[str, list[tuple[bool, str]]] = {}
+    analysis_targets = {
+        item["title"]: block["block_id"]
+        for block in blocks
+        if block.get("type") in {"analysis", "action_plan"} and block.get("block_id")
+        for item in block.get("items", [])
+        if item.get("title")
+    }
     for block in blocks:
         if block.get("type") == "report_header":
             continue
-        rendered = _render_block(block, claim_badges)
+        rendered = _render_block(block, claim_badges, analysis_targets)
         if block.get("type") == "executive_summary":
             decisions = [
                 (analysis.get("block_id"), item.get("title"))
@@ -912,7 +962,9 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
                 for item in analysis.get("items", [])
                 if item.get("title")
             ][:3]
-            if decisions:
+            if decisions and not any(
+                item.get("text") in analysis_targets for item in block.get("so_what", [])
+            ):
                 links = "".join(
                     f'<li><a href="#{_escape(target)}">{_escape(title)}</a></li>'
                     for target, title in decisions

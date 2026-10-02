@@ -263,6 +263,7 @@ class FullReportBuilder:
             incomplete = sum(d.status == "incomplete" for d in decisions)
         else:
             safe, rejected, incomplete = set(), 0, len(ordered)
+        self._hide_unreviewed_comment_samples(report, set(ordered) - safe)
         removed_blocks = set()
         for owner, item, part in units:
             if part <= safe:
@@ -414,6 +415,112 @@ class FullReportBuilder:
             elif block.get("block_id") == "b_02_correction_timeline":
                 visit(block, material_timeline=True)
         return changes
+
+    @staticmethod
+    def _hide_unreviewed_comment_samples(
+        report: dict[str, Any], unapproved_texts: set[str]
+    ) -> None:
+        """Apply final quote decisions to every display copy of the same sample."""
+        for block in report["blocks"]:
+            if block.get("type") != "comment_insight":
+                continue
+            samples = block.get("samples", [])
+            hidden_ids = {
+                sample["id"] for sample in samples if sample.get("text") in unapproved_texts
+            }
+            if not hidden_ids:
+                continue
+            block["samples"] = [sample for sample in samples if sample["id"] not in hidden_ids]
+            # A reviewed theme depends on all of its members. Removing a member
+            # requires a new semantic review, not silently changing its statistics.
+            block["items"] = [
+                item
+                for item in block.get("items", [])
+                if not hidden_ids.intersection(item.get("comment_refs", []))
+            ]
+            coverage = block.setdefault("coverage", {})
+            coverage["final_scope_hidden_samples"] = coverage.get(
+                "final_scope_hidden_samples", 0
+            ) + len(hidden_ids)
+            coverage["displayed_samples"] = len(block["samples"])
+
+    @staticmethod
+    def _reconcile_reviewed_comment_themes(report: dict[str, Any]) -> None:
+        """Derive priority rows and coverage from themes retained by final review."""
+        chapter = report.get("quality", {}).get("chapter_status", {}).get("comments")
+        if (
+            chapter
+            and chapter.get("status") != "disabled"
+            and not any(b.get("type") == "comment_insight" for b in report["blocks"])
+        ):
+            coverage = dict(chapter.get("coverage", {}))
+            coverage.update(
+                reviewed_themes=0,
+                in_reviewed_themes=0,
+                relevant_without_reviewed_theme=max(
+                    0, coverage.get("classified", 0) - coverage.get("irrelevant", 0)
+                ),
+            )
+            chapter.update(
+                status="failed",
+                coverage=coverage,
+                message="评论增量未通过全部最终审查，未展示主题及排序；已保留未完成原因。",
+            )
+            return
+        for block in report["blocks"]:
+            if block.get("type") != "comment_insight" or block.get("analysis_version", 1) < 4:
+                continue
+            items = block.get("items", [])
+            rank = {"立即回应": 0, "补充说明": 1, "持续观察": 2}
+            block["priority_order"] = [
+                {
+                    "title": item["title"],
+                    "priority": item["priority"],
+                    "reason": item["priority_reason"],
+                    "sample_count": item["sample_count"],
+                    "comment_refs": list(item["comment_refs"]),
+                }
+                for item in sorted(
+                    items,
+                    key=lambda item: (
+                        rank.get(item.get("priority"), 1),
+                        -item.get("sample_count", 0),
+                        item.get("title", ""),
+                    ),
+                )
+            ]
+            coverage = block.setdefault("coverage", {})
+            members = {ref for item in items for ref in item.get("comment_refs", [])}
+            coverage.update(
+                reviewed_themes=len(items),
+                in_reviewed_themes=len(members),
+                relevant_without_reviewed_theme=max(
+                    0, coverage.get("classified", 0) - coverage.get("irrelevant", 0) - len(members)
+                ),
+            )
+            status = (
+                "partial"
+                if items
+                and (
+                    coverage.get("unclassified", 0)
+                    or coverage["relevant_without_reviewed_theme"]
+                    or coverage.get("scope_review_incomplete", 0)
+                )
+                else "complete"
+                if items
+                or block.get("analysis_status") == "complete"
+                and not coverage["relevant_without_reviewed_theme"]
+                and not coverage.get("unclassified", 0)
+                and not coverage.get("scope_review_incomplete", 0)
+                else "failed"
+            )
+            block["analysis_status"] = status
+            if not items:
+                block["fallback_text"] = (
+                    "评论主题未通过全部最终审查，未展示主题及其处置排序；已采样本和未完成记录保留。"
+                )
+            if chapter and chapter.get("status") != "disabled":
+                chapter.update(status=status, coverage=coverage)
 
     async def _scope_report_is_safe(self, report: dict[str, Any]) -> bool:
         if self.scope_reviewer is None:
@@ -1286,6 +1393,7 @@ class FullReportBuilder:
             try:
                 context = report_context(report["task"], analysis_facts, analysis_sources, forum)
                 context["comment_insights"] = comment_insight.get("items", [])
+                context["comment_coverage"] = comment_insight.get("coverage", {})
                 context["propagation_edges"] = propagation_edges
                 if hasattr(self.reporter, "bind"):
                     self.reporter.bind(self.database, task_id)
@@ -1417,6 +1525,7 @@ class FullReportBuilder:
             and (
                 comment_coverage.get("unclassified", 0)
                 or comment_coverage.get("relevant_without_reviewed_theme", 0)
+                or comment_coverage.get("scope_review_incomplete", 0)
             )
             else "complete"
             if comment_insight.get("items") or comment_insight.get("analysis_status") == "complete"
@@ -1544,6 +1653,7 @@ class FullReportBuilder:
                 self.scope_reviewer.gateway.token_limit = scope_review_cap
             self._hide_scoped_source_text(report)
             await self._retain_reviewed_blocks(report, task)
+            self._reconcile_reviewed_comment_themes(report)
             self._ensure_action_chapter(report)
             for block in report["blocks"]:
                 if block["type"] == "evidence_appendix":
