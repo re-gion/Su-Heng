@@ -962,6 +962,8 @@ h1{font-size:clamp(30px,4vw,46px)!important;max-width:1080px!important;text-wrap
     css += """
 .section-marker{gap:14px;margin-bottom:30px;padding:0 0 15px;border-bottom:2px solid var(--ink-2);color:var(--ink-2);font-family:STZhongsong,"Microsoft YaHei",sans-serif;font-size:clamp(22px,2.2vw,30px);line-height:1.35;letter-spacing:0}
 .section-marker span{flex:0 0 auto;padding:5px 8px;font:700 14px/1.2 Consolas,monospace}
+.report-section.is-current{outline:3px solid #e19a22;outline-offset:4px}
+@media print{.report-section.is-current{outline:none}}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .evidence-card{padding:0;scroll-margin-top:76px}.evidence-card>summary{display:grid;grid-template-columns:minmax(62px,.45fr) minmax(220px,2fr) minmax(150px,1fr) minmax(120px,.8fr);gap:14px;align-items:center;padding:17px 20px;cursor:pointer;list-style-position:inside}.evidence-card>summary:hover{background:#f3f7f8}.evidence-card[open]>summary{border-bottom:1px solid var(--line);background:#f7fafb}.evidence-title{font-weight:700;line-height:1.45}.evidence-source{color:var(--muted);font-size:13px}.evidence-status{justify-self:end;padding:4px 7px;background:#edf2f5;color:#334d60;font-size:12px}.evidence-body{padding:4px 20px 18px}.evidence-body blockquote{margin-left:0;margin-right:0;padding:12px 16px;background:#f7f9fa;border-left:3px solid var(--teal)}
 .claim-overflow,.uncited-evidence-group{margin-top:18px;border:1px solid var(--line);background:#f8fafb}.claim-overflow>summary,.uncited-evidence-group>summary{padding:15px 18px;cursor:pointer;font-weight:700;color:var(--ink-2)}.claim-overflow>.claim-card,.uncited-evidence-group>.evidence-card{margin-left:14px;margin-right:14px;background:#fff}
@@ -1005,7 +1007,7 @@ const revealTarget=hash=>{{
   let ancestor=target.parentElement;
   while(ancestor){{if(ancestor.tagName==='DETAILS')ancestor.open=true;ancestor=ancestor.parentElement}}
   document.querySelectorAll('.highlight').forEach(item=>item.classList.remove('highlight'));
-  target.classList.add('highlight');
+  if(!target.classList.contains('report-section'))target.classList.add('highlight');
   requestAnimationFrame(()=>target.scrollIntoView({{block:'start'}}));
 }};
 document.querySelectorAll('.citation,.claim-link').forEach(link=>link.addEventListener('click',event=>{{
@@ -1013,10 +1015,14 @@ document.querySelectorAll('.citation,.claim-link').forEach(link=>link.addEventLi
 }}));
 window.addEventListener('hashchange',()=>revealTarget(location.hash));
 const tocLinks=[...document.querySelectorAll('.report-toc a[data-section-target]')];
-const activate=id=>tocLinks.forEach(link=>{{if(link.dataset.sectionTarget===id)link.setAttribute('aria-current','location');else link.removeAttribute('aria-current')}});
+const reportSections=[...document.querySelectorAll('.report-section')];
+const activate=id=>{{
+  tocLinks.forEach(link=>{{if(link.dataset.sectionTarget===id)link.setAttribute('aria-current','location');else link.removeAttribute('aria-current')}});
+  reportSections.forEach(section=>section.classList.toggle('is-current',section.id===id&&!section.classList.contains('is-hidden')));
+}};
 tocLinks.forEach(link=>link.addEventListener('click',()=>activate(link.dataset.sectionTarget)));
 const observer=new IntersectionObserver(entries=>entries.filter(entry=>entry.isIntersecting).forEach(entry=>activate(entry.target.id)),{{rootMargin:'-15% 0px -70% 0px',threshold:0}});
-document.querySelectorAll('.report-section').forEach(section=>observer.observe(section));
+reportSections.forEach(section=>observer.observe(section));
 applyView(initialView);
 if(location.hash)revealTarget(location.hash);
 """
