@@ -576,6 +576,42 @@ class FullReportBuilder:
             if block.get("analysis_version") == 5:
                 reconcile_questions(block)
                 coverage = block["coverage"]
+                if block.get("analysis_mode") == "quick_read":
+                    coverage["relevant_without_index"] = max(
+                        0,
+                        coverage.get("classified", 0)
+                        - coverage.get("irrelevant", 0)
+                        - coverage.get("samples_with_observations", 0),
+                    )
+                    quick_status = (
+                        "partial"
+                        if (
+                            coverage.get("unclassified")
+                            or coverage.get("ungrouped_observations")
+                            or coverage.get("relevant_without_index")
+                            or coverage.get("index_review_incomplete")
+                            or any(not q.get("summary") for q in block["items"])
+                        )
+                        else "complete"
+                    )
+                    if not block.get("samples") and coverage.get("collected"):
+                        quick_status = "unavailable"
+                    block["quick_read_status"] = quick_status
+                    block["analysis_status"] = (
+                        "partial"
+                        if coverage.get("scope_review_incomplete")
+                        else "failed"
+                        if quick_status == "unavailable"
+                        else quick_status
+                    )
+                    if chapter:
+                        chapter.update(
+                            status=block["analysis_status"],
+                            coverage=coverage,
+                            quick_read_status=quick_status,
+                            message="速读按合格样本范围交付；深挖由用户点选，未开启不计为速读失败。",
+                        )
+                    continue
                 block["analysis_status"] = (
                     "partial"
                     if block["observations"]
@@ -1340,7 +1376,10 @@ class FullReportBuilder:
                     observations=structured_comments.get("observations", []),
                     stages=structured_comments.get("stages", {}),
                     follow_ups=structured_comments.get("follow_ups", []),
-                    title="评论问题与样本观察",
+                    analysis_mode=structured_comments.get("mode", "deep_analysis"),
+                    title="评论速读"
+                    if structured_comments.get("mode") == "quick_read"
+                    else "评论问题与样本观察",
                     fallback_text=None
                     if structured_comments.get("observations")
                     else "未形成通过审查的观察；未完成原因见分析记录。",
@@ -1671,6 +1710,7 @@ class FullReportBuilder:
                 comment_coverage.get("unclassified", 0)
                 or comment_coverage.get("relevant_without_reviewed_theme", 0)
                 or comment_coverage.get("scope_review_incomplete", 0)
+                or comment_insight.get("analysis_status") == "partial"
             )
             else "complete"
             if comment_insight.get("items")

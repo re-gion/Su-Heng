@@ -156,6 +156,63 @@ class FakeFactory:
 
 
 @pytest.mark.asyncio
+async def test_reasoning_profile_is_explicit_and_output_floor_does_not_cross_profiles():
+    class Capture:
+        def __init__(self):
+            self.calls = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                usage=SimpleNamespace(total_tokens=3),
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"reply":"OK"}'), finish_reason="stop"
+                    )
+                ],
+            )
+
+    factory = FakeFactory()
+    capture = Capture()
+    factory.client.chat.completions = capture
+    gateway = LLMGateway(factory)
+    gateway.learn_output_budgets(
+        [
+            {
+                "model": "fixture",
+                "role": "verifier",
+                "stage": "review",
+                "reasoning_effort": "high",
+                "status": "complete",
+                "output_tokens": 10000,
+                "reasoning_tokens": 9000,
+            }
+        ]
+    )
+    with gateway.context(stage="review"):
+        await gateway.complete_json(
+            "verifier",
+            "system",
+            "user",
+            max_tokens=2048,
+            reasoning_effort="low",
+            temperature=1.0,
+            top_p=0.95,
+        )
+        await gateway.complete_json(
+            "verifier", "system", "user", max_tokens=2048, reasoning_effort="high"
+        )
+        await gateway.complete_json("verifier", "system", "user", max_tokens=2048)
+    assert capture.calls[0]["reasoning_effort"] == "low"
+    assert capture.calls[0]["temperature"] == 1.0 and capture.calls[0]["top_p"] == 0.95
+    assert capture.calls[0]["max_tokens"] == 2048
+    assert capture.calls[1]["reasoning_effort"] == "high" and capture.calls[1]["max_tokens"] > 10000
+    assert "reasoning_effort" not in capture.calls[2]
+    assert "top_p" not in capture.calls[2] and capture.calls[2]["temperature"] == 0
+    assert capture.calls[2]["max_tokens"] == 2048
+
+
+@pytest.mark.asyncio
 async def test_invalid_json_response_is_retried_before_returning():
     factory = FakeFactory()
     gateway = LLMGateway(factory)

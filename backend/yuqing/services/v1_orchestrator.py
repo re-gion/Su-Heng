@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from openai import RateLimitError
 
+from yuqing.agents.comment_observations import fingerprint
 from yuqing.agents.runtime import GeneratedClaim, InvestigationAgent, Reflection, SearchQuery
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
@@ -37,6 +38,7 @@ from yuqing.services.institution_scope import (
     PROTECTED_SCOPES,
     PUBLIC_EVENT_INSTRUCTION,
     SCOPE_INSTRUCTION,
+    SCOPE_POLICY_VERSION,
     InstitutionScopeReviewer,
 )
 from yuqing.services.investigation_scope import (
@@ -300,6 +302,9 @@ class V1Orchestrator:
                 )
                 used = getattr(self.usage, "tokens_used", baseline)
                 limit = min(cap, used + max(0, cap - used) * 4 // 5)
+            absolute = getattr(self.usage, "absolute_token_limit", None)
+            if isinstance(absolute, int):
+                limit = min(limit, absolute)
             self.usage.token_limit = limit
             self.usage.total_token_limit = token_limit
             self.usage.phase = phase
@@ -1107,10 +1112,16 @@ class V1Orchestrator:
             self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
         return result
 
-    async def _comment_follow_up(self, task_id: str, event_query: str, question: dict) -> dict:
+    async def _comment_follow_up(
+        self, task_id: str, event_query: str, question: dict, *, allow_done=False
+    ) -> dict:
         """One public search round; share all normal search/fetch/claim/verify caps."""
         task = await self.database.get_task(task_id)
-        if not task or task.status != "running" or question.get("publicly_verifiable") is not True:
+        if (
+            not task
+            or task.status not in ({"running", "done"} if allow_done else {"running"})
+            or question.get("publicly_verifiable") is not True
+        ):
             return {"status": "not_applicable", "evidence": []}
         key = "comments:follow-up:" + question["id"]
         attempts = await self.database.fetch_one(
@@ -1412,10 +1423,21 @@ class V1Orchestrator:
                 )
 
             analysis_method = getattr(
-                self.comment_agent, "analyze_questions", self.comment_agent.analyze
+                self.comment_agent,
+                "analyze_quick_read",
+                getattr(self.comment_agent, "analyze_questions", self.comment_agent.analyze),
             )
             extra = {}
-            if hasattr(self.comment_agent, "analyze_questions"):
+            if hasattr(self.comment_agent, "analyze_quick_read"):
+                extra["review_policy_version"] = SCOPE_POLICY_VERSION
+                extra["public_context_fingerprint"] = fingerprint(
+                    await self._comment_public_context(task_id)
+                )
+                if self.scope_reviewer and task and task.investigation_scope in PROTECTED_SCOPES:
+                    extra["review_observations"] = lambda texts: self.scope_reviewer.review(
+                        texts, kind="report_text"
+                    )
+            elif hasattr(self.comment_agent, "analyze_questions"):
                 extra = {
                     "public_context": await self._comment_public_context(task_id),
                     "follow_up": lambda question: self._comment_follow_up(
@@ -2609,10 +2631,13 @@ class V1Orchestrator:
             await asyncio.gather(*workers, return_exceptions=True)
             raise
 
-    async def run_task(self, task_id: str) -> None:
-        task = await self.database.get_task(task_id)
-        if task is None:
-            raise ValueError("task not found")
+    async def deepen_comment_question(self, task_id: str, question_id: str, *, follow_up=False):
+        from yuqing.services.comment_deepening import deepen_comment_question
+
+        return await deepen_comment_question(self, task_id, question_id, follow_up=follow_up)
+
+    async def _bind_task_runtime(self, task):
+        task_id = task.id
         if self.scope_reviewer:
             self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
         if self.usage is not None and hasattr(self.usage, "record_call"):
@@ -2655,7 +2680,6 @@ class V1Orchestrator:
             bind_task = getattr(provider, "bind_task", None)
             if callable(bind_task):
                 await bind_task(task_id)
-        stop_requested = task.status == "stopping"
         if self.usage is not None and hasattr(self.usage, "tokens_used"):
             self.usage.tokens_used = max(self.usage.tokens_used, task.tokens_used)
         budget_row = await self.database.fetch_one(
@@ -2671,6 +2695,14 @@ class V1Orchestrator:
         self._budget_depth = task.depth
         token_limit = self.budget_for(task.depth).token_limit
         self._set_llm_phase_limit(token_limit, "final")
+
+    async def run_task(self, task_id: str) -> None:
+        task = await self.database.get_task(task_id)
+        if task is None:
+            raise ValueError("task not found")
+        await self._bind_task_runtime(task)
+        token_limit = self.budget_for(task.depth).token_limit
+        stop_requested = task.status == "stopping"
         checkpoint = await self.database.latest_checkpoint(task_id)
         if self.models_used and not task.config_snapshot:
             await self.database.set_task_config_snapshot(

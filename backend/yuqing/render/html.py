@@ -927,6 +927,7 @@ def _generic_block(block: dict[str, Any]) -> str:
 
 def _render_comment_question_cards(block):
     observations = {o["id"]: o for o in block.get("observations", [])}
+    samples = {s["id"]: s for s in block.get("samples", [])}
     used = set()
     answer_labels = {
         "answered": "已有材料能回答",
@@ -954,17 +955,35 @@ def _render_comment_question_cards(block):
             f'<p class="card-meta">{_escape(q["sample_count"])} 条去重样本 · {_escape(len(obs))} 条已审观察 · {_escape(distribution)}</p>'
             '<p class="card-meta">观点分布：'
             + _escape("、".join(f"{k} {v} 条样本" for k, v in q.get("stance_counts", {}).items()))
-            + "</p><details><summary>不同观点与理由 · 查看全部已审观察</summary><ul>"
+            + "</p>"
+            + _optional_field("速读摘要", q.get("summary"))
+            + "<details><summary>不同观点与理由 · 查看全部已审观察</summary><ul>"
             + "".join(observation_html(o) for o in obs)
             + "</ul></details>"
         )
+        if block.get("analysis_mode") == "quick_read":
+            representatives = {}
+            for o in obs:
+                representatives.setdefault(o["stance"], o["comment_refs"][0])
+            chosen = list(dict.fromkeys(representatives.values()))
+            card += "".join(
+                '<blockquote class="comment-quote">'
+                + _escape(_display_comment_text(samples[r]["text"]))
+                + f'<br><a href="#comment-{_escape(r)}">回查原评论</a></blockquote>'
+                for r in chosen
+                if r in samples
+            )
         for comp in q.get("comparisons", []):
             card += (
                 f"<h4>证据对照：{_escape(answer_labels.get(comp['status'], '尚未完成'))}</h4><p>{_escape(comp['text'])}</p>"
                 + "".join(_citation_link(r) for r in comp.get("evidence_refs", []))
             )
         if not q.get("comparisons"):
-            card += '<p class="fallback-note">证据对照尚未通过全部审查，已审观察保留。</p>'
+            card += (
+                '<p class="fallback-note">证据对照未启动；可在任务页点选本问题深入查看已有材料。</p>'
+                if q.get("component_status", {}).get("comparison") == "not_requested"
+                else '<p class="fallback-note">证据对照尚未通过全部审查，已审观察保留。</p>'
+            )
         for j in q.get("judgements", []):
             card += (
                 f"<h4>已审研判 · {_escape(j['priority'])}</h4>"
@@ -974,7 +993,10 @@ def _render_comment_question_cards(block):
                 + _optional_field("分析边界", j["uncertainty"])
                 + "".join(_citation_link(r) for r in j.get("evidence_refs", []))
             )
-        if not q.get("judgements"):
+        if (
+            not q.get("judgements")
+            and q.get("component_status", {}).get("judgement") != "not_requested"
+        ):
             card += '<p class="fallback-note">尚无通过全部审查的风险与处置建议；不影响已经通过审查的观察。</p>'
         cards.append(card + "</article>")
     ungrouped = [o for key, o in observations.items() if key not in used]

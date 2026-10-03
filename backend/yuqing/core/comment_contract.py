@@ -193,6 +193,13 @@ def validate_questions(block, evidence_ids):
                 errors.append("R24: 评论观察来源不匹配")
         grouped_observations = set()
         for q in questions.values():
+            summary = q.get("summary")
+            if summary is not None and (
+                not isinstance(summary, str) or not 0 < len(summary.strip()) <= 160
+            ):
+                errors.append("R24: 评论速读摘要格式无效或过长")
+            if q.get("summary") and q.get("summary_review_status") != "accepted":
+                errors.append("R24: 评论速读摘要缺少独立审查")
             refs = q.get("observation_refs", [])
             if (
                 not refs

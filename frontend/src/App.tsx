@@ -31,6 +31,7 @@ import {
 } from './api/client'
 import { useTaskStream } from './events/useTaskStream'
 import { TaskProgress } from './events/TaskProgress'
+import { CommentQuickRead } from './CommentQuickRead'
 import type { ForumItem } from './events/state'
 import './styles.css'
 import './form.css'
@@ -384,6 +385,8 @@ function App() {
 
         <section className="collaboration-grid"><article className="forum-board"><span className="section-kicker">04 / 论坛黑板</span><h2>调查与主持人评审记录</h2>{stream.forum.length === 0 ? <p className="muted">等待各调查席发言…</p> : <><div aria-label="论坛讨论轮次">{Array.from(new Set(forumRounds.map(item => item.round))).map(round => <section className="forum-round" key={round}><h3>第 {round} 轮讨论</h3>{forumRounds.filter(item => item.round === round).map((item, index) => <ForumMessageCard item={item} key={`${index}-${item.content}`} />)}</section>)}</div>{qualityRecoveryMessages.length > 0 && <section className="quality-recovery-section" aria-label="核验后专项补查"><h3>核验后专项补查</h3><p>论坛已结束；以下内容由核验发现的具体缺口触发，不属于新的主持人讨论轮次。</p>{qualityRecoveryMessages.map((item, index) => <ForumMessageCard item={item} key={`${index}-${item.content}`} />)}</section>}</>}</article>
           <article className="host-board"><span className="section-kicker">05 / 主持人评审</span><h2>评审结论与待解决项</h2>{stream.hostReviews.length === 0 ? <p className="muted">首轮调查汇合后开始评审。</p> : stream.hostReviews.map((review, index) => <div className="host-review" key={`${index}-${review.reason}`}><strong>{review.release ? '主持人批准结束' : '本轮未获批准'}</strong><p>{review.reason}</p>{review.gaps.map((gap) => <small key={gap.desc}>{({ high: '高优先级', medium: '中优先级', low: '低优先级' } as Record<string, string>)[gap.priority ?? ''] ?? gap.priority} · {gap.desc}</small>)}</div>)}</article></section>
+
+        {(stream.status === 'done' || taskDetail?.status === 'done') && <CommentQuickRead key={taskId} taskId={taskId} />}
 
         <section className="evidence-ledger"><article><span className="section-kicker">06 / 证据台账</span><h2>{stream.evidence.length} 条公开材料</h2>{stream.evidence.map((item) => <div className="evidence-row" key={item.id}><span className="mono">{item.id}</span><div><strong>{item.title}</strong><small>{item.source} · L{item.tier}</small></div></div>)}</article><article><span className="section-kicker">07 / 检索路径与判定</span><h2>调查状态与限制说明</h2>{stream.degradations.map((item, index) => <p className="degradation" key={`${index}-${item}`}>{item}</p>)}{stream.decisions.map((item, index) => <p className="decision" key={`${index}-${item}`}>{item}</p>)}{stream.errors.map((item, index) => <p className="error" key={`${index}-${item}`}>{item}</p>)}</article></section>
       </>}

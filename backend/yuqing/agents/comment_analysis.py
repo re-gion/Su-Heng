@@ -165,6 +165,16 @@ class OpenAICommentAgent:
         self.gateway = gateway
         self.system_prompt = system_prompt
 
+    async def analyze_quick_read(self, event_query: str, rows: list[dict], **kwargs) -> dict:
+        from yuqing.agents.comment_quick_read import analyze_quick_read
+
+        return await analyze_quick_read(self, event_query, rows, **kwargs)
+
+    async def deepen_question(self, *args, **kwargs):
+        from yuqing.agents.comment_quick_read import deepen_question
+
+        return await deepen_question(self, *args, **kwargs)
+
     async def analyze_questions(self, event_query: str, rows: list[dict], **kwargs) -> dict:
         """New tasks use v5; keep analyze() for old checkpoints and reports."""
         from yuqing.agents.comment_observations import analyze_questions

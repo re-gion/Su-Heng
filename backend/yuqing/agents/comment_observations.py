@@ -341,181 +341,18 @@ async def analyze_questions(
     by_obs = {o["id"]: o for o in observations}
 
     async def enrich(q):
-        qid = "Q" + fingerprint([run_key, sorted(q["observation_refs"])])[:12]
-        obs = [by_obs[r] for r in q["observation_refs"]]
-        query = q["title"] + " ".join(o["text"] for o in obs)
-        focused = await asyncio.to_thread(focused_evidence_context, context, query)
-        if review_observations and focused:
-            decisions = await review_observations([e["excerpt"] for e in focused])
-            focused = [
-                {**e, "excerpt": d.text}
-                for e, d in zip(focused, decisions, strict=True)
-                if d.allowed
-            ]
-        public_ids = {e["evidence_ref"] for e in focused}
-        prompt_data = {
-            "event": event_query,
-            "question": q,
-            "observations": obs,
-            "public_evidence": focused,
-            "evidence_scope": "当前任务相关材料节选，不能推断全网不存在其他回答",
-        }
-        generated = await call(
-            "comment_evidence_comparison",
-            "reporter",
-            "对照公开材料回答具体问题，保留适用时间及不确定性；不得从评论证明事实。未找到回答只能说本次材料未回答，不能说机构从未回应。"
-            "status取answered/partial/unanswered/incomplete；事件事实严格遵守给定核验状态。风险和建议可为null，不能为了完整编造。"
-            "publicly_verifiable仅对可公开核查且非私人指控的问题为true，followup_value取high/medium/low。"
-            '只输出 {"comparison":{"status":"partial","text":"证据回答与限制","evidence_refs":["E001"]},'
-            '"publicly_verifiable":true,"followup_value":"high","judgement":{"risk_assessment":"条件性风险","response_action":"谁用什么回应",'
-            '"priority":"补充说明","priority_reason":"排序依据","uncertainty":"边界","evidence_refs":["E001"]}}。',
-            prompt_data,
+        return await enrich_question(
+            q,
+            run_key=run_key,
+            by_obs=by_obs,
+            samples=samples,
+            context=context,
+            event_query=event_query,
+            call=call,
+            review_observations=review_observations,
+            review_diagnostic=review_diagnostic,
+            save_review_decision=save_review_decision,
         )
-        comp = generated.get("comparison")
-        judgement = generated.get("judgement")
-        if isinstance(comp, dict):
-            comp = {k: comp.get(k) for k in ("status", "text", "evidence_refs")}
-        if isinstance(judgement, dict):
-            judgement = {
-                k: judgement.get(k)
-                for k in (
-                    "risk_assessment",
-                    "response_action",
-                    "priority",
-                    "priority_reason",
-                    "uncertainty",
-                    "evidence_refs",
-                )
-            }
-        valid_comparison = (
-            isinstance(comp, dict)
-            and comp.get("status") in ANSWER_STATES
-            and str(comp.get("text") or "").strip()
-            and isinstance(comp.get("evidence_refs"), list)
-            and set(comp["evidence_refs"]) <= public_ids
-            and (comp["status"] != "answered" or comp["evidence_refs"])
-            and (
-                comp["status"] != "answered"
-                or any(
-                    c.get("verification_state") == "complete" and c.get("verdict") == "support"
-                    for e in focused
-                    if e["evidence_ref"] in comp["evidence_refs"]
-                    and e.get("fetch_status") == "fetched"
-                    for c in e.get("claims", [])
-                )
-            )
-        )
-        valid_judgement = (
-            isinstance(judgement, dict)
-            and judgement.get("priority") in COMMENT_PRIORITIES
-            and all(
-                str(judgement.get(k) or "").strip()
-                for k in (
-                    "risk_assessment",
-                    "response_action",
-                    "priority_reason",
-                    "uncertainty",
-                )
-            )
-            and bool(judgement.get("evidence_refs"))
-            and set(judgement["evidence_refs"])
-            <= public_ids | {r for o in obs for r in o["evidence_refs"]}
-        )
-        review = await call(
-            "comment_question_review",
-            "verifier",
-            "分别审查三个独立产物：问题标题是否得到全部已审观察支持且有公共性；证据对照是否得到给定材料及核验状态支持；风险建议是否条件明确、可落实、符合材料。"
-            "不能因建议失败拒绝准确的问题与对照。不能推断总体民意或私人指控事实。publicly_verifiable必须经独立确认。"
-            '只输出 {"question_accepted":true,"comparison_accepted":true,"judgement_accepted":false,"publicly_verifiable":true,"reason":"具体未通过的部分及理由","reason_codes":[]}，全部判定必须是布尔值，reason_codes仅从给定分类选择。',
-            {**prompt_data, "candidate": generated, "reason_categories": COMMENT_REVIEW_REASONS},
-            max_tokens=4096,
-        )
-        if save_review_decision:
-            await save_review_decision(
-                fingerprint([qid, generated, context]),
-                {
-                    "stage": "question_components",
-                    "candidate": generated,
-                    "review": review,
-                    "question": q,
-                },
-            )
-        for key in ("question_accepted", "comparison_accepted", "judgement_accepted"):
-            review_diagnostic("comment_question_review", qid + ":" + key, review, key)
-        if review.get("question_accepted") is False:
-            return None
-        if review.get("question_accepted") is not True:
-            raise ValueError("问题复核未取得明确布尔判定，保留此前独立通过的问题")
-        if review_observations:
-            title_decision = (await review_observations([q["title"]]))[0]
-            if not title_decision.allowed:
-                return None
-            q = {**q, "title": title_decision.text}
-        comparison_id = qid + "C"
-        comparisons = (
-            [{**comp, "id": comparison_id, "review_status": "accepted"}]
-            if valid_comparison and review.get("comparison_accepted") is True
-            else []
-        )
-        judgements = (
-            [
-                {
-                    **judgement,
-                    "id": qid + "J",
-                    "observation_refs": q["observation_refs"],
-                    "comparison_refs": [comparison_id],
-                    "review_status": "accepted",
-                }
-            ]
-            if valid_judgement and comparisons and review.get("judgement_accepted") is True
-            else []
-        )
-        privacy_status = {}
-        if review_observations and comparisons:
-            decision = (await review_observations([comparisons[0]["text"]]))[0]
-            privacy_status["comparison"] = decision.status
-            if decision.allowed:
-                comparisons[0]["text"] = decision.text
-            else:
-                comparisons, judgements = [], []
-        if review_observations and judgements:
-            fields = ("risk_assessment", "response_action", "priority_reason", "uncertainty")
-            decisions = await review_observations([judgements[0][k] for k in fields])
-            privacy_status["judgement"] = (
-                "accepted"
-                if all(d.allowed for d in decisions)
-                else "rejected"
-                if any(d.status == "rejected" for d in decisions)
-                else "incomplete"
-            )
-            if all(d.allowed for d in decisions):
-                judgements[0].update({k: d.text for k, d in zip(fields, decisions, strict=True)})
-            else:
-                judgements = []
-        return {
-            **q,
-            "id": qid,
-            "review_status": "accepted",
-            **observation_statistics(obs, samples),
-            "evidence_refs": sorted({r for o in obs for r in o["evidence_refs"]}),
-            "comparisons": comparisons,
-            "judgements": judgements,
-            "component_status": {
-                "comparison": "accepted"
-                if comparisons
-                else "rejected"
-                if review.get("comparison_accepted") is False
-                else privacy_status.get("comparison", "incomplete"),
-                "judgement": "accepted"
-                if judgements
-                else "rejected"
-                if review.get("judgement_accepted") is False
-                else privacy_status.get("judgement", "incomplete"),
-            },
-            "publicly_verifiable": generated.get("publicly_verifiable") is True
-            and review.get("publicly_verifiable") is True,
-            "followup_value": generated.get("followup_value", "low"),
-        }
 
     if (
         prior.get("organization_fingerprint") == organization_fp
@@ -773,3 +610,190 @@ async def analyze_questions(
     state["organization_fingerprint"] = organization_fp
     await persist()
     return state
+
+
+async def enrich_question(
+    q,
+    *,
+    run_key,
+    by_obs,
+    samples,
+    context,
+    event_query,
+    call,
+    review_observations,
+    review_diagnostic,
+    save_review_decision,
+):
+    qid = "Q" + fingerprint([run_key, sorted(q["observation_refs"])])[:12]
+    obs = [by_obs[r] for r in q["observation_refs"]]
+    query = q["title"] + " ".join(o["text"] for o in obs)
+    focused = await asyncio.to_thread(focused_evidence_context, context, query)
+    if review_observations and focused:
+        decisions = await review_observations([e["excerpt"] for e in focused])
+        focused = [
+            {**e, "excerpt": d.text} for e, d in zip(focused, decisions, strict=True) if d.allowed
+        ]
+    public_ids = {e["evidence_ref"] for e in focused}
+    prompt_data = {
+        "event": event_query,
+        "question": q,
+        "observations": obs,
+        "public_evidence": focused,
+        "evidence_scope": "当前任务相关材料节选，不能推断全网不存在其他回答",
+    }
+    generated = await call(
+        "comment_evidence_comparison",
+        "reporter",
+        "对照公开材料回答具体问题，保留适用时间及不确定性；不得从评论证明事实。未找到回答只能说本次材料未回答，不能说机构从未回应。"
+        "status取answered/partial/unanswered/incomplete；事件事实严格遵守给定核验状态。风险和建议可为null，不能为了完整编造。"
+        "publicly_verifiable仅对可公开核查且非私人指控的问题为true，followup_value取high/medium/low。"
+        '只输出 {"comparison":{"status":"partial","text":"证据回答与限制","evidence_refs":["E001"]},'
+        '"publicly_verifiable":true,"followup_value":"high","judgement":{"risk_assessment":"条件性风险","response_action":"谁用什么回应",'
+        '"priority":"补充说明","priority_reason":"排序依据","uncertainty":"边界","evidence_refs":["E001"]}}。',
+        prompt_data,
+    )
+    comp = generated.get("comparison")
+    judgement = generated.get("judgement")
+    if isinstance(comp, dict):
+        comp = {k: comp.get(k) for k in ("status", "text", "evidence_refs")}
+    if isinstance(judgement, dict):
+        judgement = {
+            k: judgement.get(k)
+            for k in (
+                "risk_assessment",
+                "response_action",
+                "priority",
+                "priority_reason",
+                "uncertainty",
+                "evidence_refs",
+            )
+        }
+    valid_comparison = (
+        isinstance(comp, dict)
+        and comp.get("status") in ANSWER_STATES
+        and str(comp.get("text") or "").strip()
+        and isinstance(comp.get("evidence_refs"), list)
+        and set(comp["evidence_refs"]) <= public_ids
+        and (comp["status"] != "answered" or comp["evidence_refs"])
+        and (
+            comp["status"] != "answered"
+            or any(
+                c.get("verification_state") == "complete" and c.get("verdict") == "support"
+                for e in focused
+                if e["evidence_ref"] in comp["evidence_refs"] and e.get("fetch_status") == "fetched"
+                for c in e.get("claims", [])
+            )
+        )
+    )
+    valid_judgement = (
+        isinstance(judgement, dict)
+        and judgement.get("priority") in COMMENT_PRIORITIES
+        and all(
+            str(judgement.get(k) or "").strip()
+            for k in (
+                "risk_assessment",
+                "response_action",
+                "priority_reason",
+                "uncertainty",
+            )
+        )
+        and bool(judgement.get("evidence_refs"))
+        and set(judgement["evidence_refs"])
+        <= public_ids | {r for o in obs for r in o["evidence_refs"]}
+    )
+    review = await call(
+        "comment_question_review",
+        "verifier",
+        "分别审查三个独立产物：问题标题是否得到全部已审观察支持且有公共性；证据对照是否得到给定材料及核验状态支持；风险建议是否条件明确、可落实、符合材料。"
+        "不能因建议失败拒绝准确的问题与对照。不能推断总体民意或私人指控事实。publicly_verifiable必须经独立确认。"
+        '只输出 {"question_accepted":true,"comparison_accepted":true,"judgement_accepted":false,"publicly_verifiable":true,"reason":"具体未通过的部分及理由","reason_codes":[]}，全部判定必须是布尔值，reason_codes仅从给定分类选择。',
+        {**prompt_data, "candidate": generated, "reason_categories": COMMENT_REVIEW_REASONS},
+        max_tokens=4096,
+    )
+    if save_review_decision:
+        await save_review_decision(
+            fingerprint([qid, generated, context]),
+            {
+                "stage": "question_components",
+                "candidate": generated,
+                "review": review,
+                "question": q,
+            },
+        )
+    for key in ("question_accepted", "comparison_accepted", "judgement_accepted"):
+        review_diagnostic("comment_question_review", qid + ":" + key, review, key)
+    if review.get("question_accepted") is False:
+        return None
+    if review.get("question_accepted") is not True:
+        raise ValueError("问题复核未取得明确布尔判定，保留此前独立通过的问题")
+    if review_observations:
+        title_decision = (await review_observations([q["title"]]))[0]
+        if not title_decision.allowed:
+            return None
+        q = {**q, "title": title_decision.text}
+    comparison_id = qid + "C"
+    comparisons = (
+        [{**comp, "id": comparison_id, "review_status": "accepted"}]
+        if valid_comparison and review.get("comparison_accepted") is True
+        else []
+    )
+    judgements = (
+        [
+            {
+                **judgement,
+                "id": qid + "J",
+                "observation_refs": q["observation_refs"],
+                "comparison_refs": [comparison_id],
+                "review_status": "accepted",
+            }
+        ]
+        if valid_judgement and comparisons and review.get("judgement_accepted") is True
+        else []
+    )
+    privacy_status = {}
+    if review_observations and comparisons:
+        decision = (await review_observations([comparisons[0]["text"]]))[0]
+        privacy_status["comparison"] = decision.status
+        if decision.allowed:
+            comparisons[0]["text"] = decision.text
+        else:
+            comparisons, judgements = [], []
+    if review_observations and judgements:
+        fields = ("risk_assessment", "response_action", "priority_reason", "uncertainty")
+        decisions = await review_observations([judgements[0][k] for k in fields])
+        privacy_status["judgement"] = (
+            "accepted"
+            if all(d.allowed for d in decisions)
+            else "rejected"
+            if any(d.status == "rejected" for d in decisions)
+            else "incomplete"
+        )
+        if all(d.allowed for d in decisions):
+            judgements[0].update({k: d.text for k, d in zip(fields, decisions, strict=True)})
+        else:
+            judgements = []
+    return {
+        **q,
+        "id": qid,
+        "review_status": "accepted",
+        **observation_statistics(obs, samples),
+        "evidence_refs": sorted({r for o in obs for r in o["evidence_refs"]}),
+        "comparisons": comparisons,
+        "judgements": judgements,
+        "component_status": {
+            "comparison": "accepted"
+            if comparisons
+            else "rejected"
+            if review.get("comparison_accepted") is False
+            else privacy_status.get("comparison", "incomplete"),
+            "judgement": "accepted"
+            if judgements
+            else "rejected"
+            if review.get("judgement_accepted") is False
+            else privacy_status.get("judgement", "incomplete"),
+        },
+        "publicly_verifiable": generated.get("publicly_verifiable") is True
+        and review.get("publicly_verifiable") is True,
+        "followup_value": generated.get("followup_value", "low"),
+    }

@@ -354,6 +354,10 @@ class LLMGateway:
             ):
                 continue
             key = (record.get("model"), record.get("role"), record.get("stage"))
+            if record.get("reasoning_effort"):
+                key += (record["reasoning_effort"],)
+            if record.get("temperature_override") is not None or record.get("top_p") is not None:
+                key += (record.get("temperature_override"), record.get("top_p"))
             # Leave space for variable reasoning without reserving the previous 4x retry cap.
             floor = min(LENGTH_RETRY_MAX_TOKENS, math.ceil(output * 1.25 / 1024) * 1024)
             self._output_floors[key] = max(self._output_floors.get(key, 0), floor)
@@ -404,7 +408,15 @@ class LLMGateway:
             await asyncio.sleep(delay)
 
     async def complete_json(
-        self, role: LLMRole, system: str, user: str, *, max_tokens: int = 2000
+        self,
+        role: LLMRole,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int = 2000,
+        reasoning_effort: str | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
     ) -> dict[str, Any]:
         # JSON mode's format contract must not depend on user-supplied comments.
         system = system + "\n只输出一个有效的 JSON 对象。"
@@ -420,6 +432,10 @@ class LLMGateway:
         ledger = self._logical_context.get() or {"call_id": uuid.uuid4().hex, "attempts": 0}
         call_id = ledger["call_id"]
         output_key = (config.model, role, (self._call_context.get() or {}).get("stage", role))
+        if reasoning_effort:
+            output_key += (reasoning_effort,)
+        if temperature is not None or top_p is not None:
+            output_key += (temperature, top_p)
         budget = min(
             max(max_tokens, self._output_floors.get(output_key, 0)), LENGTH_RETRY_MAX_TOKENS
         )
@@ -456,6 +472,9 @@ class LLMGateway:
                 "role": role,
                 "model": config.model,
                 "max_output_tokens": budget,
+                "reasoning_effort": reasoning_effort,
+                "temperature_override": temperature,
+                "top_p": top_p,
                 "reservation_tokens": reservation,
                 "input_tokens": None,
                 "output_tokens": None,
@@ -486,9 +505,11 @@ class LLMGateway:
                     response = await self.factory.get(role).chat.completions.create(
                         model=config.model,
                         messages=messages,
-                        temperature=config.temperature,
+                        temperature=config.temperature if temperature is None else temperature,
+                        **({"top_p": top_p} if top_p is not None else {}),
                         max_tokens=budget,
                         response_format={"type": "json_object"},
+                        **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
                     )
                 usage = response.usage
                 record.update(

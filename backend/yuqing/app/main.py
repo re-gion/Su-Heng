@@ -8,13 +8,14 @@ from collections.abc import AsyncIterable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
+from pydantic import BaseModel
 
 from yuqing.agents.comment_analysis import OpenAICommentAgent
 from yuqing.agents.loader import load_definitions
@@ -171,6 +172,10 @@ def _normalize_topic_candidate(raw: dict[str, Any]) -> dict[str, Any]:
         }
     )
     return candidate
+
+
+class CommentDeepeningRequest(BaseModel):
+    mode: Literal["existing", "follow_up"] = "existing"
 
 
 def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
@@ -388,6 +393,7 @@ def create_app(
         app.state.events = EventBus(database)
         app.state.orphaned = orphaned
         app.state.jobs = set()
+        app.state.comment_analysis_jobs = set()
         app.state.pdf_exporter = pdf_exporter or ChromiumPdfExporter()
         app.state.delivery = EvidencePackageBuilder(database, SnapshotStore(data_dir / "snapshots"))
         resolved = await ConfigService(database).resolved_environ()
@@ -1525,6 +1531,10 @@ def create_app(
             )
         if task.status in {"running", "pausing", "stopping"}:
             return error_response("TASK_NOT_DELETABLE", "运行中的任务需先停止。", 409)
+        if task_id in request.app.state.comment_analysis_jobs:
+            return error_response(
+                "COMMENT_DEEPENING_BUSY", "请等待本任务的评论深入分析结束后再删除。", 409
+            )
         deleted = await database.delete_task(task_id)
         removed_files = 0
         allowed = [(data_dir / "snapshots").resolve(), (data_dir / "reports").resolve()]
@@ -1603,6 +1613,142 @@ def create_app(
                         return
         finally:
             events.unsubscribe(task_id, queue)
+
+    @app.get("/api/tasks/{task_id}/comment-questions")
+    async def read_comment_questions(task_id: str, request: Request):
+        database, _ = services(request)
+        await existing_task(task_id, request)
+        row = await database.get_report_for_task(task_id)
+        if not row:
+            return error_response("REPORT_NOT_READY", "报告尚未生成。", 409, recoverable=True)
+        if await database.report_under_review(row["id"]):
+            return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
+        report = json.loads(row["ir_json"])
+        block = next(
+            (
+                b
+                for b in report["blocks"]
+                if b["type"] == "comment_insight" and b.get("analysis_version") == 5
+            ),
+            None,
+        )
+        jobs = {}
+        for question in (block or {}).get("items", []):
+            state = await database.checkpoint(task_id, "comments:deep:" + question["id"])
+            if state:
+                status = state.get("status", "unknown")
+                if (
+                    status in {"queued", "running"}
+                    and task_id not in request.app.state.comment_analysis_jobs
+                ):
+                    status = "interrupted"
+                jobs[question["id"]] = {
+                    "status": status,
+                    "mode": state.get("mode"),
+                    "message": state.get("message"),
+                }
+        return {
+            "block": block,
+            "jobs": jobs,
+            "sources": {
+                item["evidence_ref"]: {"title": item["title"], "url": item["url"]}
+                for b in report["blocks"]
+                if b["type"] == "evidence_appendix"
+                for item in b["items"]
+            },
+            "deepening_available": not is_demo and not in_container,
+        }
+
+    async def run_comment_deepening(request: Request, task_id: str, question_id: str, mode: str):
+        database, events = services(request)
+        runner = None
+        key = "comments:deep:" + question_id
+        try:
+            runner = factory(database, events)
+            result = await runner.deepen_comment_question(
+                task_id, question_id, follow_up=mode == "follow_up"
+            )
+            state = await database.checkpoint(task_id, key) or {}
+            await database.save_checkpoint(task_id, key, {**state, **result, "mode": mode})
+        except Exception as exc:
+            state = await database.checkpoint(task_id, key) or {}
+            await database.save_checkpoint(
+                task_id,
+                key,
+                {
+                    **state,
+                    "status": "incomplete",
+                    "mode": mode,
+                    "message": sanitize_upstream_message(exc),
+                },
+            )
+        finally:
+            request.app.state.comment_analysis_jobs.discard(task_id)
+            if runner is not None:
+                await runner.aclose()
+
+    @app.post("/api/tasks/{task_id}/comment-questions/{question_id}/analyze", status_code=202)
+    async def analyze_comment_question(
+        task_id: str,
+        question_id: str,
+        payload: CommentDeepeningRequest,
+        request: Request,
+        background: BackgroundTasks,
+    ):
+        database, _ = services(request)
+        task = await existing_task(task_id, request)
+        if is_demo or in_container:
+            return error_response(
+                "COMMENT_DEEPENING_DISABLED", "当前运行环境未开放评论深入分析。", 403
+            )
+        if task.status != "done":
+            return error_response(
+                "TASK_NOT_FINISHED", "请先等待当前调查完成。", 409, recoverable=True
+            )
+        if task_id in request.app.state.comment_analysis_jobs:
+            return error_response(
+                "COMMENT_DEEPENING_BUSY",
+                "本任务已有评论问题正在分析，请等待完成。",
+                409,
+                recoverable=True,
+            )
+        row = await database.get_report_for_task(task_id)
+        if not row:
+            return error_response("REPORT_NOT_READY", "报告尚未生成。", 409, recoverable=True)
+        if await database.report_under_review(row["id"]):
+            return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
+        block = next(
+            (
+                b
+                for b in json.loads(row["ir_json"])["blocks"]
+                if b["type"] == "comment_insight" and b.get("analysis_version") == 5
+            ),
+            None,
+        )
+        if not any(
+            q.get("id") == question_id and q.get("review_status") == "accepted"
+            for q in (block or {}).get("items", [])
+        ):
+            return error_response("COMMENT_QUESTION_NOT_FOUND", "未找到对应的已审评论问题。", 404)
+        if task_id in request.app.state.comment_analysis_jobs:
+            return error_response(
+                "COMMENT_DEEPENING_BUSY", "本任务已有评论问题正在分析。", 409, recoverable=True
+            )
+        # The final check and reservation have no await between them.
+        request.app.state.comment_analysis_jobs.add(task_id)
+        try:
+            previous = await database.checkpoint(task_id, "comments:deep:" + question_id) or {}
+            cached_result = {k: previous.get(k) for k in ("status", "material_fingerprint", "mode")}
+            await database.save_checkpoint(
+                task_id,
+                "comments:deep:" + question_id,
+                {"status": "queued", "mode": payload.mode, "cached_result": cached_result},
+            )
+        except Exception:
+            request.app.state.comment_analysis_jobs.discard(task_id)
+            raise
+        background.add_task(run_comment_deepening, request, task_id, question_id, payload.mode)
+        return {"question_id": question_id, "status": "queued", "mode": payload.mode}
 
     @app.get("/api/tasks/{task_id}/report")
     async def read_report(task_id: str, request: Request):

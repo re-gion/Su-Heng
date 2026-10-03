@@ -264,3 +264,29 @@ export async function resumeTask(taskId: string): Promise<void> {
     throw new Error(body.error?.message ?? `续跑失败（HTTP ${response.status}）`)
   }
 }
+
+export type CommentQuestionData = {
+  block: null | {
+    analysis_mode?: string
+    quick_read_status?: string
+    coverage: Record<string, number>
+    samples: { id: string; text: string; platform: string; source_url: string; published_at?: string | null }[]
+    observations: { id: string; text: string; stance: string; comment_refs: string[] }[]
+    items: { id: string; title: string; summary?: string | null; sample_count: number; observation_refs: string[]; publicly_verifiable?: boolean;
+      comparisons: { id: string; status: string; text: string; evidence_refs?: string[] }[];
+      judgements: { id: string; priority: string; response_action: string; uncertainty: string; evidence_refs?: string[] }[] }[]
+  }
+  jobs: Record<string, { status: string; mode?: string; message?: string }>
+  sources?: Record<string, { title: string; url: string }>
+  deepening_available: boolean
+}
+export async function getCommentQuestions(taskId: string, signal?: AbortSignal): Promise<CommentQuestionData> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/comment-questions`, { signal })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null)
+    throw new Error(payload?.error?.message ?? '无法读取评论速读')
+  }
+  return response.json() as Promise<CommentQuestionData>
+}
+export const deepenCommentQuestion = (taskId: string, questionId: string, mode: 'existing' | 'follow_up') =>
+  mutation(`/api/tasks/${encodeURIComponent(taskId)}/comment-questions/${encodeURIComponent(questionId)}/analyze`, 'POST', { mode })
