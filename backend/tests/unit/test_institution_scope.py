@@ -1,9 +1,40 @@
 import asyncio
+import hashlib
 import json
 
 import pytest
 
 from yuqing.services.institution_scope import InstitutionScopeReviewer, only_anonymous_roles_changed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("report_rejected", [False, True])
+async def test_exact_reviewed_comment_is_reusable_but_cannot_override_report_rejection(
+    report_rejected,
+):
+    text = "样本希望机构公开说明复核程序。"
+
+    def key(kind):
+        return hashlib.sha256(
+            json.dumps(["public-event-v1", "public_event", kind, text], ensure_ascii=False).encode()
+        ).hexdigest()
+
+    cache = {key("comment"): {"status": "accepted", "reason": "scope_passed", "text": text}}
+    if report_rejected:
+        cache[key("report_text")] = {"status": "rejected", "reason": "policy", "text": text}
+
+    class Database:
+        async def get_scope_review(self, task_id, fingerprint):
+            return cache.get(fingerprint)
+
+    class Gateway:
+        async def complete_json(self, *args, **kwargs):
+            raise AssertionError("Valid exact cache should avoid a duplicate model call")
+
+    reviewer = InstitutionScopeReviewer(Gateway())
+    reviewer.bind(Database(), "t", "public_event")
+    result = (await reviewer.review([text], kind="report_text"))[0]
+    assert result.allowed is not report_rejected
 
 
 @pytest.mark.asyncio

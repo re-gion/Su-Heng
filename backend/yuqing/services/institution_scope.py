@@ -163,18 +163,16 @@ class InstitutionScopeReviewer:
                 and self.database is not None
                 and self.task_id
             ):
-                claim_key = hashlib.sha256(
-                    json.dumps(
-                        [SCOPE_POLICY_VERSION, scope, "claim", value], ensure_ascii=False
-                    ).encode()
-                ).hexdigest()
-                approved_claim = await self.database.get_scope_review(self.task_id, claim_key)
-                if (
-                    approved_claim
-                    and approved_claim["status"] == "accepted"
-                    and approved_claim["text"] == value
-                ):
-                    cached = approved_claim
+                for source_kind in ("claim", "comment"):
+                    source_key = hashlib.sha256(
+                        json.dumps(
+                            [SCOPE_POLICY_VERSION, scope, source_kind, value], ensure_ascii=False
+                        ).encode()
+                    ).hexdigest()
+                    approved = await self.database.get_scope_review(self.task_id, source_key)
+                    if approved and approved["status"] == "accepted" and approved["text"] == value:
+                        cached = approved
+                        break
             if cached:
                 if cached["status"] == "accepted" and only_anonymous_roles_changed(
                     value, cached["text"]

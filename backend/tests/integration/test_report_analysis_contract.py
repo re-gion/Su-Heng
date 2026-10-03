@@ -130,7 +130,7 @@ async def analytical_report(runtime_dir, claim_limits):
 @pytest.mark.asyncio
 async def test_full_report_has_grounded_analysis_and_compact_audit(analytical_report):
     report, rendered = analytical_report
-    assert report["schema_version"] == "0.8"
+    assert report["schema_version"] == "0.9"
     assert report["quality"]["status"] == "analysis_available"
     assert report["quality"]["sourced_measurements"] == 1
     assert report["quality"]["rejected_items"]["analysis_reference"] == 1
@@ -193,6 +193,6 @@ def test_v04_migration_preserves_authority_and_is_idempotent():
     }
     migrated = migrate_report(original)
     assert migrated["blocks"] == original["blocks"]
-    assert migrated["schema_version"] == "0.8"
+    assert migrated["schema_version"] == "0.9"
     assert migrate_report(migrated) == migrated
     assert original["schema_version"] == "0.4"

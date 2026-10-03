@@ -192,7 +192,7 @@ def test_funnel_renders_zero_as_zero_instead_of_blank():
 
 @pytest.mark.parametrize(
     ("schema_version", "min_reader_minor"),
-    [("0.9", 9), ("1.0", 0)],
+    [("0.10", 10), ("1.0", 0)],
 )
 def test_incompatible_ir_versions_fail_clearly(schema_version, min_reader_minor):
     report = load_fixture()
@@ -221,8 +221,8 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
 
     migrated = migrate_report(report)
 
-    assert migrated["schema_version"] == "0.8"
-    assert migrated["min_reader_minor"] == 8
+    assert migrated["schema_version"] == "0.9"
+    assert migrated["min_reader_minor"] == 9
     card = next(
         card
         for block in migrated["blocks"]
@@ -241,6 +241,7 @@ def test_v01_report_migrates_without_losing_citations_or_history_content():
         "0.5->0.6",
         "0.6->0.7",
         "0.7->0.8",
+        "0.8->0.9",
     ]
 
 
@@ -251,14 +252,15 @@ def test_v03_report_migrates_to_reader_that_understands_analytical_blocks():
 
     migrated = migrate_report(report)
 
-    assert migrated["schema_version"] == "0.8"
-    assert migrated["min_reader_minor"] == 8
+    assert migrated["schema_version"] == "0.9"
+    assert migrated["min_reader_minor"] == 9
     assert migrated["migration_history"] == [
         "0.3->0.4",
         "0.4->0.5",
         "0.5->0.6",
         "0.6->0.7",
         "0.7->0.8",
+        "0.8->0.9",
     ]
 
 

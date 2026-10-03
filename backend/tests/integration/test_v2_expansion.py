@@ -552,7 +552,7 @@ async def test_v2_report_keeps_foreign_original_separate_from_machine_translatio
     timeline = next(block for block in report["blocks"] if block.get("chart_kind") == "timeline")
     html = render_html(report, view="full")
 
-    assert report["schema_version"] == "0.8"
+    assert report["schema_version"] == "0.9"
     assert report["language_coverage"]["complete"] == ["en"]
     assert report["language_coverage"]["missing"] == ["zh"]
     assert card["original_excerpt"] == "CrowdStrike says a fix has been deployed."

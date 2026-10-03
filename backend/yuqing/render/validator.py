@@ -178,7 +178,17 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
                     source = samples.get(quote.get("id"), {})
                     if quote.get("id") not in refs or quote.get("text") != source.get("text"):
                         errors.append("R21: 评论引语没有对应主题内原始样本")
-        if block.get("type") == "comment_insight" and block.get("analysis_version", 1) >= 4:
+        if block.get("type") == "comment_insight" and block.get("analysis_version") == 5:
+            if type(value.get("min_reader_minor")) is not int or value["min_reader_minor"] < 9:
+                errors.append("R24: 分层评论需要第9版及以上报告阅读器")
+            from yuqing.core.comment_contract import validate_questions
+
+            errors.extend(validate_questions(block, evidence_ids))
+        if (
+            block.get("type") == "comment_insight"
+            and block.get("analysis_version", 1) >= 4
+            and block.get("analysis_version") != 5
+        ):
             samples = {s.get("id"): s for s in block.get("samples", [])}
             priorities = {"立即回应", "补充说明", "持续观察"}
             item_titles = set()

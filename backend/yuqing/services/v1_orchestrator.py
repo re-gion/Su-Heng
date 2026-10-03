@@ -294,6 +294,12 @@ class V1Orchestrator:
             "comments": baseline + available * 4 // 5,
         }.get(phase, token_limit)
         if self.usage is not None and hasattr(self.usage, "token_limit"):
+            if phase == "comments":
+                cap = min(
+                    token_limit, getattr(self.usage, "absolute_token_limit", None) or token_limit
+                )
+                used = getattr(self.usage, "tokens_used", baseline)
+                limit = min(cap, used + max(0, cap - used) * 4 // 5)
             self.usage.token_limit = limit
             self.usage.total_token_limit = token_limit
             self.usage.phase = phase
@@ -1027,6 +1033,295 @@ class V1Orchestrator:
                 self.usage.token_limit = previous_limit
                 self.usage.phase = previous_phase
 
+    async def _comment_public_context(self, task_id: str) -> list[dict]:
+        """Use the already published core inventory, preserving verdicts and scope."""
+        row = await self.database.get_report_for_task(task_id)
+        if not row:
+            return []
+        report = json.loads(row["ir_json"])
+        sources = {
+            e.local_id: e
+            for e in await self.database.list_evidence(task_id)
+            if e.kind != "social_comments"
+        }
+        facts = [
+            item
+            for block in report["blocks"]
+            if block["type"] == "fact_check_table"
+            for item in block.get("items", [])
+        ]
+        result = []
+        for block in report["blocks"]:
+            if block["type"] != "evidence_appendix":
+                continue
+            for source in block.get("items", []):
+                ref = source.get("evidence_ref")
+                if ref not in sources:
+                    continue
+                if (sources[ref].extra or {}).get("scope_status") == "background":
+                    continue
+                bound = [
+                    f
+                    for f in facts
+                    if f.get("origin_agent") != "history_insight"
+                    and ref in {c.get("evidence_ref") for c in f.get("citations", [])}
+                ]
+                if not bound:
+                    continue
+                result.append(
+                    {
+                        "evidence_ref": ref,
+                        "title": source.get("title"),
+                        "published_at": source.get("published_at"),
+                        "source_role": sources[ref].source_role,
+                        "fetch_status": sources[ref].fetch_status,
+                        "excerpt": (
+                            source.get("original_excerpt")
+                            or sources[ref].content_text
+                            or sources[ref].snippet
+                            or ""
+                        )[:1200],
+                        "_full_text": sources[ref].content_text or sources[ref].snippet or "",
+                        "scope_status": (sources[ref].extra or {}).get("scope_status", "unknown"),
+                        "claims": [
+                            {
+                                k: f.get(k)
+                                for k in (
+                                    "claim_ref",
+                                    "text",
+                                    "badge",
+                                    "verdict",
+                                    "verification_state",
+                                )
+                            }
+                            for f in bound
+                        ],
+                    }
+                )
+        task = await self.database.get_task(task_id)
+        if task and task.investigation_scope in PROTECTED_SCOPES:
+            if not self.scope_reviewer:
+                return []
+            # Published labels and facts were already reviewed. Source bodies stay
+            # local; only selected windows are reviewed before entering a prompt.
+            self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
+        return result
+
+    async def _comment_follow_up(self, task_id: str, event_query: str, question: dict) -> dict:
+        """One public search round; share all normal search/fetch/claim/verify caps."""
+        task = await self.database.get_task(task_id)
+        if not task or task.status != "running" or question.get("publicly_verifiable") is not True:
+            return {"status": "not_applicable", "evidence": []}
+        key = "comments:follow-up:" + question["id"]
+        attempts = await self.database.fetch_one(
+            "SELECT COUNT(*) AS n FROM task_state WHERE task_id=? AND step_key LIKE 'comments:follow-up:%' AND json_extract(payload,'$.status') != 'budget_limited'",
+            (task_id,),
+        )
+        if attempts and attempts["n"] >= 3:
+            return {"status": "round_limit", "evidence": []}
+        previous = await self.database.checkpoint(task_id, key)
+        if previous and previous.get("status") != "budget_limited":
+            return {"status": "round_limit", "evidence": []}
+        if await self._emit_budget(task_id, task.depth) or not self._llm_phase_has_room(18_000):
+            return {"status": "budget_limited", "evidence": []}
+        await self.database.save_checkpoint(
+            task_id, key, {"attempted": True, "status": "incomplete"}
+        )
+        scope = InvestigationScope(
+            event_query=event_query,
+            languages=tuple(task.source_languages),
+            source_scope=task.source_scope,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        query = f"{event_query[:140]} {question['title'][:100]}"
+        params = SearchParams(
+            query=query,
+            top_k=3,
+            lang=task.source_languages[0],
+            region=_default_region(task.source_languages[0]),
+            freshness="noLimit",
+            langsearch_contents_text=False,
+        )
+
+        def accept(result):
+            decision = scope.classify_result(result, agent="fact_investigator", search_query=query)
+            return decision.accepted, decision.reasons
+
+        search_filtered = getattr(self.search, "search_filtered", None)
+        search_reserved, search_limited = 0, False
+
+        async def reserve_search():
+            nonlocal search_reserved, search_limited
+            allowed = await self._reserve_tool("search")
+            search_reserved += int(allowed)
+            search_limited |= not allowed
+            return allowed
+
+        if callable(search_filtered):
+            results = await search_filtered(
+                params,
+                accept,
+                before_call=reserve_search,
+                min_source_groups=1,
+            )
+        else:
+            if not await reserve_search():
+                await self.database.save_checkpoint(
+                    task_id, key, {"attempted": False, "status": "budget_limited"}
+                )
+                return {"status": "budget_limited", "evidence": []}
+            results = await self.search.search(params)
+        if not search_reserved and search_limited:
+            await self.database.save_checkpoint(
+                task_id, key, {"attempted": False, "status": "budget_limited"}
+            )
+            return {"status": "budget_limited", "evidence": []}
+        accepted = []
+        for result in results[:3]:
+            decision = scope.classify_result(result, agent="fact_investigator", search_query=query)
+            if decision.accepted:
+                accepted.append(
+                    result.model_copy(update={"raw": {**result.raw, "_scope": decision.as_extra()}})
+                )
+        records = await self.evidence.add_search_results(task_id, query, accepted)
+        for index, record in enumerate(records):
+            records[index] = (
+                await self._fetch_once(
+                    record, scope=scope, agent="fact_investigator", phase="primary"
+                )
+                or record
+            )
+            await self.events.emit(
+                task_id,
+                "evidence.added",
+                {"evidence_id": record.local_id, "title": record.title, "agent": "comment_insight"},
+            )
+        agent = self.agents.get("fact_investigator")
+        budget = self.budget_for(task.depth)
+        new_claim_ids = set()
+        claim_limited, verification_limited = False, False
+        if agent and records and self._llm_phase_has_room(12_000):
+            generated = await agent.summarize(
+                event_query
+                + "\n【评论问题定向取证】"
+                + question["title"]
+                + "。仅提取回答该公共问题的最短事实，保留时间条件；评论不构成事实证据。",
+                records,
+            )
+            reviewed, _ = await self._review_generated(task_id, generated[:2])
+            used = sum(
+                [
+                    len(await self.database.claim_evidence_rows(c.pk))
+                    for c in await self.database.list_claims(task_id)
+                    if c.verification_state != "pending"
+                ]
+            )
+            retry_usage = await self.database.checkpoint(task_id, "report:verify_retry_usage") or {}
+            used += int(retry_usage.get("spent", 0))
+            for item in reviewed:
+                if used + len(item.evidence_ids) > budget.max_verify_calls:
+                    verification_limited = True
+                    continue
+                if (
+                    item.statement_kind != "fact"
+                    or not item.evidence_ids
+                    or not set(item.evidence_ids) <= {e.local_id for e in records}
+                ):
+                    continue
+                if not self._llm_phase_has_room(8_000):
+                    break
+                try:
+                    claim = await self.database.add_claim(
+                        ClaimCreate(
+                            task_id=task_id,
+                            text=item.text,
+                            statement_kind=item.statement_kind,
+                            agent="fact_investigator",
+                            round=budget.outer_rounds + 1,
+                            section="fact_check",
+                            evidence_ids=item.evidence_ids,
+                        ),
+                        max_claims=budget.max_claims,
+                        max_evidence_per_claim=budget.max_evidence_per_claim,
+                    )
+                except ValueError as exc:
+                    if not str(exc).startswith("任务 claim 总数已达当前深度上限"):
+                        raise
+                    self._limitations.append(
+                        "评论补查取得材料，但陈述额度不足，新增事实未完成入库与核验。"
+                    )
+                    claim_limited = True
+                    continue
+                used += len(item.evidence_ids)
+                await self.verification.verify_claim(claim, reuse_completed=True)
+                new_claim_ids.add(claim.local_id)
+                await self.events.emit(
+                    task_id,
+                    "claim.added",
+                    {
+                        "claim_id": claim.local_id,
+                        "text": claim.text,
+                        "evidence_ids": claim.evidence_ids,
+                        "agent": "comment_insight",
+                    },
+                )
+        claims = await self.database.list_claims(task_id)
+        context = []
+        for source in records:
+            texts = [source.title, (source.content_text or source.snippet or "")[:1200]]
+            if task.investigation_scope in PROTECTED_SCOPES:
+                if not self.scope_reviewer:
+                    continue
+                decisions = await self.scope_reviewer.review(texts, kind="report_text")
+                if not all(d.allowed for d in decisions):
+                    continue
+                texts = [d.text for d in decisions]
+            context.append(
+                {
+                    "evidence_ref": source.local_id,
+                    "title": texts[0],
+                    "excerpt": texts[1],
+                    "_full_text": source.content_text or source.snippet or "",
+                    "published_at": source.published_at,
+                    "fetch_status": source.fetch_status,
+                    "claims": [
+                        {
+                            "claim_ref": c.local_id,
+                            "text": c.text,
+                            "badge": c.badge,
+                            "verdict": c.verdict,
+                            "verification_state": c.verification_state,
+                        }
+                        for c in claims
+                        if c.local_id in new_claim_ids
+                        and source.local_id in c.evidence_ids
+                        and c.verification_state == "complete"
+                    ],
+                }
+            )
+        outcome = (
+            "claim_budget_limited"
+            if claim_limited
+            else "verification_budget_limited"
+            if verification_limited
+            else "budget_exhausted"
+            if search_limited
+            else "complete"
+            if context
+            else "no_new_evidence"
+        )
+        await self.database.save_checkpoint(
+            task_id,
+            key,
+            {
+                "attempted": True,
+                "status": outcome,
+                "evidence_refs": [e["evidence_ref"] for e in context],
+            },
+        )
+        return {"status": outcome, "evidence": context}
+
     async def _run_comment_insight_impl(
         self, task_id: str, event_query: str, board: ForumBoard
     ) -> None:
@@ -1116,7 +1411,22 @@ class V1Orchestrator:
                     task_id, f"comments:theme-review:{key}", decision
                 )
 
-            analysis = await self.comment_agent.analyze(
+            analysis_method = getattr(
+                self.comment_agent, "analyze_questions", self.comment_agent.analyze
+            )
+            extra = {}
+            if hasattr(self.comment_agent, "analyze_questions"):
+                extra = {
+                    "public_context": await self._comment_public_context(task_id),
+                    "follow_up": lambda question: self._comment_follow_up(
+                        task_id, event_query, question
+                    ),
+                }
+                if self.scope_reviewer and task and task.investigation_scope in PROTECTED_SCOPES:
+                    extra["review_observations"] = lambda texts: self.scope_reviewer.review(
+                        texts, kind="report_text"
+                    )
+            analysis = await analysis_method(
                 event_query,
                 samples,
                 can_continue=can_continue,
@@ -1124,6 +1434,7 @@ class V1Orchestrator:
                 save_progress=save_progress,
                 save_review_decision=save_review_decision,
                 investigation_scope=task.investigation_scope if task else "general",
+                **extra,
             )
             if scope_excluded:
                 coverage = analysis.setdefault("coverage", {})
@@ -1139,7 +1450,9 @@ class V1Orchestrator:
                 analysis.setdefault("warnings", []).append(
                     f"{scope_pending} 条评论尚未完成隐私审查，暂不展示，不计为违规评论。"
                 )
-                analysis["status"] = "partial" if analysis.get("items") else "failed"
+                analysis["status"] = (
+                    "partial" if analysis.get("items") or analysis.get("observations") else "failed"
+                )
                 analysis.setdefault("diagnostics", []).extend(scope_diagnostics)
                 reasons = sorted({d["message"] for d in scope_diagnostics})
                 if reasons:
@@ -1156,14 +1469,22 @@ class V1Orchestrator:
                         "评论样本分析完成"
                         if analysis_status == "complete"
                         else "评论样本分析部分完成"
-                        if analysis.get("items")
+                        if analysis.get("items") or analysis.get("observations")
                         else "评论样本尚未形成通过审查的主题，可恢复分析"
                     )
                     + "；计数与引用仅适用于已采集样本。",
-                    refs=sorted({e for item in analysis["items"] for e in item["evidence_refs"]}),
+                    refs=sorted(
+                        {
+                            e
+                            for item in [*analysis["items"], *analysis.get("observations", [])]
+                            for e in item["evidence_refs"]
+                        }
+                    ),
                     payload={
                         "sampling_scope": "已确认帖子的脱敏样本，不代表总体民意",
-                        "comment_analysis": analysis,
+                        "comment_analysis": {
+                            k: v for k, v in analysis.items() if not k.startswith("_")
+                        },
                     },
                 ),
             )
@@ -2819,8 +3140,11 @@ class V1Orchestrator:
                 if self._quality_progress(candidate_report) >= self._quality_progress(report):
                     report_id, report, html_path = candidate_id, candidate_report, candidate_path
                 else:
+                    retained = self.reports.retain_comment_increment(report, candidate_report)
+                    if retained is not None:
+                        report = retained
                     self._limitations.append(
-                        "评论增量报告审查未完成，保留先前已通过核心发布门的报告。"
+                        "核心章节重建未达到此前质量，保留已审核心及仍有效的评论增量。"
                     )
         # Evaluate the assembled, reviewed report before deciding what to recover.
         # Persist each attempt, including failed attempts, so resume never resets the bound.

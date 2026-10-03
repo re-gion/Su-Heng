@@ -705,20 +705,38 @@ def _generic_block(block: dict[str, Any]) -> str:
         )
     if block_type == "comment_insight":
         coverage = block.get("coverage", {})
+        layered = block.get("analysis_version") == 5
         coverage_html = (
             '<p class="sample-notice">'
             + " · ".join(
                 f"{label}：{_escape(coverage.get(key, 0))}"
                 for key, label in (
                     ("collected", "入库"),
-                    ("unique", "去重后"),
-                    ("classified", "已分类"),
+                    ("unique", "已审去重样本" if layered else "去重后"),
+                    ("classified", "已处理样本" if layered else "已分类"),
                     ("irrelevant", "无关"),
-                    ("unclassified", "未完成分类"),
-                    ("in_reviewed_themes", "进入已审主题"),
-                    ("relevant_without_reviewed_theme", "相关但未形成已审主题"),
+                    ("unclassified", "尚未处理样本" if layered else "未完成分类"),
+                    ("in_reviewed_themes", "进入已审问题" if layered else "进入已审主题"),
+                    (
+                        "relevant_without_reviewed_theme",
+                        "相关但未形成已审问题" if layered else "相关但未形成已审主题",
+                    ),
                     ("displayed_samples", "最终可展示样本"),
                     ("final_scope_hidden_samples", "最终展示审查未通过"),
+                    *(
+                        (
+                            (
+                                ("reviewed_observations", "已审观察"),
+                                ("reviewed_questions", "已审问题"),
+                                ("reviewed_judgements", "已审研判"),
+                                ("ungrouped_observations", "尚未归入已审问题的观察"),
+                                ("scope_review_incomplete", "原始评论范围审查未完成"),
+                                ("scope_excluded", "原始范围审查排除"),
+                            )
+                        )
+                        if layered
+                        else ()
+                    ),
                 )
                 if key not in {"displayed_samples", "final_scope_hidden_samples"} or key in coverage
             )
@@ -730,6 +748,23 @@ def _generic_block(block: dict[str, Any]) -> str:
             coverage_html += (
                 '<p class="sample-notice">最终展示审查未通过的样本及其关联主题不展示；'
                 "原采集和分类记录保留，因此历史分类数量与当前可展示数量不同。</p>"
+            )
+        if layered and coverage:
+            coverage_html = (
+                '<p class="sample-notice">'
+                + " · ".join(
+                    f"{label}：{_escape(coverage.get(key, 0))}"
+                    for key, label in (
+                        ("unique", "已审去重样本"),
+                        ("reviewed_observations", "已审观察"),
+                        ("reviewed_questions", "已审问题"),
+                        ("reviewed_judgements", "已审研判"),
+                        ("scope_review_incomplete", "原始评论范围审查未完成"),
+                    )
+                )
+                + "</p><details><summary>采集、审查与处理统计</summary>"
+                + coverage_html
+                + "</details>"
             )
         collections = "".join(
             f"<li><strong>{_escape(item.get('platform'))}</strong> · {_escape(item.get('title'))} · "
@@ -745,7 +780,12 @@ def _generic_block(block: dict[str, Any]) -> str:
         priority_rows = "".join(
             f"<li><strong>{_escape(item.get('priority') or '补充说明')}</strong>："
             f"{_escape(item.get('title') or '未命名主题')}（{_escape(item.get('sample_count', 0))} 条样本）"
-            f"{_optional_field('依据', item.get('reason'))}</li>"
+            + (
+                f'<a href="#question-{_escape(item["question_ref"])}">查看依据与动作</a>'
+                if layered and item.get("question_ref")
+                else _optional_field("依据", item.get("reason"))
+            )
+            + "</li>"
             for item in block.get("priority_order", [])
         )
         priority_html = (
@@ -755,8 +795,8 @@ def _generic_block(block: dict[str, Any]) -> str:
             if priority_rows
             else ""
         )
-        cards = []
-        for item in block.get("items", []):
+        cards = _render_comment_question_cards(block) if layered else []
+        for item in [] if layered else block.get("items", []):
             quotes = "".join(
                 f"<blockquote>{_escape(_display_comment_text(q.get('text')))}<br><small>{_escape(q.get('platform'))} · "
                 f'<a href="#comment-{_escape(q.get("id"))}">原始样本</a></small></blockquote>'
@@ -832,6 +872,13 @@ def _generic_block(block: dict[str, Any]) -> str:
             "comment_classification": "逐条分类",
             "comment_synthesis": "主题综合",
             "comment_theme_review": "主题审查",
+            "comment_observation_extract": "逐条观察提取",
+            "comment_observation_review": "观察审查",
+            "comment_question_organization": "问题归纳",
+            "comment_question_observation_review": "问题与已审观察关联审查",
+            "comment_evidence_comparison": "证据对照",
+            "comment_question_review": "问题、对照与研判分项审查",
+            "comment_evidence_follow_up": "评论问题补查",
         }
         for item in block.get("diagnostics", []):
             stage = stage_labels.get(item.get("stage"), "评论分析")
@@ -876,6 +923,96 @@ def _generic_block(block: dict[str, Any]) -> str:
         else ""
     )
     return f'<section id="{_escape(block.get("block_id"))}"><h2>{title}</h2>{items}{fallback}</section>'
+
+
+def _render_comment_question_cards(block):
+    observations = {o["id"]: o for o in block.get("observations", [])}
+    used = set()
+    answer_labels = {
+        "answered": "已有材料能回答",
+        "partial": "已有材料部分回答",
+        "unanswered": "本次材料未回答",
+        "incomplete": "材料分歧或核验未完成",
+    }
+
+    def observation_html(o):
+        return (
+            f'<li id="observation-{_escape(o["id"])}"><strong>{_escape(o.get("stance"))}</strong> · {_escape(o["text"])} '
+            + " ".join(f'<a href="#comment-{_escape(r)}">原评论</a>' for r in o["comment_refs"])
+            + "</li>"
+        )
+
+    cards = [
+        '<p class="sample-notice">同一评论可包含多个观察并涉及多个问题；整体样本去重，各问题或立场数量不能直接相加，不代表参与人数。观察描述样本说法，不证明事件事实。</p>'
+    ]
+    for q in block.get("items", []):
+        obs = [observations[r] for r in q["observation_refs"] if r in observations]
+        used.update(o["id"] for o in obs)
+        distribution = "、".join(f"{k} {v} 条" for k, v in q.get("platform_counts", {}).items())
+        card = (
+            f'<article id="question-{_escape(q["id"])}" class="narrative-card"><h3>{_escape(q["title"])}</h3>'
+            f'<p class="card-meta">{_escape(q["sample_count"])} 条去重样本 · {_escape(len(obs))} 条已审观察 · {_escape(distribution)}</p>'
+            '<p class="card-meta">观点分布：'
+            + _escape("、".join(f"{k} {v} 条样本" for k, v in q.get("stance_counts", {}).items()))
+            + "</p><details><summary>不同观点与理由 · 查看全部已审观察</summary><ul>"
+            + "".join(observation_html(o) for o in obs)
+            + "</ul></details>"
+        )
+        for comp in q.get("comparisons", []):
+            card += (
+                f"<h4>证据对照：{_escape(answer_labels.get(comp['status'], '尚未完成'))}</h4><p>{_escape(comp['text'])}</p>"
+                + "".join(_citation_link(r) for r in comp.get("evidence_refs", []))
+            )
+        if not q.get("comparisons"):
+            card += '<p class="fallback-note">证据对照尚未通过全部审查，已审观察保留。</p>'
+        for j in q.get("judgements", []):
+            card += (
+                f"<h4>已审研判 · {_escape(j['priority'])}</h4>"
+                + _optional_field("条件性风险", j["risk_assessment"])
+                + _optional_field("建议动作", j["response_action"])
+                + _optional_field("排序依据", j["priority_reason"])
+                + _optional_field("分析边界", j["uncertainty"])
+                + "".join(_citation_link(r) for r in j.get("evidence_refs", []))
+            )
+        if not q.get("judgements"):
+            card += '<p class="fallback-note">尚无通过全部审查的风险与处置建议；不影响已经通过审查的观察。</p>'
+        cards.append(card + "</article>")
+    ungrouped = [o for key, o in observations.items() if key not in used]
+    if ungrouped:
+        cards.append(
+            '<article class="narrative-card"><h3>尚未完成问题归纳的已审观察</h3><details><summary>查看已审观察及原评论</summary><ul>'
+            + "".join(observation_html(o) for o in ungrouped)
+            + "</ul></details></article>"
+        )
+    if block.get("follow_ups"):
+        question_titles = {q["id"]: q["title"] for q in block.get("items", [])}
+        labels = {
+            "complete": "已取得补充材料",
+            "no_new_evidence": "未取得新的合格材料",
+            "incomplete": "补查或核验未完成",
+            "budget_limited": "预算不足，补查尚未执行",
+            "budget_exhausted": "已执行补查，后续调用因额度不足停止",
+            "claim_budget_limited": "已取得材料，陈述额度不足，部分新增事实未能入库核验",
+            "verification_budget_limited": "已取得材料，核验额度不足，部分新增事实未核完",
+            "round_limit": "已达本任务补查轮数上限",
+            "not_applicable": "当前状态或公共性条件不允许补查",
+        }
+        cards.append(
+            "<details><summary>有限补查记录</summary><ul>"
+            + "".join(
+                f"<li>{_escape(labels.get(f.get('status'), '状态未知'))} · "
+                + (
+                    f'<a href="#question-{_escape(f["question_ref"])}">{_escape(question_titles[f["question_ref"]])}</a>'
+                    if f.get("question_ref") in question_titles
+                    else "相关问题尚未通过全部审查"
+                )
+                + "".join(_citation_link(r) for r in f.get("evidence_refs", []))
+                + "</li>"
+                for f in block["follow_ups"]
+            )
+            + "</ul></details>"
+        )
+    return cards
 
 
 def _render_block(

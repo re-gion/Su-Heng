@@ -165,6 +165,12 @@ class OpenAICommentAgent:
         self.gateway = gateway
         self.system_prompt = system_prompt
 
+    async def analyze_questions(self, event_query: str, rows: list[dict], **kwargs) -> dict:
+        """New tasks use v5; keep analyze() for old checkpoints and reports."""
+        from yuqing.agents.comment_observations import analyze_questions
+
+        return await analyze_questions(self, event_query, rows, **kwargs)
+
     @contextmanager
     def _classification_budget(self):
         """Keep part of the existing phase allowance for synthesis and review."""

@@ -12,6 +12,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Protocol
 
+from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.history_cards import unique_history_cards
 from yuqing.render.html import render_html
 from yuqing.render.validator import prune_citation_backlinks, validate_report
@@ -40,6 +41,62 @@ class ReportSectionAgent(Protocol):
 
 class FullReportBuilder:
     """从数据库权威字段组装完整 IR；LLM 只能补充非权威叙述块。"""
+
+    @staticmethod
+    def retain_comment_increment(core, candidate):
+        """Keep a reviewed optional module even if unrelated core regeneration failed."""
+        module = next(
+            (
+                b
+                for b in candidate.get("blocks", [])
+                if b.get("type") == "comment_insight"
+                and b.get("analysis_version") == 5
+                and b.get("observations")
+            ),
+            None,
+        )
+        if module is None:
+            return None
+        report = copy.deepcopy(core)
+        appendix = next((b for b in report["blocks"] if b["type"] == "evidence_appendix"), None)
+        if appendix is None:
+            return None
+        existing = {e["evidence_ref"] for e in appendix["items"]}
+        needed = set()
+
+        def collect_refs(value):
+            if isinstance(value, dict):
+                needed.update(value.get("evidence_refs", []))
+                if value.get("evidence_ref"):
+                    needed.add(value["evidence_ref"])
+                for child in value.values():
+                    collect_refs(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_refs(child)
+
+        collect_refs(module)
+        for block in candidate.get("blocks", []):
+            if block["type"] == "evidence_appendix":
+                appendix["items"].extend(
+                    copy.deepcopy(e)
+                    for e in block.get("items", [])
+                    if e["evidence_ref"] in needed - existing
+                )
+        report["blocks"] = [b for b in report["blocks"] if b["type"] != "comment_insight"]
+        index = next(
+            (i for i, b in enumerate(report["blocks"]) if b.get("section", "") >= "06"),
+            len(report["blocks"]),
+        )
+        report["blocks"].insert(index, copy.deepcopy(module))
+        report.update(schema_version="0.9", min_reader_minor=9)
+        report.setdefault("quality", {})["comment_increment"] = {
+            "core_preserved": True,
+            "reviewed_observations": len(module["observations"]),
+        }
+        FullReportBuilder._reconcile_reviewed_comment_themes(report)
+        prune_citation_backlinks(report)
+        return validate_report(report).report
 
     def __init__(
         self,
@@ -186,6 +243,36 @@ class FullReportBuilder:
         for block in report["blocks"]:
             if block["type"] in protected_types:
                 continue
+            if block["type"] == "comment_insight" and block.get("analysis_version") == 5:
+                for field in ("observations", "samples", "collections"):
+                    for item in block.get(field, []):
+                        part = collect(item)
+                        units.append((block[field], item, part))
+                        texts.update(part)
+                for item in block.get("items", []):
+                    part = collect(
+                        {k: v for k, v in item.items() if k not in {"comparisons", "judgements"}}
+                    )
+                    units.append((block, item, part))
+                    texts.update(part)
+                    for field in ("comparisons", "judgements"):
+                        for child in item.get(field, []):
+                            part = collect(child)
+                            units.append((item[field], child, part))
+                            texts.update(part)
+                for field, value in block.items():
+                    if field in {
+                        "items",
+                        "samples",
+                        "observations",
+                        "collections",
+                        "priority_order",
+                    }:
+                        continue
+                    part = collect(value, field)
+                    units.append(({"_comment_owner": block, "_field": field}, None, part))
+                    texts.update(part)
+                continue
             if isinstance(block.get("items"), list):
                 for item in block["items"]:
                     part = collect(item)
@@ -208,11 +295,19 @@ class FullReportBuilder:
                 part = collect(block)
                 units.append((block, None, part))
                 texts.update(part)
+        core_lists = {
+            id(block[field])
+            for block in report["blocks"]
+            if block["type"] == "executive_summary"
+            for field in ("what", "why", "so_what")
+            if field in block
+        }
         core_texts = set().union(
             *(
                 part
                 for owner, item, part in units
                 if isinstance(owner, list)
+                and id(owner) in core_lists
                 or isinstance(owner, dict)
                 and owner.get("section") in {"01", "02", "04", "07"}
             )
@@ -271,6 +366,8 @@ class FullReportBuilder:
             if isinstance(owner, list):
                 if item in owner:
                     owner.remove(item)
+            elif "_comment_owner" in owner:
+                owner["_comment_owner"].pop(owner["_field"], None)
             elif item is not None:
                 if item in owner["items"]:
                     owner["items"].remove(item)
@@ -312,7 +409,11 @@ class FullReportBuilder:
                 owner.get("section") in {"01", "02", "04", "07"} and part - safe
                 for owner, item, part in units
                 if isinstance(owner, dict)
-            ) or any(part - safe for owner, item, part in units if isinstance(owner, list))
+            ) or any(
+                part - safe
+                for owner, item, part in units
+                if isinstance(owner, list) and id(owner) in core_lists
+            )
             if core_removed or not report["metrics"]["key_claims_rendered"]:
                 quality["release_label"] = (
                     "evidence_brief"
@@ -443,6 +544,8 @@ class FullReportBuilder:
                 "final_scope_hidden_samples", 0
             ) + len(hidden_ids)
             coverage["displayed_samples"] = len(block["samples"])
+            if block.get("analysis_version") == 5:
+                reconcile_questions(block)
 
     @staticmethod
     def _reconcile_reviewed_comment_themes(report: dict[str, Any]) -> None:
@@ -469,6 +572,37 @@ class FullReportBuilder:
             return
         for block in report["blocks"]:
             if block.get("type") != "comment_insight" or block.get("analysis_version", 1) < 4:
+                continue
+            if block.get("analysis_version") == 5:
+                reconcile_questions(block)
+                coverage = block["coverage"]
+                block["analysis_status"] = (
+                    "partial"
+                    if block["observations"]
+                    and (
+                        coverage.get("unclassified")
+                        or coverage.get("ungrouped_observations")
+                        or coverage.get("scope_review_incomplete")
+                        or any(not q.get("judgements") for q in block["items"])
+                    )
+                    else "complete"
+                    if block["observations"]
+                    or block.get("analysis_status") == "complete"
+                    and not coverage.get("unclassified")
+                    and not coverage.get("scope_review_incomplete")
+                    else "failed"
+                )
+                block["fallback_text"] = (
+                    None
+                    if block["observations"]
+                    else "未形成通过审查的评论观察；采集范围及未完成原因已保留。"
+                )
+                if chapter:
+                    chapter.update(
+                        status=block["analysis_status"],
+                        coverage=coverage,
+                        message="已审观察独立保留；证据对照与研判按各自审查结果展示。",
+                    )
                 continue
             items = block.get("items", [])
             rank = {"立即回应": 0, "补充说明": 1, "持续观察": 2}
@@ -1201,6 +1335,16 @@ class FullReportBuilder:
                 if structured_comments.get("items")
                 else "未形成通过原始样本审查的主题；采集和分类覆盖见下方记录。",
             )
+            if structured_comments.get("version") == 5:
+                comment_insight.update(
+                    observations=structured_comments.get("observations", []),
+                    stages=structured_comments.get("stages", {}),
+                    follow_ups=structured_comments.get("follow_ups", []),
+                    title="评论问题与样本观察",
+                    fallback_text=None
+                    if structured_comments.get("observations")
+                    else "未形成通过审查的观察；未完成原因见分析记录。",
+                )
         evidence_counts = Counter(item.lang or "unknown" for item in evidence)
         available_languages = {language for language, count in evidence_counts.items() if count > 0}
         requested = task.source_languages
@@ -1393,6 +1537,7 @@ class FullReportBuilder:
             try:
                 context = report_context(report["task"], analysis_facts, analysis_sources, forum)
                 context["comment_insights"] = comment_insight.get("items", [])
+                context["comment_observations"] = comment_insight.get("observations", [])
                 context["comment_coverage"] = comment_insight.get("coverage", {})
                 context["propagation_edges"] = propagation_edges
                 if hasattr(self.reporter, "bind"):
@@ -1521,14 +1666,16 @@ class FullReportBuilder:
             "disabled"
             if task.comment_mode == "off" or comments_skipped
             else "partial"
-            if comment_insight.get("items")
+            if (comment_insight.get("items") or comment_insight.get("observations"))
             and (
                 comment_coverage.get("unclassified", 0)
                 or comment_coverage.get("relevant_without_reviewed_theme", 0)
                 or comment_coverage.get("scope_review_incomplete", 0)
             )
             else "complete"
-            if comment_insight.get("items") or comment_insight.get("analysis_status") == "complete"
+            if comment_insight.get("items")
+            or comment_insight.get("observations")
+            or comment_insight.get("analysis_status") == "complete"
             else "failed"
         )
         quality["chapter_status"] = {
