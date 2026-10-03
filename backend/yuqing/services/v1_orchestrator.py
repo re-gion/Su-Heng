@@ -1111,12 +1111,18 @@ class V1Orchestrator:
                     task_id, "comments:analysis", {"phase": "comments_ready", "analysis": analysis}
                 )
 
+            async def save_review_decision(key, decision):
+                await self.database.save_checkpoint(
+                    task_id, f"comments:theme-review:{key}", decision
+                )
+
             analysis = await self.comment_agent.analyze(
                 event_query,
                 samples,
                 can_continue=can_continue,
                 previous=(checkpoint or {}).get("analysis"),
                 save_progress=save_progress,
+                save_review_decision=save_review_decision,
                 investigation_scope=task.investigation_scope if task else "general",
             )
             if scope_excluded:

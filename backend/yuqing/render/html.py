@@ -835,8 +835,13 @@ def _generic_block(block: dict[str, Any]) -> str:
         }
         for item in block.get("diagnostics", []):
             stage = stage_labels.get(item.get("stage"), "评论分析")
+            outcome = (
+                "已完成审查，未通过"
+                if item.get("category") == "review_rejected"
+                else f"HTTP {_escape(item.get('status') or '未返回')}"
+            )
             diagnostic_rows.append(
-                f"<li>{stage} · HTTP {_escape(item.get('status') or '未返回')} · "
+                f"<li>{stage} · {outcome} · "
                 f"{_escape(item.get('message') or '原因未知')} "
                 f"（批次 {_escape(item.get('batch') or '未记录')}）</li>"
             )

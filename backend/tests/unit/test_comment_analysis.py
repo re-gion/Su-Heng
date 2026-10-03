@@ -199,6 +199,58 @@ async def test_failed_semantic_review_removes_theme():
 
 
 @pytest.mark.asyncio
+async def test_rejected_review_preserves_private_reason_and_exports_only_safe_codes():
+    private_reason = "审查理由可能复述未获准公开的私人指控。"
+
+    class Rejected(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier":
+                return {
+                    "accepted": False,
+                    "reason": private_reason,
+                    "reason_codes": ["unsupported_risk", "untrusted-code", "unsupported_risk"],
+                }
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    decisions = []
+
+    async def save_decision(key, decision):
+        decisions.append((key, decision))
+
+    result = await OpenAICommentAgent(Rejected(), "comments").analyze(
+        "高校事件", rows(3), save_review_decision=save_decision
+    )
+    assert len(decisions) == 1
+    key, decision = decisions[0]
+    assert len(key) == 64
+    assert decision["accepted"] is False
+    assert decision["reason"] == private_reason
+    assert len(decision["members"]) == 3
+    assert result["items"] == []
+    diagnostic = next(d for d in result["diagnostics"] if d["category"] == "review_rejected")
+    assert diagnostic["reason_codes"] == ["unsupported_risk"]
+    assert "风险研判缺少样本支持" in diagnostic["message"]
+    assert private_reason not in json.dumps(result, ensure_ascii=False)
+    assert "untrusted-code" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_decision", [None, "false", 0])
+async def test_invalid_review_decision_keeps_pending_theme_for_recovery(invalid_decision):
+    class InvalidReview(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier":
+                return {"accepted": invalid_decision, "reason": "格式不合格"}
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    result = await OpenAICommentAgent(InvalidReview(), "comments").analyze("高校事件", rows(3))
+    assert result["items"] == []
+    assert len(result["pending_reviews"]) == 1
+    assert result["diagnostics"][-1]["category"] == "invalid_output"
+    assert result["diagnostics"][-1]["stage"] == "comment_theme_review"
+
+
+@pytest.mark.asyncio
 async def test_budget_stop_preserves_unclassified_count():
     async def stop():
         return False

@@ -61,6 +61,58 @@ class FailingAgent(NamedAgent):
 
 
 @pytest.mark.asyncio
+async def test_comment_review_reason_is_local_and_not_in_forum_payload(runtime_dir):
+    from yuqing.storage.models import EvidenceCreate
+
+    private_reason = "仅保存在本地、未经过展示审查的具体理由"
+
+    class CommentAgent:
+        async def analyze(self, event_query, rows, **kwargs):
+            await kwargs["save_review_decision"](
+                "fixture-review", {"accepted": False, "reason": private_reason}
+            )
+            return {
+                "status": "failed",
+                "items": [],
+                "diagnostics": [{"category": "review_rejected", "message": "风险研判缺少样本支持"}],
+                "coverage": {},
+            }
+
+    db = Database(runtime_dir / "comment-review-reasons.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(
+            TaskCreate(event_query="机构公开通报", investigation_scope="general")
+        )
+        await db.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://example.test/comments",
+                title="评论样本",
+                snippet="确认帖子的评论样本。",
+                kind="social_comments",
+                extra={"collection_id": "fixture-collection"},
+            )
+        )
+        board = await ForumBoard.restore(db, task.id)
+
+        async def post(board, message):
+            return await board.post(message)
+
+        runner = SimpleNamespace(
+            database=db, events=EventBus(db), comment_agent=CommentAgent(), _post=post
+        )
+        await V1Orchestrator._run_comment_insight_impl(runner, task.id, task.event_query, board)
+        local = await db.checkpoint(task.id, "comments:theme-review:fixture-review")
+        assert local["reason"] == private_reason
+        message = board.history()[-1]
+        assert "风险研判缺少样本支持" in json.dumps(message.payload, ensure_ascii=False)
+        assert private_reason not in json.dumps(message.payload, ensure_ascii=False)
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_new_directive_reexamines_cached_material_once(runtime_dir):
     from yuqing.agents.openai_runtime import OpenAIInvestigationAgent
     from yuqing.services.forum import ForumMessageCreate
