@@ -377,6 +377,47 @@ async def test_quality_recovery_does_not_start_when_only_report_reserve_remains(
 
 
 @pytest.mark.asyncio
+async def test_core_recovery_precedes_optional_comments_and_survives_comment_spending(runtime_dir):
+    database = Database(runtime_dir / "core-first.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(
+            TaskCreate(event_query="公开事件", depth="standard", comment_mode="smart")
+        )
+        await database.save_checkpoint(task.id, "comments:ready", {"phase": "comments_ready"})
+        usage = SimpleNamespace(tokens_used=1_118_115, calls=1, token_limit=None)
+        runner = V1Orchestrator(
+            database,
+            EventBus(database),
+            search=FixtureSearchProvider([]),
+            fetcher=FailFetcher(),
+            snapshots=SnapshotStore(runtime_dir / "snapshots"),
+            agents={"fact_investigator": FailingAgent("fact_investigator")},
+            moderator=ReleaseModerator(),
+            verifier=FixtureVerifier(),
+            reports_dir=runtime_dir / "reports",
+            usage=usage,
+        )
+        order = []
+
+        async def recover(*args, **kwargs):
+            order.append("core_recovery")
+
+        async def comments(*args, **kwargs):
+            order.append("comments")
+            usage.tokens_used = 1_373_986
+
+        runner._recover_report_gaps = recover
+        runner._run_comment_insight = comments
+        await runner.run_task(task.id)
+        assert order[0] == "core_recovery"
+        assert "comments" in order
+        assert (await database.get_task(task.id)).status == "done"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_stopped_task_does_not_restart_quality_recovery(runtime_dir):
     database = Database(runtime_dir / "stopped-recovery.db")
     await database.initialize()

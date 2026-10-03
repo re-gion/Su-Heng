@@ -173,6 +173,62 @@ async def test_saved_page_publisher_date_promotes_pending_evidence_to_main(runti
 
 
 @pytest.mark.asyncio
+async def test_direct_fetch_retry_clears_source_credit_missing_from_current_page(runtime_dir: Path):
+    class ChangingPageFetcher:
+        calls = 0
+
+        async def fetch(self, url: str) -> FetchResult:
+            self.calls += 1
+            return FetchResult(
+                url=url,
+                html=(
+                    "<article>公开报道正文</article><p>来源：新华社</p>"
+                    if self.calls == 1
+                    else "<article>更新后的公开报道正文</article>"
+                ),
+                content_text="公开报道正文",
+                content_type="text/html",
+            )
+
+    database = Database(runtime_dir / "source-credit-retry.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(TaskCreate(event_query="公开报道"))
+        records = await _store_results(
+            runtime_dir,
+            database,
+            task.id,
+            [
+                SearchResult(
+                    url="https://example.com/report",
+                    title="公开报道",
+                    snippet="公开报道摘要",
+                    provider="fixture",
+                )
+            ],
+        )
+        store = EvidenceStore(
+            database, SnapshotStore(runtime_dir / "snapshots"), ChangingPageFetcher()
+        )
+        first = await store.fetch_one(records[0])
+        assert first.extra["page_source_credits"] == ["来源：新华社"]
+        await database.update_evidence_failed(task.id, first.local_id, "重新排队抓取")
+        retry = await database.get_evidence(task.id, first.local_id)
+        assert retry is not None
+
+        refreshed = await store.fetch_one(retry)
+
+        assert refreshed.fetch_status == "fetched"
+        assert refreshed.extra["page_source_credits"] == []
+        assert refreshed.extra["content_origin"] == "direct_fetch"
+        stored = await database.get_evidence(task.id, first.local_id)
+        assert stored is not None
+        assert stored.extra["page_source_credits"] == []
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_two_distinct_outlets_verify_a_claim_and_lift_verified_rate(
     runtime_dir: Path, claim_limits: dict[str, int]
 ):

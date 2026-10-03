@@ -30,7 +30,7 @@ async def test_cancelling_parallel_work_collects_both_inflight_calls(stage):
     gateway = Blocking()
     if stage == "scope":
         work = InstitutionScopeReviewer(gateway).review(
-            [f"公开材料{i}" for i in range(24)], kind="report_text"
+            [f"公开材料{i}" for i in range(48)], kind="report_text"
         )
     elif stage == "comments":
         work = OpenAICommentAgent(gateway, "system").analyze(

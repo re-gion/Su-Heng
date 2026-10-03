@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from math import isfinite
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.history_cards import unique_history_cards
@@ -42,6 +43,39 @@ class ReportSectionAgent(Protocol):
 class FullReportBuilder:
     """从数据库权威字段组装完整 IR；LLM 只能补充非权威叙述块。"""
 
+    async def attach_comment_analysis(self, task_id: str, core: dict) -> dict:
+        """Review an optional comment increment without drafting the core again."""
+        checkpoint = await self.database.checkpoint(task_id, "comments:analysis") or {}
+        analysis = checkpoint.get("analysis")
+        if not isinstance(analysis, dict) or analysis.get("version") != 5:
+            return core
+        collections = await self.database.fetch_all(
+            """SELECT s.platform,c.status,c.collected_count,c.sampling_method,c.error,s.url,s.title
+               FROM comment_collection c JOIN social_candidate s ON s.id=c.candidate_id
+               WHERE c.task_id=? ORDER BY c.started_at""",
+            (task_id,),
+        )
+        block = {k: copy.deepcopy(v) for k, v in analysis.items() if not k.startswith("_")}
+        block.update(
+            block_id="b_05_comment_insight",
+            type="comment_insight",
+            section="05",
+            in_brief=False,
+            title="评论速读",
+            analysis_version=5,
+            analysis_mode=analysis.get("mode", "quick_read"),
+            analysis_status=analysis.get("status", "partial"),
+            sample_notice="仅代表用户确认帖子的已采集样本，不代表平台整体或全网民意。",
+            collections=[dict(row) for row in collections],
+        )
+        candidate = copy.deepcopy(core)
+        candidate["blocks"] = [b for b in candidate["blocks"] if b["type"] != "comment_insight"]
+        candidate["blocks"].append(block)
+        task = await self.database.get_task(task_id)
+        if task and task.investigation_scope in PROTECTED_SCOPES:
+            await self._retain_reviewed_blocks(candidate, task)
+        return self.retain_comment_increment(core, candidate) or core
+
     @staticmethod
     def retain_comment_increment(core, candidate):
         """Keep a reviewed optional module even if unrelated core regeneration failed."""
@@ -51,7 +85,7 @@ class FullReportBuilder:
                 for b in candidate.get("blocks", [])
                 if b.get("type") == "comment_insight"
                 and b.get("analysis_version") == 5
-                and b.get("observations")
+                and (b.get("observations") or b.get("samples"))
             ),
             None,
         )
@@ -92,7 +126,7 @@ class FullReportBuilder:
         report.update(schema_version="0.9", min_reader_minor=9)
         report.setdefault("quality", {})["comment_increment"] = {
             "core_preserved": True,
-            "reviewed_observations": len(module["observations"]),
+            "reviewed_observations": len(module.get("observations", [])),
         }
         FullReportBuilder._reconcile_reviewed_comment_themes(report)
         prune_citation_backlinks(report)
@@ -1875,32 +1909,48 @@ class FullReportBuilder:
             for item in main_evidence
             if item.local_id in nodes_by_id and item.fetch_status == "fetched"
         ]
-        publisher_names = {
-            name
-            for item in selected
-            for name in (item.publisher_entity, item.source_name)
-            if name and len(name) >= 2
-        }
+
+        def publisher_terms(item):
+            names = {item.publisher_entity, item.source_name}
+            # Aliases expand candidate recall only. The relation still needs a
+            # literal credit, matching publication and independent review below.
+            domain = (urlsplit(item.url).hostname or "").lower()
+            if domain == "cctv.com" or domain.endswith(".cctv.com"):
+                names.update({"央视新闻", "央视网"})
+            if domain == "news.cn" or domain.endswith(".news.cn"):
+                names.update({"新华社", "新华网"})
+            return {name for name in names if name and len(name) >= 2}
+
+        publisher_names = {name for item in selected for name in publisher_terms(item)}
+        credit_pattern = re.compile(
+            r"来源\s*[：:|｜]|新华社.{0,8}日电|转载自|据[^\n。；，]{2,24}(?:消息|报道)"
+        )
+
+        def source_text(item):
+            credits = getattr(item, "extra", None) or {}
+            return "\n".join([item.content_text or "", *credits.get("page_source_credits", [])])
+
         extras = [
             item
             for item in main_evidence
             if item.local_id not in nodes_by_id
             and item.fetch_status == "fetched"
             and item.published_at
-            and re.search(
-                r"来源\s*[：:|｜]|新华社.{0,8}日电|转载自|据[^\n。；，]{2,24}(?:消息|报道)",
-                (item.content_text or "")[:500],
-            )
+            and credit_pattern.search(source_text(item))
         ]
         extras.sort(
             key=lambda item: (
-                not any(name in (item.content_text or "")[:500] for name in publisher_names),
+                not any(name in source_text(item) for name in publisher_names),
                 item.source_tier or 9,
                 item.local_id,
             )
         )
         credited = extras[:8]
-        credited_text = "\n".join((item.content_text or "")[:500] for item in credited)
+        credited_text = "\n".join(
+            source_text(item)[max(0, m.start() - 60) : m.end() + 180]
+            for item in [*selected, *credited]
+            for m in list(credit_pattern.finditer(source_text(item)))[:8]
+        )
         existing_ids = {item.local_id for item in [*selected, *credited]}
         originals = [
             item
@@ -1908,19 +1958,34 @@ class FullReportBuilder:
             if item.local_id not in existing_ids
             and item.fetch_status == "fetched"
             and item.published_at
-            and any(
-                name and len(name) >= 2 and name in credited_text
-                for name in (item.publisher_entity, item.source_name)
-            )
+            and any(name in credited_text for name in publisher_terms(item))
         ][:4]
+
+        def windows(item):
+            text = source_text(item)
+            parts = [text[:1000]]
+            for match in credit_pattern.finditer(text):
+                start, end = max(0, match.start() - 60), min(len(text), match.end() + 240)
+                part = text[start:end]
+                if part in parts[0] or part in parts:
+                    continue
+                if sum(map(len, parts)) + len(part) > 2360:
+                    break
+                parts.append(part)
+            return parts
+
         return [
             {
                 "evidence_ref": item.local_id,
                 "title": item.title,
-                "publisher": item.publisher_entity or item.source_name or item.source_domain,
+                "publisher": nodes_by_id.get(item.local_id, {}).get("publisher")
+                or item.publisher_entity
+                or item.source_name
+                or item.source_domain,
                 "url": item.url,
                 "published_at": item.published_at,
-                "excerpt": (item.content_text or "")[:1600],
+                "excerpt": "\n[…]\n".join(windows(item)),
+                "excerpt_windows": windows(item),
             }
             for item in [*selected, *credited, *originals]
         ]

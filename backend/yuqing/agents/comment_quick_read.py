@@ -75,7 +75,7 @@ async def analyze_quick_read(
     sample_map = {s["id"]: s for s in samples}
     sample_fps = {s["id"]: fingerprint(s) for s in samples}
     run_key = fingerprint(
-        [event_query, investigation_scope, agent.system_prompt, QUICK_SYSTEM, "quick-read-v4"]
+        [event_query, investigation_scope, agent.system_prompt, QUICK_SYSTEM, "quick-read-v5"]
         + ([review_policy_version] if review_policy_version else [])
     )
     prior = previous if isinstance(previous, dict) and previous.get("run_key") == run_key else {}
@@ -104,6 +104,18 @@ async def analyze_quick_read(
         "warnings": list(prior.get("warnings", [])),
         "diagnostics": list(prior.get("diagnostics", [])),
     }
+    retained_observations = {o["id"] for o in state["observations"]}
+    for question in prior.get("items", []):
+        if not set(question.get("observation_refs", [])) <= retained_observations:
+            continue
+        retained = copy.deepcopy(question)
+        if prior.get("public_context_fingerprint") != public_context_fingerprint:
+            retained.update(
+                comparisons=[],
+                judgements=[],
+                component_status={"comparison": "not_requested", "judgement": "not_requested"},
+            )
+        state["items"].append(retained)
 
     async def room():
         return can_continue is None or await can_continue()
@@ -160,14 +172,13 @@ async def analyze_quick_read(
             '只输出 {"samples":[{"index":0,"relevant":true,"indices":[{"text":"具体短索引","kind":"request","stance":"质疑"}]}]}。'
             "kind仅viewpoint/reason/request/question；stance仅认可/质疑/审慎/其他。",
             {"event": event_query, "scope": investigation_scope, "comments": compact},
-            max_tokens=6144,
+            max_tokens=12288,
         )
         by_index = _unique_decisions(extracted.get("samples"), "index")
-        if set(by_index) != set(range(len(batch))):
-            raise ValueError("速读索引返回的样本成员不完整或重复")
+        malformed = set()
         candidates = []
         for i in range(len(batch)):
-            row = by_index[i]
+            row = by_index.setdefault(i, {"relevant": None, "indices": []})
             indices = row.get("indices")
             if (
                 type(row.get("relevant")) is not bool
@@ -175,7 +186,9 @@ async def analyze_quick_read(
                 or row["relevant"]
                 and not indices
             ):
-                raise ValueError("速读相关性或索引格式无效")
+                malformed.add(i)
+                by_index[i] = {"relevant": None, "indices": []}
+                continue
             for index in indices if row["relevant"] else []:
                 if (
                     not isinstance(index, dict)
@@ -184,7 +197,8 @@ async def analyze_quick_read(
                     or index.get("kind") not in KINDS
                     or index.get("stance") not in COMMENT_STANCES
                 ):
-                    raise ValueError("速读索引过长或缺少有效语义字段")
+                    malformed.add(i)
+                    continue
                 candidates.append(
                     {
                         "index": len(candidates),
@@ -194,6 +208,8 @@ async def analyze_quick_read(
                         "stance": index["stance"],
                     }
                 )
+        if malformed:
+            failure("comment_quick_index", ValueError("部分索引格式无效；有效条目继续审查"))
 
         async def review_partition(members, effort):
             if not members:
@@ -312,6 +328,11 @@ async def analyze_quick_read(
             if classifications.get(o["sample_index"], {}).get("relevant") is True
             and type(accepted.get(o["index"], {}).get("accepted")) is not bool
         }
+        pending_sources.update(
+            batch[i]["id"]
+            for i in malformed
+            if classifications.get(i, {}).get("relevant") is not False
+        )
         for i, o in enumerate(approved):
             if privacy is not None and not privacy[i].allowed:
                 if privacy[i].status == "incomplete":
@@ -351,7 +372,11 @@ async def analyze_quick_read(
     phase_cap = getattr(agent.gateway, "token_limit", None)
     if isinstance(phase_cap, int):
         used = int(getattr(agent.gateway, "tokens_used", 0))
-        agent.gateway.token_limit = used + max(0, phase_cap - used) * 4 // 5
+        # A deliverable summary needs a grouped draft, independent semantic review
+        # and privacy review. Reserve these before indexing the next wave.
+        available = max(0, phase_cap - used)
+        summary_reserve = min(40_000, available * 2 // 5)
+        agent.gateway.token_limit = phase_cap - summary_reserve
     try:
         while batches and await room():
             wave, batches = batches[:2], batches[2:]
@@ -389,7 +414,8 @@ async def analyze_quick_read(
                 "reporter",
                 "按具体公共问题组织短索引，保留不同理由、诉求与相反立场；不要套固定类别，不证明问题前提。"
                 "每条索引只归一个问题；复合评论已有多条索引，原评论可跨问题。尽量复用已有问题标题。不能可靠归类的可以不分组，禁止删除少数意见。"
-                '只输出 {"questions":[{"title":"具体关切问句","indexes":[0,1]}]}，使用短整数引用，不重复索引正文。',
+                "同时为每个问题写一段不超过160字的摘要，保留所有关联索引中的不同理由、诉求、条件与相反观点，只描述样本说法。"
+                '只输出 {"questions":[{"title":"具体关切问句","summary":"简洁摘要","indexes":[0,1]}]}，使用短整数引用，不重复索引正文。',
                 {
                     "event": event_query,
                     "indices": [
@@ -398,7 +424,7 @@ async def analyze_quick_read(
                     ],
                     "existing_questions": [q["title"] for q in candidates],
                 },
-                max_tokens=6144,
+                max_tokens=12288,
             )
             for q in response.get("questions", []):
                 indexes = q.get("indexes")
@@ -418,8 +444,12 @@ async def analyze_quick_read(
                 known = next((x for x in candidates if x["title"] == q["title"].strip()), None)
                 if known:
                     known["observation_refs"].extend(refs)
+                    known.pop("summary", None)
                 else:
-                    candidates.append({"title": q["title"].strip(), "observation_refs": refs})
+                    candidate = {"title": q["title"].strip(), "observation_refs": refs}
+                    if isinstance(q.get("summary"), str) and 0 < len(q["summary"].strip()) <= 160:
+                        candidate["summary"] = q["summary"].strip()
+                    candidates.append(candidate)
         except Exception as exc:
             failure("comment_quick_group", exc)
         state.update(_quick_questions=candidates, _quick_grouping_fp=grouping_fp)
@@ -427,7 +457,75 @@ async def analyze_quick_read(
     state.update(_quick_questions=candidates, _quick_grouping_fp=grouping_fp)
     by_obs = {o["id"]: o for o in obs}
     cached = {q["id"]: q for q in prior.get("items", [])}
-    for candidate in candidates:
+    bundled_reviews = {}
+    bundled_privacy = {}
+    bundled = [
+        (i, q)
+        for i, q in enumerate(candidates)
+        if q.get("summary")
+        and "Q" + fingerprint([run_key, sorted(q["observation_refs"])])[:12] not in cached
+    ]
+    for start in range(0, len(bundled), 12):
+        selected = bundled[start : start + 12]
+        if not await room():
+            break
+        try:
+            response = await _call(
+                agent,
+                "comment_quick_summary_review",
+                "verifier",
+                "独立逐项检查问题标题与摘要是否仅描述所附已审索引，保留全部不同理由、诉求、否定、条件及少数相反观点。"
+                "不能加入事实判定、私人指控、总体民意或机构未回应断言；相似议题不等于具体问题归纳正确。"
+                "一个问题不合格只拒绝该项，沿用输入index，无法判断用null。"
+                '只输出 {"decisions":[{"index":0,"question_accepted":true,"summary_accepted":true,"publicly_verifiable":true}]}。',
+                {
+                    "event": event_query,
+                    "questions": [
+                        {
+                            "index": i,
+                            "title": q["title"],
+                            "summary": q["summary"],
+                            "indices": [
+                                {
+                                    "text": by_obs[r]["text"],
+                                    "kind": by_obs[r]["kind"],
+                                    "stance": by_obs[r]["stance"],
+                                }
+                                for r in q["observation_refs"]
+                            ],
+                        }
+                        for i, q in selected
+                    ],
+                },
+                max_tokens=8192,
+            )
+            decisions = _unique_decisions(response.get("decisions"), "index")
+            bundled_reviews.update({i: decisions.get(i, {}) for i, _ in selected})
+            if review_observations:
+                text_members = [
+                    (i, field, q[field])
+                    for i, q in selected
+                    if decisions.get(i, {}).get("question_accepted") is True
+                    for field in ("title", "summary")
+                    if field == "title" or decisions.get(i, {}).get("summary_accepted") is True
+                ]
+                privacy = await review_observations([t for _, _, t in text_members])
+                bundled_privacy.update(
+                    {(i, f): d for (i, f, _), d in zip(text_members, privacy, strict=True)}
+                )
+            if save_review_decision:
+                await save_review_decision(
+                    fingerprint([run_key, selected]),
+                    {
+                        "stage": "quick_summary_batch",
+                        "candidates": selected,
+                        "review": response,
+                    },
+                )
+        except Exception as exc:
+            failure("comment_quick_summary_review", exc)
+            bundled_reviews.update({i: {} for i, _ in selected})
+    for candidate_index, candidate in enumerate(candidates):
         qid = "Q" + fingerprint([run_key, sorted(candidate["observation_refs"])])[:12]
         old = cached.get(qid)
         if old and old["title"] == candidate["title"] and old.get("summary"):
@@ -438,9 +536,10 @@ async def analyze_quick_read(
                     judgements=[],
                     component_status={"comparison": "not_requested", "judgement": "not_requested"},
                 )
-            state["items"].append(cached_question)
+            if qid not in {q["id"] for q in state["items"]}:
+                state["items"].append(cached_question)
             continue
-        if not await room():
+        if not candidate.get("summary") and not await room():
             break
         related = [by_obs[r] for r in candidate["observation_refs"]]
         data = {
@@ -451,24 +550,34 @@ async def analyze_quick_read(
             ],
         }
         try:
-            summary = await _call(
-                agent,
-                "comment_quick_summary",
-                "reporter",
-                "用一段不超过160字的速读概括全部关联索引中的具体关切、不同理由与诉求，保持条件和否定。少数、相反观点保留。"
-                '只描述样本说法，不判事件事实，不评价机构应当如何处置，不给风险等级。只输出 {"summary":"简洁摘要"}。',
-                data,
+            summary = (
+                {"summary": candidate["summary"]}
+                if candidate.get("summary")
+                else await _call(
+                    agent,
+                    "comment_quick_summary",
+                    "reporter",
+                    "用一段不超过160字的速读概括全部关联索引中的具体关切、不同理由与诉求，保持条件和否定。少数、相反观点保留。"
+                    '只描述样本说法，不判事件事实，不评价机构应当如何处置，不给风险等级。只输出 {"summary":"简洁摘要"}。',
+                    data,
+                )
             )
             text = summary.get("summary")
             if not isinstance(text, str) or not 0 < len(text.strip()) <= 160:
                 raise ValueError("速读摘要无效或过长")
-            review = await _call(
-                agent,
-                "comment_quick_summary_review",
-                "verifier",
-                "分别检查问题标题与摘要是否得到全部短索引支持，准确保留不同理由、诉求、条件及少数相反观点。不得加入事实判定、私人指控、总体态度或机构未回应断言。"
-                '只输出 {"question_accepted":true,"summary_accepted":true,"publicly_verifiable":true}，判定必须为布尔值。',
-                {**data, "summary": text},
+            # A malformed batch decision remains pending; never treat it as approval
+            # or spend another per-question review after a budget-limited batch.
+            review = (
+                bundled_reviews.get(candidate_index, {})
+                if candidate.get("summary")
+                else await _call(
+                    agent,
+                    "comment_quick_summary_review",
+                    "verifier",
+                    "分别检查问题标题与摘要是否得到全部短索引支持，准确保留不同理由、诉求、条件及少数相反观点。不得加入事实判定、私人指控、总体态度或机构未回应断言。"
+                    '只输出 {"question_accepted":true,"summary_accepted":true,"publicly_verifiable":true}，判定必须为布尔值。',
+                    {**data, "summary": text},
+                )
             )
             if save_review_decision:
                 await save_review_decision(
@@ -487,7 +596,19 @@ async def analyze_quick_read(
             texts = [candidate["title"]] + (
                 [text] if review.get("summary_accepted") is True else []
             )
-            privacy = await review_observations(texts) if review_observations else None
+            privacy = (
+                [
+                    bundled_privacy[(candidate_index, field)]
+                    for field in ("title", "summary")
+                    if (candidate_index, field) in bundled_privacy
+                ]
+                if candidate.get("summary") and review_observations
+                else await review_observations(texts)
+                if review_observations
+                else None
+            )
+            if privacy is not None and not privacy:
+                continue
             if privacy is not None and not privacy[0].allowed:
                 continue
             safe_summary = (
@@ -497,6 +618,16 @@ async def analyze_quick_read(
                 if privacy is None and len(texts) > 1
                 else None
             )
+            # Replace an old summary only after the expanded question passes.
+            # Until then its original, unchanged subset remains useful and valid.
+            state["items"] = [
+                old
+                for old in state["items"]
+                if not (
+                    old["title"] == candidate["title"]
+                    and set(old["observation_refs"]) <= set(candidate["observation_refs"])
+                )
+            ]
             state["items"].append(
                 {
                     **candidate,

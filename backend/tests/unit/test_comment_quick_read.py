@@ -1,5 +1,7 @@
+import asyncio
 import copy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +10,7 @@ import pytest
 from yuqing.agents.comment_analysis import OpenAICommentAgent
 from yuqing.core.comment_contract import validate_questions
 from yuqing.render.html import _render_block
+from yuqing.render.ir_migrations import migrate_report
 from yuqing.services.full_report import FullReportBuilder
 from yuqing.services.institution_scope import ScopeReview
 
@@ -313,3 +316,153 @@ async def test_new_unrelated_indices_do_not_regroup_or_regenerate_existing_quest
     assert len(grouped) == 1 and len(grouped[0]["indices"]) == 1
     assert result["items"][:2] == first["items"]
     assert result["coverage"]["unique"] == 3
+
+
+@pytest.mark.asyncio
+async def test_one_malformed_generated_row_preserves_other_reviewed_rows():
+    class BrokenRow(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if "samples" in result:
+                result["samples"][0]["indices"][0]["kind"] = "invalid"
+            return result
+
+    result = await OpenAICommentAgent(BrokenRow(), "data").analyze_quick_read("公开处理", rows())
+    assert result["observations"]
+    assert any(o["text"] == "要求公开复核程序" for o in result["observations"])
+    assert result["coverage"]["samples_with_observations"] == 2
+
+
+@pytest.mark.asyncio
+async def test_grouped_summaries_are_reviewed_together_without_per_question_generation():
+    class Bundled(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            data = json.loads(prompt.split("\n", 1)[1])
+            if "questions" in data:
+                self.calls.append(prompt)
+                return {
+                    "decisions": [
+                        {
+                            "index": q["index"],
+                            "question_accepted": True,
+                            "summary_accepted": True,
+                            "publicly_verifiable": True,
+                        }
+                        for q in data["questions"]
+                    ]
+                }
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if "questions" in result:
+                for q in result["questions"]:
+                    q["summary"] = (
+                        "样本认可处理。" if "认可" in q["title"] else "样本要求公开复核程序。"
+                    )
+            return result
+
+    gateway = Bundled()
+    result = await OpenAICommentAgent(gateway, "data").analyze_quick_read("公开处理", rows())
+    assert result["status"] == "complete" and len(result["items"]) == 2
+    assert sum("questions" in json.loads(p.split("\n", 1)[1]) for p in gateway.calls) == 1
+    assert not any('"question":' in p for p in gateway.calls)
+
+
+@pytest.mark.asyncio
+async def test_completed_summary_review_is_retained_when_budget_runs_out():
+    class FinalBudget(Gateway):
+        done = False
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            data = json.loads(prompt.split("\n", 1)[1])
+            if "questions" in data:
+                self.done = True
+                return {
+                    "decisions": [
+                        {
+                            "index": q["index"],
+                            "question_accepted": True,
+                            "summary_accepted": True,
+                            "publicly_verifiable": True,
+                        }
+                        for q in data["questions"]
+                    ]
+                }
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            for q in result.get("questions", []):
+                q["summary"] = "样本认可处理，同时希望公开复核程序。"
+            return result
+
+    gateway = FinalBudget()
+    result = await OpenAICommentAgent(gateway, "data").analyze_quick_read(
+        "公开处理", rows(), can_continue=lambda: asyncio.sleep(0, result=not gateway.done)
+    )
+    assert len(result["items"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_budget_failure_preserves_previously_approved_questions():
+    class ResumeBudget(Gateway):
+        done = False
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if "existing_questions" in json.loads(prompt.split("\n", 1)[1]):
+                self.done = True
+            return result
+
+    first = await OpenAICommentAgent(Gateway(), "data").analyze_quick_read("公开处理", rows())
+    gateway = ResumeBudget()
+    result = await OpenAICommentAgent(gateway, "data").analyze_quick_read(
+        "公开处理",
+        rows() + [{**rows()[0], "id": "extra", "text": "新增诉求：认可处理但希望公开复核程序"}],
+        previous=first,
+        can_continue=lambda: asyncio.sleep(0, result=not gateway.done),
+    )
+    assert result["items"] == first["items"]
+    assert result["coverage"]["ungrouped_observations"] == 2
+
+
+def test_ungrouped_approved_content_is_readable_without_opening_details():
+    html = _render_block(
+        {
+            "type": "comment_insight",
+            "analysis_version": 5,
+            "analysis_mode": "quick_read",
+            "title": "评论速读",
+            "samples": [],
+            "observations": [
+                {"id": "O1", "text": "希望公开复核依据", "stance": "质疑", "comment_refs": ["M1"]}
+            ],
+            "items": [],
+        },
+        {},
+    )
+    assert "<details open><summary>查看已审观察及原评论" in html
+
+
+@pytest.mark.asyncio
+async def test_attaching_optional_comments_preserves_core_and_general_scope():
+    analysis = await OpenAICommentAgent(Gateway(), "data").analyze_quick_read("公开处理", rows())
+    builder = FullReportBuilder.__new__(FullReportBuilder)
+    builder.database = SimpleNamespace(
+        checkpoint=AsyncMock(return_value={"analysis": analysis}),
+        fetch_all=AsyncMock(return_value=[]),
+        get_task=AsyncMock(return_value=SimpleNamespace(id="task", investigation_scope="general")),
+    )
+    builder.scope_reviewer = None
+    fixture = Path(__file__).parents[3] / "docs/方案包/fixtures/report-ir-v0.1.fixture.json"
+    core = migrate_report(json.loads(fixture.read_text(encoding="utf-8")))
+    core.setdefault("quality", {})["release_label"] = "full_report"
+    before = copy.deepcopy(core)
+    result = await builder.attach_comment_analysis("task", core)
+    module = next(b for b in result["blocks"] if b["type"] == "comment_insight")
+    assert module["items"] and module["observations"]
+    assert result["quality"]["release_label"] == "full_report"
+    assert [
+        b for b in result["blocks"] if b["type"] not in {"comment_insight", "evidence_appendix"}
+    ] == [b for b in before["blocks"] if b["type"] != "evidence_appendix"]
+    appendix = next(b for b in result["blocks"] if b["type"] == "evidence_appendix")
+    original_appendix = next(b for b in before["blocks"] if b["type"] == "evidence_appendix")
+    assert [{k: v for k, v in i.items() if k != "citations"} for i in appendix["items"]] == [
+        {k: v for k, v in i.items() if k != "citations"} for i in original_appendix["items"]
+    ]
+    assert core == before

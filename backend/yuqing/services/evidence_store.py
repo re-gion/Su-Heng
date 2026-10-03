@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from yuqing.core.fetch.base import FetchProvider
+from yuqing.core.fetch.builtin import extract_source_credits
 from yuqing.core.fetch.chain import FetchChain
 from yuqing.core.search.base import SearchResult
 from yuqing.storage.db import Database
@@ -86,6 +87,20 @@ def extract_page_published_at(
             normalized = _normalize_page_date(match.group(1))
             if normalized:
                 return normalized, "page_visible"
+    # A Chinese date adjacent to the publisher in the article's heading is
+    # publication metadata. Never interpret a sidebar or a body event date here.
+    chinese_header = re.search(
+        r'</h1>\s*<div\b[^>]*class=["\'][^"\']*\binfo\b[^"\']*["\'][^>]*>'
+        r'.{0,900}?<span\b[^>]*class=["\'][^"\']*\bsource\b[^"\']*["\'][^>]*>'
+        r"[^<]{1,100}</span>\s*<span\b[^>]*>\s*"
+        r"(20\d{2}年\d{1,2}月\d{1,2}日\s+\d{1,2}:\d{2}(?::\d{2})?)\s*</span>",
+        decoded[:16000],
+        re.IGNORECASE | re.DOTALL,
+    )
+    if chinese_header:
+        normalized = _normalize_page_date(chinese_header.group(1))
+        if normalized:
+            return normalized, "page_visible"
     visible = re.search(
         r"(?:发布时间|发布日期|发布于|时间)\s*[：:]?\s*(20\d{2})[年\-/\.](\d{1,2})[月\-/\.](\d{1,2})日?",
         content_text[:12000],
@@ -243,6 +258,10 @@ class EvidenceStore:
                 result.html, result.content_text, evidence.url
             )
             extra = dict(evidence.extra or {})
+            # Credit belongs to this snapshot, including an explicit empty result.
+            extra["page_source_credits"] = extract_source_credits(result.html)
+            # A successful target-page response supersedes search-provider text.
+            extra["content_origin"] = "direct_fetch"
             if provenance:
                 extra["date_provenance"] = provenance
             if scope is not None:

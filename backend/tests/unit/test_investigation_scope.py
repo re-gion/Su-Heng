@@ -13,6 +13,16 @@ from yuqing.services.investigation_scope import (
 from yuqing.services.v1_orchestrator import ensure_requested_languages, valid_media_analysis
 
 
+def test_chinese_publication_date_beside_source_in_article_header():
+    page = (
+        '<h1>公开通报</h1><div class="info"><span id="author"></span>'
+        '<span class="source">新闻机构</span><span>2025年09月20日 09:57</span></div>'
+    )
+    assert extract_page_published_at(page, "报道正文") == ("2025-09-20T09:57:00", "page_visible")
+    sidebar = page.replace("<h1>公开通报</h1>", "<aside>") + "</aside>"
+    assert extract_page_published_at(sidebar, "报道正文") == (None, None)
+
+
 def result(
     *,
     title: str,

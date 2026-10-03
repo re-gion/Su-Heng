@@ -64,7 +64,7 @@ export function CommentQuickRead({ taskId }: { taskId: string }) {
           {question.publicly_verifiable && question.comparisons.some(c => ['partial', 'unanswered'].includes(c.status)) && <button className="quiet" disabled={busy} onClick={() => void analyze(question.id, 'follow_up')}>开启公开补查</button>}</div>}
       </article>
     })}
-    {ungrouped.length > 0 && <details><summary>待归类的已审短索引（{ungrouped.length} 条）</summary><ul>{ungrouped.map(o => <li key={o.id}>{o.text}<details><summary>回查原话</summary>{o.comment_refs.map(ref => <p key={ref}>{samples.get(ref)?.text}</p>)}</details></li>)}</ul></details>}
+    {ungrouped.length > 0 && <details open={!block.items.length}><summary>已审关切与诉求，问题归纳待补充（{ungrouped.length} 条）</summary><ul>{ungrouped.map(o => <li key={o.id}>{o.text}<details><summary>回查原话</summary>{o.comment_refs.map(ref => <p key={ref}>{samples.get(ref)?.text}</p>)}</details></li>)}</ul></details>}
     <details><summary>搜索全部合格原话（{block.samples.length} 条）</summary><label>评论关键词<input value={query} onChange={e => setQuery(e.target.value)} placeholder="输入关切或原话中的词" /></label><p>{visibleSamples.length} 条匹配样本</p><ol>{visibleSamples.map(s => <li key={s.id}><p>{s.text}</p><small>{s.platform} · {s.published_at ?? '时间未知'} · <a href={s.source_url} target="_blank" rel="noreferrer">原帖</a></small></li>)}</ol></details>
   </section>
 }

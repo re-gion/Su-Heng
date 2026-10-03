@@ -98,6 +98,41 @@ async def test_comment_review_failure_does_not_block_other_themes():
     assert result["coverage"]["classified"] == 2
 
 
+@pytest.mark.asyncio
+async def test_explicit_credit_review_has_original_identity_passage_but_can_reject():
+    passage = "学校公开通报复核工作的方法、材料范围和程序依据，说明已经完成的工作与尚需说明的事项。"
+    quote = "来源：发布机构官方网站"
+
+    class Gateway:
+        review = None
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                return {
+                    "edges": [
+                        {
+                            "from_evidence_id": "E001",
+                            "to_evidence_id": "E002",
+                            "support_evidence_id": "E002",
+                            "relation": "repost",
+                            "quote": quote,
+                        }
+                    ]
+                }
+            self.review = json.loads(prompt.split("\n", 1)[1])
+            return {"accepted": False, "reason": "同名机构，原稿身份仍需确认"}
+
+    gateway = Gateway()
+    result = await OpenAIReportAgent(gateway, "report").recover_relations(
+        [
+            {"evidence_ref": "E001", "excerpt": passage},
+            {"evidence_ref": "E002", "excerpt": passage + "\n" + quote},
+        ]
+    )
+    assert gateway.review["identity_passage"] == passage
+    assert not result
+
+
 def test_bad_request_diagnostic_redacts_body_and_distinguishes_known_cause():
     from httpx import Request, Response
     from openai import BadRequestError

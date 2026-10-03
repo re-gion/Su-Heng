@@ -195,6 +195,12 @@ class InstitutionScopeReviewer:
                 else nullcontext()
             )
             try:
+                options = {}
+                factory = getattr(self.gateway, "factory", None)
+                if factory and factory.config("utility").model.lower().startswith("glm-5.3"):
+                    # Keep the same independent privacy rules, while asking for
+                    # bounded review decisions rather than the provider's max default.
+                    options.update(reasoning_effort="high", temperature=1.0, top_p=0.95)
                 with context:
                     return await self.gateway.complete_json(
                         "utility",
@@ -211,7 +217,8 @@ class InstitutionScopeReviewer:
                         )
                         + '逐条输出 {"items":[{"id":0,"allowed":true,"redactions":[{"text":"个人姓名","replacement":"涉事学生"}]}]}。\n'
                         + json.dumps(payload, ensure_ascii=False),
-                        max_tokens=2400,
+                        max_tokens=8192 if options else 2400,
+                        **options,
                     )
             except Exception as exc:
                 return exc
@@ -233,11 +240,20 @@ class InstitutionScopeReviewer:
                 )
                 if available < 2 * 2400:
                     width = 1
-            wave = [
-                pending[i : i + 12]
-                for i in range(cursor, min(len(pending), cursor + 12 * width), 12)
-            ]
-            cursor += 12 * len(wave)
+            wave = []
+            for _ in range(width):
+                batch, chars = [], 0
+                while cursor < len(pending) and len(batch) < (
+                    24 if kind in {"comment", "report_text"} else 12
+                ):
+                    index = pending[cursor]
+                    if batch and chars + len(texts[index]) > 6000:
+                        break
+                    batch.append(index)
+                    chars += len(texts[index])
+                    cursor += 1
+                if batch:
+                    wave.append(batch)
             tasks = [asyncio.create_task(request_batch(indices)) for indices in wave]
             try:
                 responses = await asyncio.gather(*tasks)

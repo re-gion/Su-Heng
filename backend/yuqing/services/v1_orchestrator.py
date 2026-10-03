@@ -502,10 +502,30 @@ class V1Orchestrator:
             )
         relation_state = await self.database.checkpoint(task_id, "report:relations") or {}
         if "media_propagation" in missing or not relation_state.get("edges"):
+            credits = list(
+                dict.fromkeys(
+                    match.group(1).strip()
+                    for e in evidence
+                    if e.local_id in main
+                    for match in re.finditer(
+                        r"(?:来源\s*[:：]|据)([^\n。；，]{2,24})(?:消息|报道|\n|$)",
+                        "\n".join(
+                            [e.content_text or "", *(e.extra or {}).get("page_source_credits", [])]
+                        ),
+                    )
+                )
+            )[:8]
             goals["media_propagation"] = (
                 "补查核心争议、原始发布、机构回应及后续跟进的明确引用关系；"
                 "优先找原通报和注明来源的转载。每条关系提供支撑原话，"
                 "同主题同日报道不构成互相转载关系。"
+                + (
+                    "现有网页点名的来源包括："
+                    + "、".join(credits)
+                    + "。先确认对应原稿的标题、日期和公开载体，不能把报道同一通报的另一家媒体冒充原稿。"
+                    if credits
+                    else ""
+                )
             )
         evidence_by_id = {item.local_id: item for item in evidence}
         if recovery_round <= 1 and not any(
@@ -3117,67 +3137,6 @@ class V1Orchestrator:
             orchestration_limitations=self._limitations,
             diagnostic_only=diagnostic_only,
         )
-        if phase == "comments_ready":
-            # Publish the core report before starting optional comment work. The
-            # client can read a complete fact/propagation/action report while the
-            # comment branch is still running; its result is folded in below.
-            # Publish the core report while the optional comment branch is still
-            # running. A second build below folds completed comment findings into
-            # the final report; both report.done events are safe because the
-            # client always keeps the newest URL.
-            await self.database.save_report(
-                task_id, report_id, report, html_path, report["metrics"]
-            )
-            await asyncio.to_thread(
-                Path(html_path).write_text, render_html(report), encoding="utf-8"
-            )
-            await self.events.emit(
-                task_id,
-                "report.done",
-                {
-                    "report_id": report_id,
-                    "html_url": f"/api/reports/{report_id}/html?view=full",
-                    "partial": True,
-                    "comment_pending": True,
-                },
-            )
-            await self.events.emit_task_status(
-                task_id, status="running", phase="comment_analysis", progress=90
-            )
-            comment_analysis_task = asyncio.create_task(
-                self._run_comment_insight(task_id, investigation_query, board)
-            )
-            try:
-                await comment_analysis_task
-            except Exception as exc:
-                self._limitations.append(
-                    f"评论增量分析未完成（{type(exc).__name__}），核心报告仍按事实证据生成。"
-                )
-            try:
-                candidate_id, candidate_report, candidate_path = await self.reports.build(
-                    task_id,
-                    forum=board.history(),
-                    orchestration_limitations=self._limitations,
-                    diagnostic_only=diagnostic_only,
-                )
-            except Exception as exc:
-                self._limitations.append(
-                    f"评论增量报告未能重新构建（{type(exc).__name__}），保留核心报告。"
-                )
-            else:
-                # Optional comments must never make a previously releasable core
-                # report worse because their own privacy review is partial. Keep
-                # the candidate only when the release gate is at least as good; a
-                # better candidate still brings completed comment findings into IR.
-                if self._quality_progress(candidate_report) >= self._quality_progress(report):
-                    report_id, report, html_path = candidate_id, candidate_report, candidate_path
-                else:
-                    retained = self.reports.retain_comment_increment(report, candidate_report)
-                    if retained is not None:
-                        report = retained
-                    self._limitations.append(
-                        "核心章节重建未达到此前质量，保留已审核心及仍有效的评论增量。"
-                    )
         # Evaluate the assembled, reviewed report before deciding what to recover.
         # Persist each attempt, including failed attempts, so resume never resets the bound.
         progress = await self.database.checkpoint(task_id, "report:quality_recovery") or {}
@@ -3275,8 +3234,6 @@ class V1Orchestrator:
             if not current or current.status in {"stopping", "pausing", "paused", "failed"}:
                 end_reason = "user_stop"
                 break
-            if task.comment_mode != "off":
-                await self._run_comment_insight(task_id, investigation_query, board)
             if prior_material == await material_state():
                 no_gain += 1
                 progress.update(no_gain=no_gain)
@@ -3306,6 +3263,65 @@ class V1Orchestrator:
                 no_gain=no_gain, missing=report.get("quality", {}).get("release_gate_missing", [])
             )
             await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
+        current = await self.database.get_task(task_id)
+        if (
+            phase == "comments_ready"
+            and not stop_requested
+            and current
+            and current.status == "running"
+        ):
+            # Publish the core report before starting optional comment work. The
+            # client can read a complete fact/propagation/action report while the
+            # comment branch is still running; its result is folded in below.
+            # Merge the optional increment without redrafting reviewed core chapters.
+            await self.database.save_report(
+                task_id, report_id, report, html_path, report["metrics"]
+            )
+            await asyncio.to_thread(
+                Path(html_path).write_text, render_html(report), encoding="utf-8"
+            )
+            await self.events.emit(
+                task_id,
+                "report.done",
+                {
+                    "report_id": report_id,
+                    "html_url": f"/api/reports/{report_id}/html?view=full",
+                    "partial": True,
+                    "comment_pending": True,
+                },
+            )
+            await self.events.emit_task_status(
+                task_id, status="running", phase="comment_analysis", progress=90
+            )
+            comment_analysis_task = asyncio.create_task(
+                self._run_comment_insight(task_id, investigation_query, board)
+            )
+            try:
+                await comment_analysis_task
+            except Exception as exc:
+                self._limitations.append(
+                    f"评论增量分析未完成（{type(exc).__name__}），核心报告仍按事实证据生成。"
+                )
+            try:
+                candidate_report = await self.reports.attach_comment_analysis(task_id, report)
+            except Exception as exc:
+                self._limitations.append(
+                    f"评论增量报告未能重新构建（{type(exc).__name__}），保留核心报告。"
+                )
+            else:
+                # Optional comments must never make a previously releasable core
+                # report worse because their own privacy review is partial. Keep
+                # the candidate only when the release gate is at least as good; a
+                # better candidate still brings completed comment findings into IR.
+                if self._quality_progress(candidate_report) >= self._quality_progress(report):
+                    report = candidate_report
+                else:
+                    retained = self.reports.retain_comment_increment(report, candidate_report)
+                    if retained is not None:
+                        report = retained
+                    self._limitations.append(
+                        "核心章节重建未达到此前质量，保留已审核心及仍有效的评论增量。"
+                    )
         current = await self.database.get_task(task_id)
         if current and current.status in {"pausing", "paused"}:
             await self.events.emit_task_status(

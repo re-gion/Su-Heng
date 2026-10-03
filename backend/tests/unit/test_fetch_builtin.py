@@ -8,6 +8,13 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from yuqing.core.fetch.builtin import BuiltinFetchProvider, FetchError
 
 
+def test_source_credit_is_retained_outside_the_article_and_scripts_are_ignored():
+    from yuqing.core.fetch.builtin import extract_source_credits
+
+    raw = '<script>来源：假机构</script><div class="source">来源：发布机构</div><article><p>正文。</p></article>'
+    assert extract_source_credits(raw) == ["来源：发布机构"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",

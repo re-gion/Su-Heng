@@ -196,6 +196,19 @@ def _fallback_extract(html: str) -> str:
     return parser.text()
 
 
+def extract_source_credits(raw_html: str) -> list[str]:
+    """Keep visible source labels that article readability extraction can omit."""
+    parser = _VisibleTextParser()
+    try:
+        parser.feed(raw_html)
+        parser.close()
+    except Exception:
+        return []
+    visible = _normalise_text("".join(parser._visible))
+    credits = re.findall(r"(?:^|\n)(来源\s*[：:]\s*[^\n]{1,160})", visible)
+    return list(dict.fromkeys(credits))[:6]
+
+
 def _extract_text(value: str, *, is_html: bool) -> str:
     if not is_html:
         return _normalise_text(value)

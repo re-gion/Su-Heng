@@ -1002,7 +1002,7 @@ def _render_comment_question_cards(block):
     ungrouped = [o for key, o in observations.items() if key not in used]
     if ungrouped:
         cards.append(
-            '<article class="narrative-card"><h3>尚未完成问题归纳的已审观察</h3><details><summary>查看已审观察及原评论</summary><ul>'
+            '<article class="narrative-card"><h3>已审关切与诉求 · 问题归纳待补充</h3><details open><summary>查看已审观察及原评论</summary><ul>'
             + "".join(observation_html(o) for o in ungrouped)
             + "</ul></details></article>"
         )
