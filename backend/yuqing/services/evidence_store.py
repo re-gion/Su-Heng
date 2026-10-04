@@ -5,6 +5,7 @@ import hashlib
 import html
 import re
 from datetime import datetime
+from difflib import SequenceMatcher
 from urllib.parse import urlsplit
 
 from yuqing.core.fetch.base import FetchProvider
@@ -131,6 +132,86 @@ def _normalize_page_date(value: str) -> str | None:
 
 class EvidenceStore:
     PROVIDER_TEXT_MIN_CHARS = 320
+
+    async def confirm_credited_publication(
+        self,
+        original: EvidenceRecord,
+        credited: EvidenceRecord,
+        issuer: str,
+        scope: InvestigationScope,
+    ) -> EvidenceRecord:
+        """Resolve topic relevance for a generic title, never a verification verdict.
+
+        Only the event-keyword miss can be resolved by the same dated publication
+        already cited by an in-scope page. Language, region, issuer and page-date
+        checks still apply. A propagation edge needs separate independent review.
+        """
+        extra = original.extra or {}
+        if (
+            original.fetch_status != "fetched"
+            or credited.fetch_status != "fetched"
+            or (credited.extra or {}).get("scope_status") not in {"main", "event_context"}
+            or set(extra.get("scope_reasons") or []) != {"event_mismatch"}
+            or extra.get("date_provenance") not in {"page_metadata", "page_visible"}
+            or not original.published_at
+            or not credited.published_at
+            or original.published_at[:10] != credited.published_at[:10]
+            or issuer
+            not in f"{original.title} {original.publisher_entity or ''} {original.source_name or ''}"
+        ):
+            return original
+        issuer_scope = InvestigationScope(
+            event_query=issuer,
+            languages=scope.languages,
+            source_scope=scope.source_scope,
+            date_from=scope.date_from,
+            date_to=scope.date_to,
+        )
+        decision = issuer_scope.classify_result(
+            SearchResult(
+                url=original.url,
+                title=original.title,
+                snippet=original.snippet or "",
+                source_name=original.source_name,
+                provider=original.provider or "fetch",
+                lang=original.lang or "unknown",
+                published_at=datetime.fromisoformat(original.published_at),
+                raw={"date_provenance": extra["date_provenance"]},
+            ),
+            agent="media_propagation",
+            body_text=original.content_text,
+        )
+        if not decision.main_eligible:
+            return original
+
+        def same_document():
+            a = re.sub(r"\s+", "", original.content_text or "")[:12000]
+            b = re.sub(r"\s+", "", credited.content_text or "")[:12000]
+            match = SequenceMatcher(None, a, b, autojunk=False).find_longest_match()
+            return match.size >= max(500, int(min(len(a), len(b)) * 0.85))
+
+        if not await asyncio.to_thread(same_document):
+            return original
+        await self.database.update_evidence_fetched(
+            original.task_id,
+            original.local_id,
+            content_text=original.content_text,
+            snapshot_path=original.snapshot_path,
+            content_sha256=original.content_sha256,
+            published_at=original.published_at,
+            extra={
+                **extra,
+                **decision.as_extra(),
+                "publication_identity": {
+                    "credited_evidence_id": credited.local_id,
+                    "issuer": issuer,
+                    "credited_sha256": credited.content_sha256,
+                    "original_sha256": original.content_sha256,
+                    "basis": "explicit_credit_same_date_continuous_body",
+                },
+            },
+        )
+        return await self.database.get_evidence(original.task_id, original.local_id) or original
 
     def __init__(
         self,

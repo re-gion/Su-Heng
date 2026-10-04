@@ -161,7 +161,8 @@ async def test_parallel_seats_fetch_same_material_once_and_charge_once(runtime_d
         )
         charges = []
 
-        async def reserve(kind):
+        async def reserve(kind, *, investigation=False):
+            assert not investigation
             charges.append(kind)
             return True
 

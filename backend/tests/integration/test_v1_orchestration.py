@@ -347,12 +347,15 @@ async def test_standard_empty_investigation_recovers_twice_without_false_release
 
 
 @pytest.mark.asyncio
-async def test_quality_recovery_does_not_start_when_only_report_reserve_remains(runtime_dir):
+@pytest.mark.parametrize("tokens_used", [1_250_000, 1_238_839])
+async def test_quality_recovery_does_not_start_when_only_report_reserve_remains(
+    runtime_dir, tokens_used
+):
     database = Database(runtime_dir / "recovery-budget.db")
     await database.initialize()
     try:
         task = await database.create_task(TaskCreate(event_query="机构公开通报", depth="standard"))
-        usage = SimpleNamespace(tokens_used=1_250_000, calls=1, token_limit=None)
+        usage = SimpleNamespace(tokens_used=tokens_used, calls=1, token_limit=None)
         orchestrator = V1Orchestrator(
             database,
             EventBus(database),

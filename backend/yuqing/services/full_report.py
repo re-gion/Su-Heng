@@ -1952,14 +1952,40 @@ class FullReportBuilder:
             for m in list(credit_pattern.finditer(source_text(item)))[:8]
         )
         existing_ids = {item.local_id for item in [*selected, *credited]}
+
+        def identified_original(item):
+            identity = (getattr(item, "extra", None) or {}).get("publication_identity") or {}
+            credited_source = next(
+                (
+                    source
+                    for source in main_evidence
+                    if source.local_id == identity.get("credited_evidence_id")
+                ),
+                None,
+            )
+            return bool(
+                credited_source
+                and identity.get("original_sha256") == item.content_sha256
+                and identity.get("credited_sha256") == credited_source.content_sha256
+            )
+
         originals = [
             item
             for item in main_evidence
             if item.local_id not in existing_ids
             and item.fetch_status == "fetched"
             and item.published_at
-            and any(name in credited_text for name in publisher_terms(item))
-        ][:4]
+            and (
+                identified_original(item)
+                or any(name in credited_text for name in publisher_terms(item))
+            )
+        ]
+        # Generic publisher mentions can fill the bound before the newly fetched
+        # original. Prioritize the exact credited document, still subject to review.
+        originals.sort(
+            key=lambda item: (not identified_original(item), item.source_tier or 9, item.local_id)
+        )
+        originals = originals[:4]
 
         def windows(item):
             text = source_text(item)

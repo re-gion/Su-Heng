@@ -184,7 +184,7 @@ class V1Orchestrator:
     def budget_for(self, depth: str) -> DepthBudget:
         return self.budgets.get(depth, DEFAULT_BUDGET_TABLE["standard"])
 
-    async def _fetch_once(self, record, *, scope, agent, phase):
+    async def _fetch_once(self, record, *, scope, agent, phase, investigation=False):
         # Two investigation seats can discover the same URL before either has
         # finished fetching it. Recheck under a per-evidence lock before charging.
         lock = self._fetch_locks.setdefault(record.pk, asyncio.Lock())
@@ -192,7 +192,7 @@ class V1Orchestrator:
             current = await self.database.get_evidence(record.task_id, record.local_id) or record
             if not self.evidence.needs_direct_fetch(current):
                 return current
-            if not await self._reserve_tool("fetch"):
+            if not await self._reserve_tool("fetch", investigation=investigation):
                 return None
             return await self.evidence.fetch_one(
                 current,
@@ -458,6 +458,183 @@ class V1Orchestrator:
             task_id, key, {"status": "partial", "attempted": attempted}
         )
 
+    async def _recover_publication_sources(self, task, evidence) -> None:
+        """Fetch named originals before spending another model round on the inventory.
+
+        A generic official notice title may fail snippet relevance. Such a candidate
+        remains pending until the fetched body passes the unchanged scope/date gates.
+        Source identity here only selects candidates; it never approves a relation.
+        """
+        scope = InvestigationScope(
+            event_query=task.resolved_event_query or task.event_query,
+            languages=tuple(task.source_languages),
+            source_scope=task.source_scope,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        targets = {}
+        for item in evidence:
+            if (
+                item.fetch_status != "fetched"
+                or not item.published_at
+                or (item.extra or {}).get("scope_status") not in {"main", "event_context"}
+            ):
+                continue
+            text = "\n".join(
+                [item.content_text or "", *(item.extra or {}).get("page_source_credits", [])]
+            )
+            for match in re.finditer(r"(?:^|\n)来源\s*[：:]\s*([^\n。；|]{2,60})", text):
+                issuer = re.split(r"\s|责任编辑|记者", match.group(1).strip())[0]
+                issuer = issuer.strip("（）()，,：:").removesuffix("官网").removesuffix("官方网站")
+                if len(issuer) < 3:
+                    continue
+                # Several mirrors of the same release produce one source lookup.
+                date = str(item.published_at)[:10]
+                title = (item.content_text or item.title).splitlines()[0][:60]
+                if "情况通报" in title:
+                    title = "情况通报"
+                body_id = fingerprint(re.sub(r"\s+", "", item.content_text or "")[:500])
+                targets.setdefault((issuer, date, body_id), (title, item))
+        ordered = sorted(
+            targets.items(),
+            key=lambda entry: entry[0][0] not in (task.resolved_event_query or task.event_query),
+        )[:3]
+        for (issuer, date, body_id), (title, credited_source) in ordered:
+            key = "report:source_recovery:" + fingerprint([issuer, date, title, body_id])
+            if await self.database.checkpoint(task.id, key):
+                continue
+            current = await self.database.get_task(task.id)
+            if not current or current.status != "running" or not self._llm_phase_has_room():
+                break
+            query = f'{issuer} "{title}" {date} 官方原文'[:200]
+            await self.database.save_checkpoint(
+                task.id, key, {"phase": "verified", "status": "attempted", "query": query}
+            )
+
+            def accepts(
+                result, issuer=issuer, credit_domain=credited_source.source_domain, query=query
+            ):
+                publisher_matches = issuer in (result.source_name or "") or re.search(
+                    rf"[-_|｜]\s*{re.escape(issuer)}(?:官网|官方网站|新闻网)?\s*$", result.title
+                )
+                # Do not spend this lookup on another mirror of the crediting page.
+                if (urlsplit(result.url).hostname or "") == credit_domain or not publisher_matches:
+                    return False, ("credited_source_mismatch",)
+                decision = scope.classify_result(
+                    result, agent="media_propagation", search_query=query
+                )
+                return (
+                    decision.accepted
+                    or set(decision.reasons) <= {"subject_mismatch", "event_mismatch"},
+                    decision.reasons,
+                )
+
+            provider_calls = 0
+
+            async def reserve_search():
+                nonlocal provider_calls
+                current = await self.database.get_task(task.id)
+                if provider_calls >= 2 or not current or current.status != "running":
+                    return False
+                allowed = await self._reserve_tool("search")
+                if allowed:
+                    provider_calls += 1
+                return allowed
+
+            try:
+                params = SearchParams(
+                    query=query, top_k=3, lang=task.source_languages[0], priority="critical"
+                )
+                if hasattr(self.search, "search_filtered"):
+                    results = await self.search.search_filtered(
+                        params, accepts, before_call=reserve_search, min_source_groups=1
+                    )
+                elif await reserve_search():
+                    results = [r for r in await self.search.search(params) if accepts(r)[0]]
+                else:
+                    results = []
+                await self.events.emit(
+                    task.id,
+                    "search.result",
+                    {
+                        "agent": "media_propagation",
+                        "query": query,
+                        "hits": len(results),
+                        "provider": getattr(self.search, "last_provider", self.search.name),
+                        "provider_diagnostics": getattr(self.search, "last_diagnostics", []),
+                    },
+                )
+                # Every result starts pending; only direct fetch can admit it.
+                records = await self.evidence.add_search_results(
+                    task.id,
+                    query,
+                    [
+                        r.model_copy(
+                            update={
+                                "raw": {
+                                    **r.raw,
+                                    "_scope": {
+                                        "scope_status": "pending",
+                                        "main_eligible": False,
+                                        "scope_reasons": ["date_untrusted"],
+                                    },
+                                }
+                            }
+                        )
+                        for r in results[:3]
+                    ],
+                )
+                fetched = []
+                for record in records:
+                    current = await self.database.get_task(task.id)
+                    if not current or current.status != "running":
+                        break
+                    updated = await self._fetch_once(
+                        record, scope=scope, agent="media_propagation", phase="primary"
+                    )
+                    if updated is None:
+                        break
+                    if updated.fetch_status == "fetched":
+                        updated = await self.evidence.confirm_credited_publication(
+                            updated, credited_source, issuer, scope
+                        )
+                        fetched.append(updated.local_id)
+                    await self.events.emit(
+                        task.id,
+                        "evidence.added",
+                        {
+                            "evidence_id": updated.local_id,
+                            "title": updated.title,
+                            "source_name": updated.source_name or updated.source_domain,
+                            "source_tier": updated.source_tier,
+                            "published_at": updated.published_at,
+                            "agent": "media_propagation",
+                        },
+                    )
+                await self.database.save_checkpoint(
+                    task.id,
+                    key,
+                    {"phase": "verified", "status": "complete", "query": query, "fetched": fetched},
+                )
+            except Exception as exc:
+                diagnostic = upstream_diagnostic(exc, stage="source_recovery", batch=key)
+                message = "原始发布补查失败，保留此前材料与传播缺口。"
+                self._limitations.append(message)
+                await self.database.save_checkpoint(
+                    task.id,
+                    key,
+                    {"phase": "verified", "status": "failed", "diagnostic": diagnostic},
+                )
+                await self.events.emit(
+                    task.id,
+                    "warning",
+                    {
+                        "code": "PUBLICATION_SOURCE_RECOVERY_FAILED",
+                        "message": message,
+                        "diagnostic": diagnostic,
+                    },
+                )
+
     async def _recover_report_gaps(
         self,
         task_id: str,
@@ -502,6 +679,7 @@ class V1Orchestrator:
             )
         relation_state = await self.database.checkpoint(task_id, "report:relations") or {}
         if "media_propagation" in missing or not relation_state.get("edges"):
+            await self._recover_publication_sources(task, evidence)
             credits = list(
                 dict.fromkeys(
                     match.group(1).strip()
@@ -1605,9 +1783,12 @@ class V1Orchestrator:
         )
         return tokens_used >= token_limit
 
-    async def _reserve_tool(self, kind: str) -> bool:
+    async def _reserve_tool(self, kind: str, *, investigation: bool = False) -> bool:
         budget = self.budget_for(self._budget_depth)
         limit = budget.search_calls if kind == "search" else budget.fetch_calls
+        if investigation and self._budget_depth != "quick":
+            # Keep a bounded portion of the existing total for core source recovery.
+            limit -= min(6, limit // 10)
         async with self._budget_lock:
             used_name = "_search_calls" if kind == "search" else "_fetch_calls"
             used = int(getattr(self, used_name))
@@ -1615,6 +1796,18 @@ class V1Orchestrator:
                 return False
             setattr(self, used_name, used + 1)
             return True
+
+    def _tool_budget_message(self, kind: str, *, investigation: bool) -> str:
+        budget = self.budget_for(self._budget_depth)
+        total = budget.search_calls if kind == "search" else budget.fetch_calls
+        used = self._search_calls if kind == "search" else self._fetch_calls
+        label = "搜索" if kind == "search" else "原文抓取"
+        if investigation and self._budget_depth != "quick" and used < total:
+            return (
+                f"主调查已使用 {used} 次{label}，达到阶段上限；"
+                f"任务总上限 {total} 次，剩余额度留给核心发布缺口补查。"
+            )
+        return f"全局{label}调用已达 {total} 次上限，停止新增{label}。"
 
     async def _post(self, board: ForumBoard, value: ForumMessageCreate) -> None:
         message = await board.post(value)
@@ -1910,10 +2103,12 @@ class V1Orchestrator:
                         return self.evidence.classifier.entity_for(host) or registrable_domain(host)
 
                     async def reserve_provider_call() -> bool:
-                        allowed = await self._reserve_tool("search")
+                        allowed = await self._reserve_tool(
+                            "search", investigation=summary_phase != "quality_recovery"
+                        )
                         if not allowed:
-                            limitation = (
-                                f"全局搜索调用已达 {self._search_calls} 次上限，停止新增检索。"
+                            limitation = self._tool_budget_message(
+                                "search", investigation=summary_phase != "quality_recovery"
                             )
                             if limitation not in self._limitations:
                                 self._limitations.append(limitation)
@@ -1931,9 +2126,13 @@ class V1Orchestrator:
                         source_group=source_group_for_result,
                     )
                 else:
-                    if not await self._reserve_tool("search"):
+                    if not await self._reserve_tool(
+                        "search", investigation=summary_phase != "quality_recovery"
+                    ):
                         self._limitations.append(
-                            f"全局搜索调用已达 {self._search_calls} 次上限，停止新增检索。"
+                            self._tool_budget_message(
+                                "search", investigation=summary_phase != "quality_recovery"
+                            )
                         )
                         break
                     provider_results = await self.search.search(params)
@@ -2000,11 +2199,17 @@ class V1Orchestrator:
                     updated = record
                     if self.evidence.needs_direct_fetch(record):
                         updated = await self._fetch_once(
-                            record, scope=scope, agent=agent_name, phase=search_phase
+                            record,
+                            scope=scope,
+                            agent=agent_name,
+                            phase=search_phase,
+                            investigation=summary_phase != "quality_recovery",
                         )
                         if updated is None:
                             self._limitations.append(
-                                f"全局原文抓取已达 {self._fetch_calls} 次上限，剩余材料保留摘要。"
+                                self._tool_budget_message(
+                                    "fetch", investigation=summary_phase != "quality_recovery"
+                                )
                             )
                             break
                     await self.events.emit(
@@ -3075,6 +3280,13 @@ class V1Orchestrator:
         )
         if task.depth == "quick" and not stop_requested:
             await self._recover_report_gaps(task_id, investigation_query, board)
+        elif not stop_requested:
+            # Named originals can fix the core publication gap before the costly
+            # first draft; later recovery reuses these persisted lookup attempts.
+            await self._recover_publication_sources(
+                task, await self.database.list_evidence(task_id)
+            )
+            await self._emit_budget(task_id, task.depth)
         current_task = await self.database.get_task(task_id)
         evidence = await self.database.list_evidence(task_id)
         main_ids = {
@@ -3124,6 +3336,7 @@ class V1Orchestrator:
             "AGENT_REFLECTION_RATE_LIMITED",
             "AGENT_SUMMARY_INCOMPLETE",
             "SCOPE_REVIEW_PARTIAL",
+            "PUBLICATION_SOURCE_RECOVERY_FAILED",
         }
         for event in await self.events.history(task_id):
             if event.event != "warning" or event.data.get("code") not in rate_limit_codes:
@@ -3171,7 +3384,7 @@ class V1Orchestrator:
                 break
             if self.usage is not None and int(getattr(self.usage, "tokens_used", 0)) >= min(
                 token_limit - max(30_000, token_limit // 10),
-                token_limit * 9 // 10 - 10_000,
+                token_limit * 9 // 10 - 30_000,
             ):
                 end_reason = "budget_exhausted"
                 self._limitations.append(
@@ -3185,7 +3398,14 @@ class V1Orchestrator:
             async def material_state():
                 return (
                     [
-                        (e.local_id, e.content_sha256, e.fetch_status)
+                        (
+                            e.local_id,
+                            e.content_sha256,
+                            e.fetch_status,
+                            e.published_at,
+                            (e.extra or {}).get("scope_status"),
+                            (e.extra or {}).get("date_provenance"),
+                        )
                         for e in await self.database.list_evidence(task_id)
                     ],
                     [
