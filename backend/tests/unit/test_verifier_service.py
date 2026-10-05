@@ -171,3 +171,109 @@ async def test_material_failure_is_labelled_apart_from_upstream_failure(runtime_
     assert reason.startswith("核验失败")
     assert UPSTREAM_FAILURE_NOTE not in reason
     await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url, text, fetched, expected",
+    [
+        (
+            "https://www.whu.edu.cn/notice",
+            "武汉大学发布情况通报，称已成立工作专班。",
+            True,
+            "verified",
+        ),
+        ("https://www.whu.edu.cn/notice", "涉事学生实施了不当行为。", True, "unverified"),
+        (
+            "https://whu.edu.cn.evil.example/notice",
+            "武汉大学发布情况通报，称已成立工作专班。",
+            True,
+            "unverified",
+        ),
+        (
+            "https://www.whu.edu.cn/notice",
+            "武汉大学发布情况通报，称已成立工作专班。",
+            False,
+            "unverified",
+        ),
+    ],
+)
+async def test_publication_requires_registered_issuer_snapshot_and_exact_statement(
+    runtime_dir, claim_limits, url, text, fetched, expected
+):
+    database = Database(runtime_dir / "primary-publication.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(TaskCreate(event_query="发布记录"))
+        evidence = await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url=url,
+                title="情况通报",
+                snippet=text,
+                source_role="party",
+                source_tier=2,
+                **(
+                    {
+                        "fetch_status": "fetched",
+                        "content_text": text,
+                        "snapshot_path": "fixture.html",
+                        "content_sha256": "fixture",
+                        "fetched_at": "2025-08-01T12:00:00+08:00",
+                    }
+                    if fetched
+                    else {}
+                ),
+            )
+        )
+        claim = await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                text=text,
+                agent="fact_investigator",
+                evidence_ids=[evidence.local_id],
+            ),
+            **claim_limits,
+        )
+        result = await ClaimVerifierService(database, EmptyThenValidVerifier()).verify_claim(claim)
+        assert result.badge == expected
+        if expected == "verified":
+            assert result.verify_reason == "发布记录已核实（机构原文）"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_verified_repost_relation_is_retained_without_manufacturing_corroboration(
+    runtime_dir, claim_limits
+):
+    database = Database(runtime_dir / "repost-support.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(TaskCreate(event_query="转载的支持关系"))
+        evidence = await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://news.sina.com.cn/notice",
+                title="转载通报",
+                snippet="法院公布二审结果。",
+                source_role="syndicated",
+                source_tier=3,
+            )
+        )
+        claim = await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                text="法院公布二审结果。",
+                agent="fact_investigator",
+                evidence_ids=[evidence.local_id],
+            ),
+            **claim_limits,
+        )
+        result = await ClaimVerifierService(database, EmptyThenValidVerifier()).verify_claim(claim)
+        assert result.badge == "unverified"
+        assert result.verdict == "support"
+        assert result.independent_sources == 0
+        assert "直接支持" in result.verify_reason
+    finally:
+        await database.close()

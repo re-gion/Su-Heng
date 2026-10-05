@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pydantic import ValidationError
 
 from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection, SearchQuery
+from yuqing.core.claim_semantics import compound_publication_details
 from yuqing.core.llm.gateway import (
     LLMBudgetExhausted,
     LLMGateway,
@@ -441,6 +442,8 @@ class OpenAIInvestigationAgent:
                     "不把不同年份、机构、处置和报道串成一条时间线。"
                     f"text 不超过 {ATOMIC_CLAIM_MAX_CHARS} 个汉字且不含分号；"
                     "同一来源只有部分内容支持时，拆成各自可独立核验的短陈述。"
+                    "发布事实用‘某机构发布通报称……’，不得把声明内容改写成无归属的事实。"
+                    "通报内容与落款、署名、转载平台等页面细节须分开写；不为补齐这些细节拖累核心事实。"
                     "不要输出全网声量、代表性情感比例或未来走势，除非材料提供了明确总体样本、"
                     f"采集范围和可复核口径。{media_contract}{history_contract}",
                 )
@@ -457,7 +460,11 @@ class OpenAIInvestigationAgent:
                     if not isinstance(item, dict):
                         continue
                     text = str(item.get("text", "")).strip()
-                    if len(text) > ATOMIC_CLAIM_MAX_CHARS or any(mark in text for mark in "；;"):
+                    if (
+                        len(text) > ATOMIC_CLAIM_MAX_CHARS
+                        or any(mark in text for mark in "；;")
+                        or compound_publication_details(text)
+                    ):
                         compound = True
                         continue
                     evidence_ids = list(
@@ -492,6 +499,8 @@ class OpenAIInvestigationAgent:
                         f"不超过 {ATOMIC_CLAIM_MAX_CHARS} 字且不含分号的陈述；"
                         "每条只写一个主体在一个时间点的一项动作或结论，并只绑定直接支持"
                         "整条陈述的证据 ID。不得截断长句或凭常识补齐日期。"
+                        "机构通报的内容与落款、署名、页面来源标注分别提取；核心动作保留来源归属，"
+                        "缺乏证据的附加细节不要塞进同一句。"
                         f"最多 {limit_per_batch - accepted} 条。"
                         '输出 JSON：{"claims":[{"text":"短陈述","statement_kind":"fact",'
                         '"evidence_ids":["E001"]}]}。'

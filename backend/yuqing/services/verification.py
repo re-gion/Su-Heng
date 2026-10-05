@@ -53,6 +53,8 @@ class BadgeInputs:
     # 是否存在只拿到"部分支持"立场的主体（05-核心契约 §4.3 计数表）。
     # 它不影响徽章颜色，只影响卡片上怎么写结论。
     has_partial: bool = False
+    # 仅限主体身份已确认、直接取得原文的发布记录；不适用于实质指控。
+    publication_s: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class EntityEvidence:
     relation: Relation
     published_at: str | None = None
     is_correction: bool = False
+    primary_publication: bool = False
 
 
 def decide_badge(value: BadgeInputs) -> BadgeDecision:
@@ -91,6 +94,13 @@ def decide_badge(value: BadgeInputs) -> BadgeDecision:
         return BadgeDecision("verified", "D8", "单源·官方")
     if value.ind_s == 0 and value.ind_u == 0 and value.has_conflict:
         return BadgeDecision("disputed", "D9", "材料内部矛盾")
+    if (
+        value.ind_s >= 1
+        and value.publication_s >= 1
+        and value.ind_u == 0
+        and not value.has_conflict
+    ):
+        return BadgeDecision("verified", "D12", "发布记录已核实（机构原文）")
     if value.ind_s == 1 and value.ind_u == 0 and not value.has_conflict:
         return BadgeDecision(
             "unverified", "D10", "部分支持" if value.has_partial else "单一非权威来源支持"
@@ -144,7 +154,7 @@ def merge_stances(
             continue
         grouped[item.publisher_entity or "unknown"].append(item)
 
-    ind_s = ind_u = authority_s = authority_u = 0
+    ind_s = ind_u = authority_s = authority_u = publication_s = 0
     has_conflict = False
     has_partial = False
     for group in grouped.values():
@@ -178,10 +188,20 @@ def merge_stances(
         if stance == "support":
             ind_s += 1
             authority_s += int(is_authority)
+            publication_s += int(any(item.primary_publication for item in group))
         elif stance == "contradict":
             ind_u += 1
             authority_u += int(is_authority)
 
+    if any(item.relation in {"contradict", "conflict"} for item in evidence):
+        publication_s = 0
     return BadgeInputs(
-        ind_s, ind_u, has_conflict, authority_s, authority_u, verification_complete, has_partial
+        ind_s,
+        ind_u,
+        has_conflict,
+        authority_s,
+        authority_u,
+        verification_complete,
+        has_partial,
+        publication_s,
     )

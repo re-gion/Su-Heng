@@ -664,6 +664,7 @@ class V1Orchestrator:
             if c.agent == "fact_investigator"
             and c.verification_state == "complete"
             and c.verdict == "support"
+            and c.independent_sources >= 1
             and set(c.evidence_ids) & main
         ]
         if len(usable) < 2 or set(missing) & {
@@ -710,6 +711,7 @@ class V1Orchestrator:
             c.agent == "history_insight"
             and c.verification_state == "complete"
             and c.verdict == "support"
+            and c.independent_sources >= 1
             and independent_case_evidence(
                 c, evidence_by_id, task.resolved_event_query or task.event_query, task.created_at
             )
@@ -858,7 +860,9 @@ class V1Orchestrator:
             )
         ]
         if any(
-            claim.verdict == "support" and claim.verification_state == "complete"
+            claim.verdict == "support"
+            and claim.verification_state == "complete"
+            and claim.independent_sources >= 1
             for claim in eligible
         ):
             return
@@ -924,9 +928,12 @@ class V1Orchestrator:
                     )
                     if claim.verification_state == "pending":
                         await self.verification.verify_claim(claim)
+                    reviewed_claim = await self.database.get_claim(task_id, claim.local_id)
                     if (
-                        await self.database.get_claim(task_id, claim.local_id)
-                    ).verdict == "support":
+                        reviewed_claim
+                        and reviewed_claim.verdict == "support"
+                        and reviewed_claim.independent_sources >= 1
+                    ):
                         return
                 except Exception as exc:
                     self._limitations.append(
@@ -3304,7 +3311,10 @@ class V1Orchestrator:
             claim
             for claim in await self.database.list_claims(task_id)
             if claim.verification_state == "complete"
-            and (claim.badge in {"verified", "disputed", "refuted"} or claim.verdict == "support")
+            and (
+                claim.badge in {"verified", "disputed", "refuted"}
+                or (claim.verdict == "support" and claim.independent_sources >= 1)
+            )
             and any(evidence_id in main_ids for evidence_id in claim.evidence_ids)
         ]
         topic_selection = await self.database.checkpoint(task_id, "topic:selected") or {}
@@ -3467,7 +3477,10 @@ class V1Orchestrator:
             }
             has_basis = any(
                 c.verification_state == "complete"
-                and (c.badge in {"verified", "disputed", "refuted"} or c.verdict == "support")
+                and (
+                    c.badge in {"verified", "disputed", "refuted"}
+                    or (c.verdict == "support" and c.independent_sources >= 1)
+                )
                 and set(c.evidence_ids) & recovered_evidence
                 for c in await self.database.list_claims(task_id)
             )

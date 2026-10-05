@@ -2,6 +2,7 @@ import asyncio
 import copy
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -144,6 +145,47 @@ async def test_full_report_has_grounded_analysis_and_compact_audit(analytical_re
     assert "优先决策事项（分析判断）" in rendered
     assert 'href="#b_07_analysis"' in rendered
     assert validate_report(report).errors == []
+
+
+@pytest.mark.asyncio
+async def test_scope_redaction_preserves_canonical_analysis_observation(
+    analytical_report, runtime_dir
+):
+    report = copy.deepcopy(analytical_report[0])
+    report["blocks"] = [b for b in report["blocks"] if b["type"] != "metric_cards"]
+    analysis = next(b for b in report["blocks"] if b["type"] == "analysis")["items"][0]
+    analysis["interpretation"] += "后续需要工作组说明进度。"
+    fact = next(b for b in report["blocks"] if b["type"] == "fact_check_table")["items"][0]
+    original_fact = copy.deepcopy(fact)
+
+    class Reviewer:
+        def bind(self, *_args):
+            pass
+
+        async def review(self, texts, *, kind):
+            assert kind == "report_text"
+            return [
+                SimpleNamespace(
+                    allowed=True,
+                    status="accepted",
+                    text=text.replace("工作组", "有关部门"),
+                    reason="privacy_redacted",
+                    diagnostic=None,
+                )
+                for text in texts
+            ]
+
+    builder = FullReportBuilder(None, runtime_dir, scope_reviewer=Reviewer())
+    task = SimpleNamespace(id="fixture", investigation_scope="public_event")
+    await builder._retain_reviewed_blocks(report, task)
+    assert fact == original_fact
+    analyses = [b for b in report["blocks"] if b["type"] == "analysis"]
+    assert analyses
+    assert validate_report(report).errors == []
+    assert analysis["interpretation"].endswith("后续需要有关部门说明进度。")
+    for block in analyses:
+        for item in block["items"]:
+            assert item["observation"] == original_fact["text"]
 
 
 @pytest.mark.asyncio

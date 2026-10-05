@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel
 
+from yuqing.core.claim_semantics import publication_actor
 from yuqing.core.llm.gateway import (
     LLMBudgetExhausted,
     is_upstream_failure,
@@ -62,6 +63,21 @@ def _cited_span(material: str, quote: str) -> str | None:
     if start < 0:
         return None
     return material[offsets[start] : offsets[start + len(compact_quote) - 1] + 1]
+
+
+def primary_publication_source(claim: ClaimRecord, evidence: EvidenceRecord) -> bool:
+    """A registered institution's own snapshot can confirm only its publication record."""
+    if claim.statement_kind != "fact" or evidence.kind != "web":
+        return False
+    issuer = bundled_classifier().institution_for(evidence.source_domain)
+    return bool(
+        issuer
+        and publication_actor(claim.text) == issuer
+        and evidence.fetch_status == "fetched"
+        and evidence.content_text
+        and evidence.snapshot_path
+        and evidence.content_sha256
+    )
 
 
 class ClaimVerifierService:
@@ -148,11 +164,18 @@ class ClaimVerifierService:
                             evidence.source_domain or "",
                             evidence.publisher_entity,
                         ),
-                        source_role=evidence.source_role,
+                        source_role="party"
+                        if primary_publication_source(claim, evidence)
+                        else evidence.source_role,
                         source_tier=evidence.source_tier,
                         relation=result.relation,
                         published_at=evidence.published_at,
                         is_correction=result.is_correction,
+                        primary_publication=(
+                            primary_publication_source(claim, evidence)
+                            and result.relation == "support"
+                            and cited_verified
+                        ),
                     )
                 )
 
@@ -167,21 +190,32 @@ class ClaimVerifierService:
             attribution_claim=attribution,
         )
         decision = decide_badge(inputs)
+        # 材料关系与独立主体计数是两个维度。转载/未知主体不能制造互证，
+        # 但其已回溯的支持关系不能被改写为“未提及”。
+        relations = {item.relation for item in stances}
         verdict = (
-            "support"
-            if inputs.ind_s > 0 and inputs.ind_u == 0
-            else (
-                "contradict"
-                if inputs.ind_u > 0 and inputs.ind_s == 0
-                else (
-                    "conflict"
-                    if inputs.has_conflict or inputs.ind_s + inputs.ind_u > 0
-                    # 只有 partial 时结论是"部分支持"，不是"材料未提及"——
-                    # 否则读完材料的读者会以为没人提过这件事。
-                    else ("partial" if inputs.has_partial else "not_mentioned")
-                )
-            )
+            "conflict"
+            if "conflict" in relations or {"support", "contradict"} <= relations
+            else "support"
+            if "support" in relations
+            else "contradict"
+            if "contradict" in relations
+            else "partial"
+            if "partial" in relations
+            else "not_mentioned"
         )
+        # 正式证实/证伪结论仍依照归并立场（包含时序更正）；原始材料关系
+        # 只补全 unverified 的阅读原因，不能推翻更正或将其判成反向陈述。
+        if decision.badge in {"verified", "refuted", "disputed"}:
+            verdict = {"verified": "support", "refuted": "contradict", "disputed": "conflict"}[
+                decision.badge
+            ]
+        note = decision.note
+        if decision.badge == "unverified" and inputs.verification_complete and inputs.ind_s == 0:
+            if verdict == "support":
+                note = "材料直接支持，独立发布来源尚未确认"
+            elif verdict == "partial":
+                note = "部分内容有据，独立发布来源尚未确认"
         independent = (
             max(inputs.ind_s, inputs.ind_u)
             if decision.badge == "disputed"
@@ -192,7 +226,7 @@ class ClaimVerifierService:
             claim.pk,
             badge=decision.badge,
             verdict=verdict,
-            reason=decision.note,
+            reason=note,
             state="complete" if inputs.verification_complete else "incomplete",
             independent_sources=independent,
             max_source_tier=min(relevant_tiers) if relevant_tiers else None,

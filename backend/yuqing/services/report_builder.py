@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
 from yuqing.render.validator import prune_citation_backlinks, validate_report
@@ -109,6 +110,10 @@ class BriefReportBuilder:
                             "quote_start": None if institution_scope else row["quote_start"],
                             "quote_end": None if institution_scope else row["quote_end"],
                             "relation": row["relation"],
+                            "cited_verified": bool(row["cited_verified"]),
+                            "fetch_status": row["fetch_status"],
+                            "source_role": row["source_role"],
+                            "kind": row["kind"],
                             "note": note,
                         }
                     )
@@ -176,6 +181,11 @@ class BriefReportBuilder:
                     "verdict": claim.verdict or "not_mentioned",
                     "verification_state": claim.verification_state,
                     "verify_reason": None if institution_scope else claim.verify_reason,
+                    "verification_basis": (
+                        "primary_publication"
+                        if claim.verify_reason == "发布记录已核实（机构原文）"
+                        else "evidence_verification"
+                    ),
                     "independent_sources": claim.independent_sources,
                     "max_source_tier": claim.max_source_tier,
                     "evidence_grade": grade,
@@ -189,14 +199,8 @@ class BriefReportBuilder:
             rejection_reasons["范围审查尚未完成"] = scope_pending
         total = len(rendered_claims)
         verified = sum(item["badge"] == "verified" for item in rendered_claims)
-        single_source_supported = sum(
-            item["badge"] == "unverified"
-            and item["verification_state"] == "complete"
-            and item["independent_sources"] == 1
-            and item["evidence_grade"] == "fulltext"
-            and any(citation.get("relation") == "support" for citation in item["citations"])
-            for item in rendered_claims
-        )
+        reading_counts = presentation_counts(rendered_claims)
+        single_source_supported = reading_counts.get("single_source_supported", 0)
         disputed = sum(item["badge"] == "disputed" for item in rendered_claims)
         refuted = sum(item["badge"] == "refuted" for item in rendered_claims)
         evidence_items = [appendix[key] for key in sorted(appendix)]
@@ -217,6 +221,16 @@ class BriefReportBuilder:
             "citation_coverage": 1.0 if total else 0.0,
             "verified_rate": verified / total if total else 0.0,
             "single_source_supported_count": single_source_supported,
+            "presentation_counts": reading_counts,
+            "source_supported_count": sum(
+                reading_counts.get(key, 0)
+                for key in (
+                    "single_source_supported",
+                    "reposted_source_supported",
+                    "source_recorded",
+                    "attributed_source_supported",
+                )
+            ),
             "weighted_verified_rate": (
                 sum(
                     {1: 1.0, 2: 0.8, 3: 0.6, 4: 0.4, 5: 0.2}.get(item["max_source_tier"], 0.2)

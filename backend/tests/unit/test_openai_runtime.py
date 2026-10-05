@@ -206,6 +206,38 @@ async def test_summarize_repairs_compound_claim_before_it_enters_verification():
 
 
 @pytest.mark.asyncio
+async def test_summarize_separates_notice_content_from_signature_before_verification():
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, _role, _system, prompt, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "claims": [
+                        {
+                            "text": "武汉大学发布通报，称给予学生记过处分，通报落款为学生工作部。",
+                            "evidence_ids": ["E001"],
+                        }
+                    ]
+                }
+            return {
+                "claims": [
+                    {"text": "武汉大学发布通报，称给予学生记过处分。", "evidence_ids": ["E001"]},
+                    {"text": "处理通报落款为学生工作部。", "evidence_ids": ["E001"]},
+                ]
+            }
+
+    gateway = Gateway()
+    claims = await OpenAIInvestigationAgent(gateway, "system").summarize("测试事件", [_evidence(1)])
+    assert gateway.calls == 2
+    assert [claim.text for claim in claims] == [
+        "武汉大学发布通报，称给予学生记过处分。",
+        "处理通报落款为学生工作部。",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_reflection_truncation_keeps_agent_in_safe_fallback():
     class TruncatingGateway:
         async def complete_json(self, *_args, **_kwargs):

@@ -7,29 +7,22 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from yuqing.core.history_cards import unique_history_cards
+from yuqing.core.verification_presentation import (
+    LABELS,
+    NOTES,
+    enrich_report_sources,
+    nearby_publication_records,
+    presentation_status,
+)
 from yuqing.render.brand import FAVICON_DATA_URI, LOGO_DATA_URI
 
-BADGE_LABELS = {
-    "verified": "已证实",
-    "unverified": "待核验",
-    "disputed": "有争议",
-    "refuted": "已证伪",
-    "single_source_supported": "原文直接支持（单源）",
-}
+BADGE_LABELS = LABELS
 
 
 def _display_badge(item: dict[str, Any]) -> str:
     """Expose direct single-source support without changing the stored verdict."""
 
-    if (
-        item.get("badge") == "unverified"
-        and item.get("verification_state") == "complete"
-        and item.get("independent_sources") == 1
-        and item.get("evidence_grade") == "fulltext"
-        and any(c.get("relation") == "support" for c in item.get("citations", []))
-    ):
-        return "single_source_supported"
-    return str(item.get("badge") or "unverified")
+    return presentation_status(item)
 
 
 RELATION_LABELS = {
@@ -134,7 +127,7 @@ def _summary(
             badge = claim_badges.get(claim_ref, "unverified")
             badge_label = BADGE_LABELS.get(badge, badge)
             rendered_items.append(
-                f'<li><span class="badge {badge}" title="事实核查结论">'
+                f'<li><span class="badge {badge}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">'
                 f"{_escape(badge_label)}</span>{_escape(item.get('text'))}"
                 f"{_claim_link(claim_ref)}</li>"
             )
@@ -196,11 +189,16 @@ def _fact_table(block: dict[str, Any]) -> str:
             (
                 claim_ref,
                 f'<article class="claim-card" id="claim-{_escape(claim_ref)}">'
-                f'<div class="claim-meta"><span class="badge {badge}">{BADGE_LABELS.get(badge, badge)}</span>{note}{state_chip}</div>'
-                f'<h3>{_escape(item.get("text"))}</h3>{rumor}{correction}<div class="claim-refs">{citations}</div></article>',
+                f'<div class="claim-meta"><span class="badge {badge}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">{BADGE_LABELS.get(badge, badge)}</span>{note}{state_chip}</div>'
+                + (
+                    f'<p class="source-boundary">{_escape(NOTES[badge])}</p>'
+                    if badge in NOTES
+                    else ""
+                )
+                + f'<h3>{_escape(item.get("text"))}</h3>{rumor}{correction}<div class="claim-refs">{citations}</div></article>',
             )
         )
-    requested = [str(ref) for ref in block.get("priority_claim_refs", []) if ref]
+    requested = list(dict.fromkeys(str(ref) for ref in block.get("priority_claim_refs", []) if ref))
     priority_refs = set(requested[:8])
     if requested:
         cards_by_ref = dict(cards)
@@ -209,15 +207,57 @@ def _fact_table(block: dict[str, Any]) -> str:
     else:
         visible = [card for _, card in cards[:8]]
         remaining = [card for _, card in cards[8:]]
+    # Group only close records with the same issuer, dates, numbers and status.
+    # Every original sentence, badge, citation and hash target stays available.
+    facts_by_ref = {str(item.get("claim_ref") or ""): item for item in block.get("items", [])}
+    ordered = (
+        [*requested[:8], *(ref for ref, _ in cards if ref not in priority_refs)]
+        if requested
+        else [ref for ref, _ in cards]
+    )
+    leaders: list[str] = []
+    related: dict[str, list[str]] = {}
+    for ref in ordered:
+        if ref not in facts_by_ref:
+            continue
+        parent = next(
+            (
+                old
+                for old in leaders
+                if nearby_publication_records(facts_by_ref[old], facts_by_ref[ref])
+            ),
+            None,
+        )
+        if parent:
+            related.setdefault(parent, []).append(ref)
+        else:
+            leaders.append(ref)
+    if related:
+        cards_by_ref = dict(cards)
+        grouped_cards = {}
+        for ref in leaders:
+            repeats = related.get(ref, [])
+            grouped_cards[ref] = cards_by_ref[ref] + (
+                '<details class="related-claims"><summary>'
+                f"相近发布记录（{len(repeats)}），保留各自正文、来源与核验结论</summary>"
+                + "".join(cards_by_ref[child] for child in repeats)
+                + "</details>"
+                if repeats
+                else ""
+            )
+        visible_refs = set(requested[:8] if requested else [ref for ref, _ in cards[:8]])
+        visible = [grouped_cards[ref] for ref in leaders if ref in visible_refs]
+        remaining = [grouped_cards[ref] for ref in leaders if ref not in visible_refs]
     overflow = (
         '<details class="claim-overflow"><summary>'
-        f"其余陈述与核验记录（{len(remaining)}）</summary>{''.join(remaining)}</details>"
+        f"其余陈述与核验记录（{len(remaining)}{'组' if related else ''}）</summary>{''.join(remaining)}</details>"
         if remaining
         else ""
     )
     legend = (
-        '<p class="verification-legend">“原文直接支持（单源）”仍属待核验：原文支持这条陈述，但未达到独立互证门槛。'
-        "符合条件的裁判性官方单源可标“已证实”。</p>"
+        '<p class="verification-legend">单源和转载说明表示材料支持，不等于独立证实；'
+        "“发布记录已核实”只确认机构的发布记录，不证明文件中的指控属实。"
+        "部分支持、依据不足和核验未完成分别标注。</p>"
         if block.get("section") == "03"
         else ""
     )
@@ -393,8 +433,8 @@ def _chart(block: dict[str, Any]) -> str:
             refs = "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
             claims = " ".join(_claim_link(ref) for ref in item.get("claim_refs", []))
             if item.get("badge"):
-                badge = item["badge"]
-                chips += f'<span class="badge {_escape(badge)}">{_escape(BADGE_LABELS.get(badge, badge))}</span>'
+                badge = _display_badge(item)
+                chips += f'<span class="badge {_escape(badge)}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">{_escape(BADGE_LABELS.get(badge, badge))}</span>'
             if item.get("window_label"):
                 chips += f'<span class="strength">{_escape(item["window_label"])}</span>'
             nodes.append(
@@ -477,7 +517,7 @@ def _data_quality(block: dict[str, Any]) -> str:
         f"<details><summary><span>{_escape(block.get('title'))}</span><small>展开查看计算口径与检索库存统计</small></summary>"
         f'<div class="quality-summary">{summary}</div>'
         f'<p class="method-note">已证实陈述占比：{float(method.get("verified_rate", 0)):.0%}；'
-        f"来源直接支持：{int(method.get('single_source_supported_count', 0))} 条；"
+        f"来源直接支持：{int(method.get('source_supported_count', method.get('single_source_supported_count', 0)))} 条；"
         f"信源加权值：{float(method.get('weighted_verified_rate', 0)):.0%}；"
         f"权重口径：{_escape(method.get('weight_scheme'))}。这些数值描述核验结论，不代表系统运行成功率。</p>"
         f"{''.join(distributions)}</details></section>"
@@ -1097,6 +1137,7 @@ def _block_heading(block: dict[str, Any]) -> str:
 
 
 def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "brief") -> str:
+    report = enrich_report_sources(report)
     blocks = report.get("blocks", [])
     header = next((block for block in blocks if block.get("type") == "report_header"), {})
     claim_badges = {
@@ -1368,6 +1409,11 @@ if(location.hash)revealTarget(location.hash);
     .back-to-top span{font-size:18px;line-height:1;margin-right:8px}
     .evidence-card>summary>*{min-width:0;overflow-wrap:anywhere}
     .badge.single_source_supported{background:#e6f0fb;color:#214b83}
+    .badge.publication_verified{background:#e1f2e8;color:#24644a}
+    .badge.reposted_source_supported,.badge.attributed_source_supported{background:#e6f0fb;color:#214b83}
+    .badge.source_recorded,.badge.snippet_supported{background:#edf1f4;color:#435669}
+    .badge.partially_supported,.badge.insufficient_evidence,.badge.verification_incomplete,.badge.source_conflict{background:#fff1cb;color:#856018}
+    .source-boundary{font-size:13px;color:var(--muted);margin:8px 0 0;line-height:1.6}
     .verification-legend{padding:10px 14px;border-left:3px solid #315bd7;background:#eef3fd;color:#314a70;font-size:13px}
     .report-section{overflow-wrap:anywhere}.report-section blockquote{margin-left:16px;margin-right:16px}
     @media(max-width:720px){.evidence-card>summary{grid-template-columns:minmax(0,1fr)}}

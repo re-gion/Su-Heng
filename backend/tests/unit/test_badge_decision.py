@@ -160,3 +160,28 @@ def test_authority_group_is_judged_as_a_whole_after_entity_merging():
 
     assert merged_with_portal_first.authority_s == 1
     assert decide_badge(merged_with_portal_first).rule == "D8"
+
+
+@pytest.mark.parametrize(
+    "complete, extra, badge",
+    [
+        (True, [], "verified"),
+        (False, [], "unverified"),
+        (True, [EntityEvidence("媒体甲", "independent", 2, "contradict")], "disputed"),
+        (True, [EntityEvidence("媒体甲", "independent", 2, "conflict")], "disputed"),
+        (True, [EntityEvidence("门户", "syndicated", 3, "contradict")], "unverified"),
+    ],
+)
+def test_primary_publication_exception_retains_completion_and_conflict_guards(
+    complete, extra, badge
+):
+    own = EntityEvidence("发布机构", "party", 2, "support", primary_publication=True)
+    inputs = merge_stances([own, *extra], verification_complete=complete, attribution_claim=True)
+    assert decide_badge(inputs).badge == badge
+    if badge == "verified":
+        assert decide_badge(inputs).rule == "D12"
+
+
+def test_party_statement_does_not_verify_an_underlying_accusation():
+    own = EntityEvidence("发布机构", "party", 2, "support")
+    assert decide_badge(merge_stances([own], verification_complete=True)).badge == "unverified"

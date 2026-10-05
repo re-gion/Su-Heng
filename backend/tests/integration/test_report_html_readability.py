@@ -135,6 +135,80 @@ def test_evidence_is_collapsed_with_navigation_and_print_safeguards():
     assert 'href="/?task=task%2Freadability"' in rendered
 
 
+def test_repost_support_is_consistent_in_summary_timeline_and_facts_for_saved_report():
+    report = _report()
+    original = copy.deepcopy(report)
+    fact = next(b for b in report["blocks"] if b["type"] == "fact_check_table")["items"][0]
+    fact.update(verification_state="complete", independent_sources=0)
+    fact["citations"][0]["relation"] = "support"
+    source = next(b for b in report["blocks"] if b["type"] == "evidence_appendix")["items"][0]
+    source["source_role"] = "syndicated"
+    report["blocks"].insert(
+        2,
+        {
+            "type": "chart",
+            "section": "02",
+            "block_id": "timeline",
+            "chart_kind": "timeline",
+            "items": [
+                {
+                    "date": "2025-09-17",
+                    "text": fact["text"],
+                    "claim_refs": ["C001"],
+                    "evidence_refs": ["E001"],
+                    "badge": "unverified",
+                }
+            ],
+        },
+    )
+    saved = copy.deepcopy(report)
+    rendered = render_html(report, view="full")
+    assert rendered.count('class="badge reposted_source_supported"') == 3
+    assert "原始发布来源仍需回查" in rendered
+    assert report == saved
+    assert fact["badge"] == original["blocks"][2]["items"][0]["badge"]
+
+
+def test_partial_and_failed_checks_do_not_get_a_support_label():
+    report = _report()
+    fact = next(b for b in report["blocks"] if b["type"] == "fact_check_table")["items"][0]
+    fact["verification_state"] = "complete"
+    fact["citations"][0]["relation"] = "partial"
+    assert 'class="badge partially_supported"' in render_html(report)
+    fact["verification_state"] = "incomplete"
+    fact["citations"][0]["relation"] = "support"
+    rendered = render_html(report)
+    assert 'class="badge verification_incomplete"' in rendered
+    assert 'class="badge single_source_supported"' not in rendered
+    assert 'class="badge reposted_source_supported"' not in rendered
+
+
+def test_similar_publication_records_keep_distinct_anchors_and_corrections():
+    report = _report()
+    facts = next(b for b in report["blocks"] if b["type"] == "fact_check_table")
+    first = facts["items"][0]
+    first.update(
+        text="武汉大学于2025年9月20日发布情况通报，决定撤销学生记过处分。",
+        verification_state="complete",
+    )
+    second = {
+        **copy.deepcopy(first),
+        "claim_ref": "C002",
+        "text": "武汉大学于2025年9月20日发布情况通报，决定撤销对学生的记过处分。",
+    }
+    correction = {
+        **copy.deepcopy(first),
+        "claim_ref": "C003",
+        "text": "武汉大学于2025年9月20日发布情况通报，决定不撤销学生记过处分。",
+    }
+    facts["items"] = [first, second, correction]
+    facts["priority_claim_refs"] = ["C001", "C002", "C003"]
+    rendered = render_html(report, view="full")
+    assert "相近发布记录（1）" in rendered
+    assert all(rendered.count(f'id="claim-{ref}"') == 1 for ref in ("C001", "C002", "C003"))
+    assert correction["text"] in rendered
+
+
 def test_long_fact_table_and_uncited_evidence_are_grouped_without_losing_targets():
     report = _report()
     facts = next(block for block in report["blocks"] if block["type"] == "fact_check_table")

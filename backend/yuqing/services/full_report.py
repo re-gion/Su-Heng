@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.history_cards import unique_history_cards
+from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
 from yuqing.render.validator import prune_citation_backlinks, validate_report
 from yuqing.services.forum import ForumMessage
@@ -251,6 +252,27 @@ class FullReportBuilder:
             "diagnostics",
             "samples",
         }
+        fact_texts = {
+            item["claim_ref"]: item["text"]
+            for block in report["blocks"]
+            if block["type"] in {"fact_check_table", "historical_facts"}
+            for item in block.get("items", [])
+            if item.get("claim_ref") and isinstance(item.get("text"), str)
+        }
+        # Exact backfills reuse already screened facts. The scope model may redact
+        # generated narrative, but cannot rewrite these authoritative observations.
+        canonical_observations = set()
+        for block in report["blocks"]:
+            if block["type"] != "analysis":
+                continue
+            for item in block.get("items", []):
+                refs = item.get("claim_refs") or []
+                if (
+                    refs
+                    and all(ref in fact_texts for ref in refs)
+                    and item.get("observation") == "\n".join(fact_texts[ref] for ref in refs)
+                ):
+                    canonical_observations.add(id(item))
 
         def collect(value, key=""):
             if key in ignored_keys:
@@ -258,6 +280,8 @@ class FullReportBuilder:
             found = set()
             if isinstance(value, dict):
                 for k, v in value.items():
+                    if k == "observation" and id(value) in canonical_observations:
+                        continue
                     found.update(collect(v, k))
             elif isinstance(value, list):
                 for v in value:
@@ -372,6 +396,8 @@ class FullReportBuilder:
             def apply_redactions(value):
                 if isinstance(value, dict):
                     for key, child in list(value.items()):
+                        if key == "observation" and id(value) in canonical_observations:
+                            continue
                         value[key] = apply_redactions(child)
                     return value
                 if isinstance(value, list):
@@ -1024,15 +1050,20 @@ class FullReportBuilder:
         total_claims = len(fact_items)
         verified_claims = sum(item["badge"] == "verified" for item in fact_items)
         unverified_claims = sum(item["badge"] == "unverified" for item in fact_items)
-        single_source_supported = sum(
-            item["badge"] == "unverified"
-            and item["verification_state"] == "complete"
-            and item.get("independent_sources") == 1
-            and item.get("evidence_grade") == "fulltext"
-            and any(citation.get("relation") == "support" for citation in item.get("citations", []))
-            for item in fact_items
+        reading_counts = presentation_counts(fact_items)
+        single_source_supported = reading_counts.get("single_source_supported", 0)
+        source_supported = sum(
+            reading_counts.get(key, 0)
+            for key in (
+                "single_source_supported",
+                "reposted_source_supported",
+                "source_recorded",
+                "attributed_source_supported",
+            )
         )
         report["metrics"]["single_source_supported_count"] = single_source_supported
+        report["metrics"]["source_supported_count"] = source_supported
+        report["metrics"]["presentation_counts"] = reading_counts
         cited_records = [
             evidence_by_id[evidence_id]
             for evidence_id in sorted(cited_evidence_ids)
@@ -1051,7 +1082,7 @@ class FullReportBuilder:
             if unfinished_claims
             else "需要更多独立支持或一手材料"
         )
-        unresolved_claims = max(0, unverified_claims - single_source_supported)
+        unresolved_claims = max(0, unverified_claims - source_supported)
         kpis = {
             "block_id": "b_00_kpi",
             "type": "kpi_grid",
@@ -1066,16 +1097,16 @@ class FullReportBuilder:
                     "tone": "verified" if verified_claims else "neutral",
                 },
                 {
-                    "label": "待核验陈述",
+                    "label": "仍需补证陈述",
                     "value": f"{unresolved_claims} / {total_claims}",
                     "note": unverified_note,
                     "tone": "warning" if unresolved_claims else "neutral",
                 },
                 {
                     "label": "来源直接支持",
-                    "value": f"{single_source_supported} / {total_claims}",
-                    "note": "已取得原文并支持整条陈述；仍需独立互证才会标为已证实",
-                    "tone": "neutral" if single_source_supported else "warning",
+                    "value": f"{source_supported} / {total_claims}",
+                    "note": "材料支持整条陈述；单源、转载与来源身份限制分别说明，不等于独立证实",
+                    "tone": "neutral" if source_supported else "warning",
                 },
                 {
                     "label": "已取得原文",
@@ -1320,6 +1351,8 @@ class FullReportBuilder:
                 "single_source_supported_count": report["metrics"].get(
                     "single_source_supported_count", 0
                 ),
+                "source_supported_count": source_supported,
+                "presentation_counts": reading_counts,
                 "weighted_verified_rate": report["metrics"]["weighted_verified_rate"],
                 "weight_scheme": report["metrics"]["weight_scheme"],
             },

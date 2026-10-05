@@ -383,7 +383,7 @@ async def test_full_report_has_ten_sections_real_charts_and_offline_interactions
         )["items"]
     } == {
         "已证实陈述",
-        "待核验陈述",
+        "仍需补证陈述",
         "来源直接支持",
         "已取得原文",
         "实际引用材料",
