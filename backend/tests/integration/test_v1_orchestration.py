@@ -409,6 +409,18 @@ async def test_core_recovery_precedes_optional_comments_and_survives_comment_spe
         async def comments(*args, **kwargs):
             order.append("comments")
             usage.tokens_used = 1_373_986
+            await database.record_llm_call(
+                task.id,
+                {
+                    "call_id": "late-comment",
+                    "attempt": 1,
+                    "status": "complete",
+                    "stage": "scope_review",
+                    "total_tokens": 10,
+                    "queue_ms": 0,
+                    "request_ms": 100,
+                },
+            )
 
         runner._recover_report_gaps = recover
         runner._run_comment_insight = comments
@@ -416,6 +428,13 @@ async def test_core_recovery_precedes_optional_comments_and_survives_comment_spe
         assert order[0] == "core_recovery"
         assert "comments" in order
         assert (await database.get_task(task.id)).status == "done"
+        from yuqing.services.task_diagnostics import task_timing
+
+        report = json.loads((await database.get_report_for_task(task.id))["ir_json"])
+        timing = await task_timing(database, task.id)
+        for field in ("active_seconds", "waiting_seconds", "phase_seconds", "status"):
+            assert report["quality"]["timing"][field] == timing[field]
+        assert report["quality"]["call_diagnostics"]["recorded_requests"] == 1
     finally:
         await database.close()
 

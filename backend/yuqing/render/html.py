@@ -51,6 +51,11 @@ def _escape(value: Any) -> str:
     return html.escape("" if value is None else str(value))
 
 
+def _runtime_duration(seconds: Any) -> str:
+    value = max(0, int(float(seconds or 0)))
+    return f"{value // 60} 分 {value % 60:02d} 秒"
+
+
 class _CommentTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -1348,7 +1353,7 @@ if(location.hash)revealTarget(location.hash);
             else "主动运行"
         )
         quality_parts.append(
-            f"<p>{timing_label}：{float(timing.get('active_seconds', 0)) / 60:.1f} 分钟；用户等待：{float(timing.get('waiting_seconds', 0)) / 60:.1f} 分钟。</p>"
+            f"<p>{timing_label}：{_runtime_duration(timing.get('active_seconds', 0))}；用户等待：{_runtime_duration(timing.get('waiting_seconds', 0))}。</p>"
         )
         if timing_label != "主动运行":
             quality_parts.append(

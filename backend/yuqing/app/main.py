@@ -79,7 +79,7 @@ from yuqing.services.report_delivery import (
     EvidencePackageBuilder,
     PdfExporter,
 )
-from yuqing.services.task_diagnostics import task_timing
+from yuqing.services.task_diagnostics import refresh_report_runtime, task_timing
 from yuqing.services.topic_discovery import OpenAITopicQueryPlanner, TopicDiscovery
 from yuqing.services.translation import OpenAITranslator
 from yuqing.services.v1_orchestrator import V1Orchestrator
@@ -1763,7 +1763,7 @@ def create_app(
             return error_response("REPORT_NOT_READY", "报告尚未生成。", 409, recoverable=True)
         if await database.report_under_review(report["id"]):
             return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
-        return migrate_report(json.loads(report["ir_json"]))
+        return await refresh_report_runtime(database, migrate_report(json.loads(report["ir_json"])))
 
     @app.get("/api/reports/{report_id}/html", response_class=HTMLResponse)
     async def read_report_html(
@@ -1780,7 +1780,8 @@ def create_app(
             return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
         if await database.report_under_review(report_id):
             return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
-        rendered = render_html(migrate_report(json.loads(report["ir_json"])), view=view)
+        ir = await refresh_report_runtime(database, migrate_report(json.loads(report["ir_json"])))
+        rendered = render_html(ir, view=view)
         headers = (
             {"Content-Disposition": f'attachment; filename="yuqing-{report_id}.html"'}
             if download
@@ -1798,7 +1799,8 @@ def create_app(
             return error_response("REPORT_NOT_FOUND", "报告不存在。", 404)
         if await database.report_under_review(report_id):
             return error_response("REPORT_UNDER_REVIEW", "报告因投诉已暂时下线复核。", 451)
-        html = render_html(migrate_report(json.loads(report["ir_json"])), view="full")
+        ir = await refresh_report_runtime(database, migrate_report(json.loads(report["ir_json"])))
+        html = render_html(ir, view="full")
         # 模板与品牌变化也需要更新 PDF，不能继续命中旧外观的缓存。
         render_digest = hashlib.sha256(html.encode("utf-8")).hexdigest()[:16]
         target = data_dir / "reports" / f"{report_id}-{render_digest}.pdf"

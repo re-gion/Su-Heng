@@ -48,3 +48,21 @@ async def task_timing(database, task_id):
         "sampled_at": sampled_at.isoformat(),
         "status": transitions[-1][1].get("status", "unknown"),
     }
+
+
+async def refresh_report_runtime(database, report):
+    """Refresh only runtime metadata from persisted task records, including late comments."""
+    task_id = report.get("task", {}).get("task_id")
+    if not task_id:
+        return report
+    timing = await task_timing(database, task_id)
+    quality = report.setdefault("quality", {})
+    if timing["available"]:
+        quality["timing"] = timing
+    diagnostics = await database.llm_diagnostics(task_id)
+    # Missing historical telemetry must not erase a saved snapshot or invent zero usage.
+    if diagnostics["calls"]:
+        quality["call_diagnostics"] = {
+            key: value for key, value in diagnostics.items() if key != "calls"
+        }
+    return report

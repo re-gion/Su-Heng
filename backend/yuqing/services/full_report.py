@@ -32,7 +32,7 @@ from yuqing.services.report_analysis import (
     select_priority_timeline_nodes,
 )
 from yuqing.services.report_builder import BriefReportBuilder, EntailmentVerifier
-from yuqing.services.task_diagnostics import task_timing
+from yuqing.services.task_diagnostics import refresh_report_runtime
 from yuqing.services.translation import Translator
 from yuqing.storage.db import Database
 
@@ -1919,11 +1919,7 @@ class FullReportBuilder:
                             for m in b["items"]
                             if item["evidence_ref"] in m["evidence_refs"]
                         ]
-        diagnostics = await self.database.llm_diagnostics(task_id)
-        report.setdefault("quality", {})["call_diagnostics"] = {
-            k: v for k, v in diagnostics.items() if k != "calls"
-        }
-        report["quality"]["timing"] = await task_timing(self.database, task_id)
+        await refresh_report_runtime(self.database, report)
         prune_citation_backlinks(report)
         validated = validate_report(report).report
         await asyncio.to_thread(

@@ -46,7 +46,7 @@ from yuqing.services.investigation_scope import (
 )
 from yuqing.services.moderation import Moderator, ModeratorReview
 from yuqing.services.source_tiers import bundled_classifier, registrable_domain
-from yuqing.services.task_diagnostics import task_timing
+from yuqing.services.task_diagnostics import refresh_report_runtime, task_timing
 from yuqing.services.topic_discovery import TopicDiscovery, TopicDiscoveryRequest
 from yuqing.services.verifier import ClaimVerifierService, EvidenceVerifier
 from yuqing.storage.db import Database
@@ -3564,6 +3564,7 @@ class V1Orchestrator:
         progress.update(phase="verified", end_reason=end_reason)
         await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
         report.setdefault("quality", {})["recovery"] = progress
+        await refresh_report_runtime(self.database, report)
         await asyncio.to_thread(Path(html_path).write_text, render_html(report), encoding="utf-8")
         await self.events.emit(
             task_id,
@@ -3593,6 +3594,13 @@ class V1Orchestrator:
             },
         )
         await self.events.emit_task_status(task_id, status="done", phase="finished", progress=100)
+        # Freeze the same end boundary used by the progress API; preserve report identity/content.
+        await refresh_report_runtime(self.database, report)
+        await self.database.execute_write(
+            "UPDATE report SET ir_json=?,pdf_path=NULL WHERE id=?",
+            (json.dumps(report, ensure_ascii=False), report_id),
+        )
+        await asyncio.to_thread(Path(html_path).write_text, render_html(report), encoding="utf-8")
 
     async def resume_task(self, task_id: str) -> None:
         if await self.database.latest_checkpoint(task_id) is None:

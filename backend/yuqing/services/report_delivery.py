@@ -13,6 +13,7 @@ from typing import Protocol
 
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import migrate_report
+from yuqing.services.task_diagnostics import refresh_report_runtime
 from yuqing.storage.db import Database, now_iso
 from yuqing.storage.snapshots import SnapshotStore
 
@@ -118,7 +119,9 @@ class EvidencePackageBuilder:
         institution_scope = bool(
             task and task.investigation_scope in {"institution", "public_event"}
         )
-        report = migrate_report(json.loads(row["ir_json"]))
+        report = await refresh_report_runtime(
+            self.database, migrate_report(json.loads(row["ir_json"]))
+        )
         html = render_html(report, view="full")
         manifest = {
             "format": "yuqing-evidence-package/1",
