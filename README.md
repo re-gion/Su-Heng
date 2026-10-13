@@ -159,6 +159,8 @@ FIRECRAWL_API_KEY=
 
 七个模型角色分别是 `ANALYST_A`、`ANALYST_B`、`ANALYST_C`、`MODERATOR`、`VERIFIER`、`REPORTER` 和 `UTILITY`。某个角色需要独立模型时，使用 `LLM_<ROLE>_API_KEY`、`LLM_<ROLE>_BASE_URL`、`LLM_<ROLE>_MODEL` 覆盖默认值。
 
+硅基流动 `zai-org/GLM-5.3-Flash` 使用 `DEFAULT_BASE_URL=https://api.siliconflow.cn/v1`、`DEFAULT_MODEL=zai-org/GLM-5.3-Flash` 和硅基流动账户的 `DEFAULT_API_KEY`。接口继续使用 JSON 对象模式；不要照搬智谱直连接口的思考参数。切换时同时检查默认配置与角色覆盖项，并在重启后测试有效配置。官方接口核对及验收边界见 [硅基流动接入核对](docs/硅基流动GLM-5.3-Flash接入核对.md)。
+
 同一服务地址和 API Key 的模型请求默认最多同时进行 2 个，可用 `YUQING_LLM_MAX_INFLIGHT` 在 1–16 之间调整。上游返回 429 时，事件记录会区分明确提示的账户额度、并发、请求速率或“原因未指明”，并在可恢复时按 `Retry-After` 退避。Agent 在规划、陈述生成或反思阶段持续受限时，会保留已入库材料与陈述并说明缺口；本地并发限制不能代替服务商账户额度，具体账单和历史请求原因应核对服务商调用日志。
 
 设置页写入本地 SQLite，优先级高于 `.env`，再回退到代码默认值，不会反写 `.env`；API 返回密钥时只提供脱敏值。搜索顺序固定为中文 `LangSearch → Exa → 千帆 → 博查`、英文 `Exa → Tavily → Serper`，旧版保存的自定义顺序会被忽略。千帆每次任务最多 20 次、博查最多 10 次，避免一次调查耗尽有限免费池。搜索 Provider 返回的全文不自动等于本地直接快照；缺少合格全文时先走内置直抓，只有高等级、已入选的关键证据页才可回退 Firecrawl Cloud，每个任务最多 5 页。完整变量、搜索服务和数据源说明见 [搜索与数据源配置指南](docs/方案包/04-搜索与数据源配置指南.md)。
@@ -174,6 +176,8 @@ cd backend
 ```
 
 LLM 探针必须得到 `reply=OK`；只有 HTTP 请求成功并不代表模型语义可用。主题探针读取当前本地 Provider 配置，只输出候选、来源覆盖与逐次检索诊断，不创建任务或报告。
+
+LLM 探针也按 SQLite 设置 > `.env` > 默认值读取有效配置。默认数据目录与后端一致，另一个部署目录可通过 `--data-dir` 指定，例如 `python -m yuqing.scripts.llm_ping analyst_a --data-dir D:\suheng\backend\data`。该命令会实际调用模型并可能计费，不创建调查任务。
 
 ## 可选数据能力
 
