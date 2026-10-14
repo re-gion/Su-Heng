@@ -15,6 +15,7 @@ from yuqing.core.verification_presentation import (
     presentation_status,
 )
 from yuqing.render.brand import FAVICON_DATA_URI, LOGO_DATA_URI
+from yuqing.render.navigation import NAVIGATION_CSS, NAVIGATION_SCRIPT
 
 BADGE_LABELS = LABELS
 
@@ -1210,8 +1211,14 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
         )
         current = ' aria-current="location"' if section == first_section else ""
         toc_items.append(
-            f'<li><a href="#{section_id}" data-section-target="{section_id}"{current}>'
-            f"<span>{_escape(section)}</span>{_escape(SECTION_LABELS.get(section, '附加章节'))}</a></li>"
+            f'<li class="toc-chapter{" is-hidden" if section_hidden else ""}" data-toc-section="{section_id}">'
+            f'<div class="toc-row"><a href="#{section_id}" data-section-target="{section_id}"{current}>'
+            f"<span>{_escape(section)}</span>{_escape(SECTION_LABELS.get(section, '附加章节'))}</a>"
+            f'<button class="toc-expand" type="button" data-nav-toggle="{section_id}" '
+            f'data-chapter-label="{_escape(SECTION_LABELS.get(section, "附加章节"))}" '
+            f'aria-label="展开{_escape(SECTION_LABELS.get(section, "附加章节"))}的小节" '
+            f'aria-expanded="false" aria-controls="{section_id}-toc-children" hidden></button></div>'
+            f'<ol class="toc-children" id="{section_id}-toc-children" hidden></ol></li>'
         )
 
     title = _escape(
@@ -1236,7 +1243,7 @@ h1{font-size:clamp(30px,4vw,46px)!important;max-width:1080px!important;text-wrap
     initial_view = "brief" if view == "brief" else "full"
     script = f"""
 const initialView={initial_view!r};
-if(window.matchMedia('(max-width:900px)').matches)document.querySelector('.report-toc details')?.removeAttribute('open');
+let updateNavigation=()=>{{}};
 document.querySelector('.back-to-top')?.addEventListener('click',()=>window.scrollTo({{top:0,behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'}}));
 const applyView=viewName=>{{
   document.querySelectorAll('.report-block').forEach(block=>block.classList.toggle('is-hidden',viewName==='brief'&&block.dataset.inBrief!=='true'));
@@ -1248,6 +1255,7 @@ const applyView=viewName=>{{
   document.querySelectorAll('[data-view]').forEach(button=>{{
     const active=button.dataset.view===viewName;button.classList.toggle('is-active',active);button.setAttribute('aria-pressed',String(active));
   }});
+  updateNavigation();
 }};
 document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>applyView(button.dataset.view)));
 document.querySelectorAll('[data-evidence-action]').forEach(button=>button.addEventListener('click',()=>{{
@@ -1269,31 +1277,25 @@ const revealTarget=hash=>{{
   let ancestor=target.parentElement;
   while(ancestor){{if(ancestor.tagName==='DETAILS')ancestor.open=true;ancestor=ancestor.parentElement}}
   document.querySelectorAll('.highlight').forEach(item=>item.classList.remove('highlight'));
-  if(!target.classList.contains('report-section'))target.classList.add('highlight');
-  requestAnimationFrame(()=>target.scrollIntoView({{block:'start'}}));
+  if(!target.classList.contains('report-section')&&!target.classList.contains('report-subheading'))target.classList.add('highlight');
+  requestAnimationFrame(()=>{{target.scrollIntoView({{block:'start'}});updateNavigation();}});
 }};
 document.querySelectorAll('.citation,.claim-link').forEach(link=>link.addEventListener('click',event=>{{
   event.preventDefault();history.pushState(null,'',link.getAttribute('href'));revealTarget(location.hash);
 }}));
 window.addEventListener('hashchange',()=>revealTarget(location.hash));
-const tocLinks=[...document.querySelectorAll('.report-toc a[data-section-target]')];
-const reportSections=[...document.querySelectorAll('.report-section')];
-const activate=id=>{{
-  tocLinks.forEach(link=>{{if(link.dataset.sectionTarget===id)link.setAttribute('aria-current','location');else link.removeAttribute('aria-current')}});
-  reportSections.forEach(section=>section.classList.toggle('is-current',section.id===id&&!section.classList.contains('is-hidden')));
-}};
-tocLinks.forEach(link=>link.addEventListener('click',()=>activate(link.dataset.sectionTarget)));
-const observer=new IntersectionObserver(entries=>entries.filter(entry=>entry.isIntersecting).forEach(entry=>activate(entry.target.id)),{{rootMargin:'-15% 0px -70% 0px',threshold:0}});
-reportSections.forEach(section=>observer.observe(section));
-applyView(initialView);
-if(location.hash)revealTarget(location.hash);
 """
+    script += (
+        NAVIGATION_SCRIPT
+        + "\napplyView(initialView);\nif(location.hash)revealTarget(location.hash);"
+    )
     report_id = _escape(report.get("report_id") or "")
     task_id = quote(str(report.get("task", {}).get("task_id") or ""), safe="")
     console_href = f"/?task={task_id}" if task_id else "/"
     tools = (
         '<nav class="report-tools" aria-label="报告工具">'
         f'<a class="console-link" href="{console_href}">← 返回调查台</a>'
+        '<button class="toc-button" type="button" aria-controls="report-toc" aria-expanded="true">收起目录</button>'
         f'<button data-view="brief" aria-pressed="{str(initial_view == "brief").lower()}">速览</button>'
         f'<button data-view="full" aria-pressed="{str(initial_view == "full").lower()}">完整</button>'
         '<button data-badge-filter="all" aria-pressed="true">全部徽章</button>'
@@ -1304,8 +1306,11 @@ if(location.hash)revealTarget(location.hash);
         f'<a href="/api/reports/{report_id}/evidence-package">证据包 ZIP</a></nav>'
     )
     toc = (
-        '<aside class="report-toc"><details open><summary>报告目录</summary>'
-        f"<ol>{''.join(toc_items)}</ol></details></aside>"
+        '<aside class="report-toc" id="report-toc" aria-label="报告目录">'
+        '<div class="toc-head"><h2>报告目录</h2>'
+        '<button class="toc-close" type="button" aria-label="关闭目录">×</button></div>'
+        f'<nav class="toc-scroll" aria-label="报告章节"><ol>{"".join(toc_items)}</ol></nav></aside>'
+        '<button class="toc-backdrop" type="button" aria-label="关闭目录" tabindex="-1"></button>'
     )
     quality = report.get("quality", {})
     missing_labels = {
@@ -1427,17 +1432,18 @@ if(location.hash)revealTarget(location.hash);
     @page{size:A4;margin:18mm 14mm}
     @media print{body>header,.report-quality,.report-shell,main{width:100%;max-width:none;margin-left:0;margin-right:0}body>header{padding:12px 0 20px}.report-quality{break-inside:avoid;background:#fff}.back-to-top{display:none!important}}
     """
+    css += NAVIGATION_CSS
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width">'
         f'<link rel="icon" type="image/svg+xml" href="{FAVICON_DATA_URI}">'
         f"<title>溯衡 · {title}</title><style>{css}</style></head><body>{tools}"
-        f'<header><div class="report-brand"><img src="{LOGO_DATA_URI}" '
+        f'<div class="report-workspace">{toc}<div class="report-document"><header><div class="report-brand"><img src="{LOGO_DATA_URI}" '
         'alt="溯衡" width="172" height="80"><span>舆情调查与研判</span></div>'
         f"<h1>{title}</h1>"
         f"<p>{_escape(header.get('subtitle'))}</p></header>"
         f"{quality_html}"
-        f'<div class="report-shell">{toc}<main id="report-main">{"".join(sections)}</main></div>'
+        f'<div class="report-shell"><main id="report-main">{"".join(sections)}</main></div></div></div>'
         '<button class="back-to-top" type="button" aria-label="返回顶部"><span aria-hidden="true">↑</span>返回顶部</button>'
         f"<script>{script}</script></body></html>"
     )

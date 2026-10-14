@@ -395,7 +395,8 @@ async def test_full_report_has_ten_sections_real_charts_and_offline_interactions
     assert 'aria-current="location"' in html
     assert ":hover" in html
     assert ":focus-visible" in html
-    assert "IntersectionObserver" in html
+    assert 'aria-controls="report-toc"' in html
+    assert 'id="report-section-03-toc-children"' in html
     assert "搜索摘要（非原文）" in html
     assert '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,' in html
     assert "https://cdn." not in html

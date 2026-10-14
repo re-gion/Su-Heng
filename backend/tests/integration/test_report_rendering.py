@@ -114,13 +114,11 @@ def test_reference_fixture_passes_contract_and_renders_clickable_citations():
     assert 'class="console-link"' in html
     assert 'href="/?task=' in html
     assert "--report-width:1120px" in html
-    assert "grid-template-columns:minmax(0,1fr) minmax(0,var(--report-width))" in html
-    assert "main{grid-column:2;grid-row:1" in html
+    assert 'class="report-document"' in html
+    assert 'aria-controls="report-toc"' in html
+    assert 'id="report-section-03-toc-children"' in html
     assert "font-size:clamp(22px,2.2vw,30px)" in html
     assert "prefers-reduced-motion" in html
-    assert "matchMedia('(max-width:900px)')" in html
-    assert "link.addEventListener('click',()=>activate(link.dataset.sectionTarget))" in html
-    assert "threshold:0" in html
     assert 'class="back-to-top" type="button" aria-label="返回顶部"' in html
     assert "window.scrollTo({top:0,behavior:" in html
     assert ".back-to-top{display:none!important}" in html
