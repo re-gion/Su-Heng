@@ -1,7 +1,7 @@
 services:
   app:
-    build: .
-    image: opc-agent-app:production
+    image: ${YUQING_APP_IMAGE:-opc-agent-app:production}
+    pull_policy: missing
     restart: unless-stopped
     env_file: .env.production
     environment:
