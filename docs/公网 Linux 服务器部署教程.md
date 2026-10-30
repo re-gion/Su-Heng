@@ -41,7 +41,7 @@
 docker build -t opc-agent-app:production .
 docker pull caddy:2.10-alpine
 docker image inspect opc-agent-app:production --format '{{.Os}}/{{.Architecture}}'
-$archive = Join-Path $env:TEMP 'opc-agent-app.tar'
+$archive = Join-Path $env:TEMP 'opc-agent-deploy-images.tar'
 docker image save --output $archive opc-agent-app:production caddy:2.10-alpine
 Get-Item $archive | Select-Object FullName, Length
 ```
@@ -57,13 +57,13 @@ $remoteDir = '/home/ubuntu/opc-agent'
 ssh -i $key $server "mkdir -p $remoteDir/deploy"
 scp -i $key .\compose.production.yml .\.env.production.example "${server}:$remoteDir/"
 scp -i $key .\deploy\Caddyfile.production "${server}:$remoteDir/deploy/"
-scp -i $key $archive "${server}:/tmp/opc-agent-app.tar"
+scp -i $key $archive "${server}:/tmp/opc-agent-deploy-images.tar"
 ```
 
 服务器收到归档后，SSH 登录并运行：
 
 ```bash
-sudo docker load -i /tmp/opc-agent-app.tar
+sudo docker load -i /tmp/opc-agent-deploy-images.tar
 cd ~/opc-agent
 cp .env.production.example .env.production
 chmod 600 .env.production
