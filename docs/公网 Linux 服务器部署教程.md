@@ -1,6 +1,6 @@
 # 公网 Linux 服务器部署教程
 
-本文给出单台 Linux 服务器运行舆情 Agent 的 Compose 部署步骤，使用本地构建的应用镜像，不要求把整个代码仓库放到服务器。它适合作为首版测试环境，不是高可用方案，也不代表公网开放前的全部产品与合规准备已完成。
+本文给出单台 Linux 服务器运行舆情 Agent 的 Compose 部署步骤，不要求把整个代码仓库放到服务器。日常生产发布更适合“构建带版本号的镜像并推送到镜像仓库，服务器拉取后启动”；第一次练习或偶尔更新也可以用 `docker save` + SCP + `docker load`，不必先开镜像仓库。把源码传到服务器再构建也能运行，但会让服务器依赖 Node、Python、apt 等构建环境和下载网络，不作为本教程的默认发布方式。本教程先演示免仓库的镜像归档方式，再列出镜像仓库步骤。它适合作为首版测试环境，不是高可用方案，也不代表公网开放前的全部产品与合规准备已完成。
 
 ## 先确认公开上线条件
 
@@ -35,19 +35,18 @@
 
 “登录方式”控制的是你如何远程登录这台 Linux 服务器，不是网站用户怎么登录舆情 Agent。**自动生成密码**由腾讯云生成并通过站内信发送；**自定义密码**由你设置；**SSH 密钥登录**把公钥配置到服务器，私钥留在自己的电脑上，建议优先选它；**扫码登录**用微信扫码进入服务器，适合临时手动登录。控制台里的“登录”按钮则是腾讯云网页终端入口。Ubuntu 默认用户名通常为 `ubuntu`，而且默认不允许用 root 密码直接 SSH 登录；需要管理员操作时用 `sudo`。登录方式说明见[腾讯云快速创建 Linux 实例](https://cloud.tencent.com/document/product/1207/44548)。
 
-先在本机 Windows 工作区构建新镜像。确保代码已更新到准备部署的版本后运行：
+先在本机 Windows 工作区构建新镜像。确保代码已更新到准备部署的版本后，在项目根目录运行：
 
 ```powershell
-docker compose -f compose.demo.yml build app
+docker build -t opc-agent-app:production .
 docker pull caddy:2.10-alpine
-docker image inspect opc-agent-app:latest --format '{{.Os}}/{{.Architecture}}'
-docker tag opc-agent-app:latest opc-agent-app:production
+docker image inspect opc-agent-app:production --format '{{.Os}}/{{.Architecture}}'
 $archive = Join-Path $env:TEMP 'opc-agent-app.tar'
 docker image save --output $archive opc-agent-app:production caddy:2.10-alpine
 Get-Item $archive | Select-Object FullName, Length
 ```
 
-检查平台与服务器架构匹配：`linux/amd64` 对应 Linux 的 `x86_64`；若购买的是 ARM 服务器，需要重新按 `linux/arm64` 构建。归档内有两个镜像：包含后端、前端和运行依赖的 app，以及负责 HTTPS 和反向代理的 Caddy。数据库、报告、证据快照、密钥不在镜像内。
+`docker build` 读取项目根目录的 `Dockerfile`，构建 app 镜像；它不会启动容器，也不会运行 demo 配置。这里直接使用 Dockerfile，是因为生产 Compose 负责“运行什么镜像、怎么连服务、把数据存哪里”，而本机这一步负责“把代码构建成镜像”。检查平台与服务器架构匹配：`linux/amd64` 对应 Linux 的 `x86_64`；若购买的是 ARM 服务器，需要按 `linux/arm64` 构建。归档是一个 tar 文件，里面包含两个各自独立的镜像（app 和 Caddy），**不是把它们合并成一个镜像**。数据库、报告、证据快照、密钥不在镜像内。
 
 首次部署还要把 Compose 文件和 Caddy 配置放到服务器。先登录服务器建立目录，再回到本机 PowerShell 传文件。以下用 Ubuntu 默认用户 `ubuntu` 举例，把 IP、密钥路径换成自己的：
 
@@ -75,7 +74,7 @@ nano .env.production
 
 以上是“镜像归档 + SCP”方式：不需要镜像仓库，适合先部署或偶尔更新。`docker image save` 将镜像写入 tar 文件，服务器用 `docker load` 载回本机镜像列表；SCP 通过 SSH 加密传输。归档保存在本机临时目录，部署完成后可按需自行删除。
 
-如果希望以后从服务器直接拉取新版本，可以改用 Docker Hub 或腾讯云 TCR。镜像仓库是可选的，不是必需条件。
+如果希望以后从服务器直接拉取新版本，推荐改用 Docker Hub 或腾讯云 TCR 的镜像仓库。这是把构建与服务器运行分开的常见发布方式，Docker 官方也以“构建、打标签、推送到仓库”作为共享镜像的发布流程。镜像仓库不是 Compose 运行所必需的，它只负责分发镜像；使用 tar/SCP 时可以不配置它。
 
 如果选择 Docker Hub，先在本机登录并推送一个固定版本标签：
 
@@ -85,7 +84,7 @@ docker tag opc-agent-app:production YOUR_DOCKERHUB_NAME/yuqing-agent:0.3.0
 docker push YOUR_DOCKERHUB_NAME/yuqing-agent:0.3.0
 ```
 
-然后在服务器登录镜像仓库（私有仓库需要登录），并在 `.env.production` 中将 `YUQING_APP_IMAGE` 改为相同地址，再执行：
+然后在服务器登录镜像仓库（私有仓库需要登录），并在 `.env.production` 中将 `YUQING_APP_IMAGE` 改为相同地址。版本标签建议每次发布都换一个，不要反复覆盖同一个版本号。服务器拉取 app 镜像后，Compose 启动时还会按需拉取 `caddy:2.10-alpine`：
 
 ```bash
 sudo docker login
