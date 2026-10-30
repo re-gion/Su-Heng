@@ -2,8 +2,46 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA busy_timeout=5000;
 
+CREATE TABLE IF NOT EXISTS user_account (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_challenge (
+  email TEXT PRIMARY KEY COLLATE NOCASE,
+  code_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_rate_limit (
+  key_hash TEXT PRIMARY KEY,
+  window_started_at TEXT NOT NULL,
+  request_count INTEGER NOT NULL DEFAULT 0,
+  last_requested_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_session (
+  token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES user_account(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_auth_session_user ON auth_session(user_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS account_task_quota (
+  user_id TEXT NOT NULL REFERENCES user_account(id) ON DELETE CASCADE,
+  period_key TEXT NOT NULL,
+  used INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(user_id, period_key)
+);
+
 CREATE TABLE IF NOT EXISTS task (
   id TEXT PRIMARY KEY,
+  owner_user_id TEXT REFERENCES user_account(id) ON DELETE CASCADE,
   event_query TEXT NOT NULL,
   resolved_event_query TEXT,
   request_kind TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery')),

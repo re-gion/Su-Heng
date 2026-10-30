@@ -53,6 +53,7 @@ class TimeRange(BaseModel):
 
 class TaskRecord(BaseModel):
     id: str
+    owner_user_id: str | None = None
     event_query: str
     resolved_event_query: str | None = None
     request_kind: RequestKind = "event"

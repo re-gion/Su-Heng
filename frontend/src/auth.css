@@ -1,0 +1,18 @@
+.auth-shell{min-height:100vh;display:grid;place-items:center;padding:28px;background:linear-gradient(145deg,#edf3ef,#dce8e5 52%,#e7ecee)}
+.auth-card{width:min(100%,460px);padding:clamp(24px,6vw,42px);background:#fff;border:1px solid #bdcbc7;box-shadow:10px 10px 0 #c2d2cd}
+.auth-card>img{display:block;margin-bottom:26px}
+.auth-card>.section-kicker{color:#337c72;font:700 11px/1.4 Consolas,monospace;letter-spacing:.12em}
+.auth-card h1{margin:7px 0 8px;font:700 clamp(26px,6vw,34px)/1.2 Bahnschrift,"Microsoft YaHei UI",sans-serif;color:#183137}
+.auth-card>p{color:#526970;line-height:1.65}
+.auth-card form{display:grid;gap:16px;margin-top:24px}
+.auth-card label{display:grid;gap:7px;color:#314d53;font-weight:650;font-size:13px}
+.auth-card input{width:100%;min-width:0;padding:12px 13px;border:1px solid #aabbb7;background:#fbfdfc;font:inherit;color:#1c353a}
+.auth-card input:focus{outline:2px solid #438d82;outline-offset:1px}
+.auth-code-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:10px}
+.auth-card button{min-height:43px;padding:10px 14px;border:1px solid #346e68;background:#e7f1ed;color:#214c49;font:inherit;font-weight:700;font-size:13px;cursor:pointer}
+.auth-card .auth-send{white-space:nowrap}
+.auth-card .auth-submit{background:#215f5a;color:white}
+.auth-card button:disabled{opacity:.5;cursor:not-allowed}
+.auth-card .auth-notice{margin:16px 0 0;color:#176755;font-size:13px}
+.auth-card .auth-error{margin:16px 0 0;color:#a13126;font-size:13px}
+@media(max-width:420px){.auth-code-row{grid-template-columns:1fr}.auth-card .auth-send{width:100%}}

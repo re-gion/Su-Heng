@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # 运行时数据（架构 §6/§9：数据库、快照、报告、数据集不入库）
 data/

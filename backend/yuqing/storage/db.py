@@ -24,6 +24,16 @@ from yuqing.storage.models import (
 T = TypeVar("T")
 
 
+class AccountTaskLimitExceeded(ValueError):
+    def __init__(self, limit: str):
+        super().__init__(limit)
+        self.limit = limit
+
+
+class AccountDeletionBlocked(ValueError):
+    pass
+
+
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -79,6 +89,7 @@ class Database:
         connection.executescript(schema)
         task_columns = {row[1] for row in connection.execute("PRAGMA table_info(task)").fetchall()}
         task_migrations = {
+            "owner_user_id": "TEXT REFERENCES user_account(id) ON DELETE CASCADE",
             "resolved_event_query": "TEXT",
             "request_kind": "TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery'))",
             "investigation_scope": "TEXT NOT NULL DEFAULT 'general' CHECK (investigation_scope IN ('general','institution','public_event'))",
@@ -136,6 +147,9 @@ class Database:
             connection.execute(
                 "ALTER TABLE claim ADD COLUMN analysis_data TEXT NOT NULL DEFAULT '{}'"
             )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_task_owner_created ON task(owner_user_id,created_at DESC)"
+        )
         connection.execute("DROP INDEX IF EXISTS ux_evidence_task_url")
         connection.execute(
             "CREATE UNIQUE INDEX ux_evidence_task_url ON evidence(task_id,url_hash,kind)"
@@ -206,32 +220,68 @@ class Database:
         rows = await self.fetch_all(sql, params)
         return rows[0] if rows else None
 
-    async def create_task(self, data: TaskCreate) -> TaskRecord:
+    async def create_task(
+        self,
+        data: TaskCreate,
+        *,
+        owner_user_id: str | None = None,
+        daily_limit: int | None = None,
+        concurrency_limit: int | None = None,
+        quota_period: str | None = None,
+    ) -> TaskRecord:
         stamp = now_iso()
         task_id = f"t_{datetime.now():%Y%m%d}_{uuid.uuid4().hex[:8]}"
-        await self.execute_write(
-            """INSERT INTO task(
-                 id,event_query,resolved_event_query,request_kind,user_note,investigation_scope,time_range_from,time_range_to,depth,source_scope,
-                 source_languages,comment_mode,comment_urls,status,created_at,updated_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
-            (
-                task_id,
-                data.event_query,
-                None,
-                data.request_kind,
-                data.user_note,
-                data.investigation_scope,
-                data.time_range_from,
-                data.time_range_to,
-                data.depth,
-                data.source_scope,
-                json.dumps(data.source_languages, ensure_ascii=False),
-                data.comment_mode,
-                json.dumps([str(item) for item in data.comment_urls], ensure_ascii=False),
-                stamp,
-                stamp,
-            ),
-        )
+
+        def operation(connection: sqlite3.Connection) -> None:
+            if owner_user_id is not None:
+                if concurrency_limit is not None:
+                    running = connection.execute(
+                        """SELECT COUNT(*) FROM task WHERE owner_user_id=?
+                           AND status IN ('queued','running','pausing','stopping')""",
+                        (owner_user_id,),
+                    ).fetchone()[0]
+                    if int(running) >= concurrency_limit:
+                        raise AccountTaskLimitExceeded("concurrency")
+                if daily_limit is not None and quota_period is not None:
+                    used = connection.execute(
+                        "SELECT used FROM account_task_quota WHERE user_id=? AND period_key=?",
+                        (owner_user_id, quota_period),
+                    ).fetchone()
+                    if used and int(used[0]) >= daily_limit:
+                        raise AccountTaskLimitExceeded("daily")
+            connection.execute(
+                """INSERT INTO task(
+                     id,owner_user_id,event_query,resolved_event_query,request_kind,user_note,
+                     investigation_scope,time_range_from,time_range_to,depth,source_scope,
+                     source_languages,comment_mode,comment_urls,status,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+                (
+                    task_id,
+                    owner_user_id,
+                    data.event_query,
+                    None,
+                    data.request_kind,
+                    data.user_note,
+                    data.investigation_scope,
+                    data.time_range_from,
+                    data.time_range_to,
+                    data.depth,
+                    data.source_scope,
+                    json.dumps(data.source_languages, ensure_ascii=False),
+                    data.comment_mode,
+                    json.dumps([str(item) for item in data.comment_urls], ensure_ascii=False),
+                    stamp,
+                    stamp,
+                ),
+            )
+            if owner_user_id is not None and daily_limit is not None and quota_period is not None:
+                connection.execute(
+                    """INSERT INTO account_task_quota(user_id,period_key,used) VALUES(?,?,1)
+                       ON CONFLICT(user_id,period_key) DO UPDATE SET used=used+1""",
+                    (owner_user_id, quota_period),
+                )
+
+        await self.write(operation)
         record = await self.get_task(task_id)
         assert record is not None
         return record
@@ -261,11 +311,48 @@ class Database:
             (date_from, date_to, now_iso(), task_id),
         )
 
-    async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
-        rows = await self.fetch_all(
-            "SELECT * FROM task ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
-        )
+    async def list_tasks(
+        self, limit: int = 20, *, owner_user_id: str | None = None
+    ) -> list[TaskRecord]:
+        if owner_user_id is None:
+            rows = await self.fetch_all(
+                "SELECT * FROM task ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+            )
+        else:
+            rows = await self.fetch_all(
+                """SELECT * FROM task WHERE owner_user_id=?
+                   ORDER BY created_at DESC,id DESC LIMIT ?""",
+                (owner_user_id, limit),
+            )
         return [self._task_record(row) for row in rows]
+
+    async def task_owned_by(self, task_id: str, owner_user_id: str) -> bool:
+        return (
+            await self.fetch_one(
+                "SELECT 1 FROM task WHERE id=? AND owner_user_id=?", (task_id, owner_user_id)
+            )
+            is not None
+        )
+
+    async def report_owned_by(self, report_id: str, owner_user_id: str) -> bool:
+        return (
+            await self.fetch_one(
+                """SELECT 1 FROM report r JOIN task t ON t.id=r.task_id
+               WHERE r.id=? AND t.owner_user_id=?""",
+                (report_id, owner_user_id),
+            )
+            is not None
+        )
+
+    async def evidence_owned_by(self, evidence_pk: str, owner_user_id: str) -> bool:
+        return (
+            await self.fetch_one(
+                """SELECT 1 FROM evidence e JOIN task t ON t.id=e.task_id
+               WHERE e.pk=? AND t.owner_user_id=?""",
+                (evidence_pk, owner_user_id),
+            )
+            is not None
+        )
 
     async def set_task_status(self, task_id: str, status: str, phase: str | None = None) -> None:
         if phase is None:
@@ -384,6 +471,53 @@ class Database:
                 raise ValueError("task not found")
             counts["files"] = files
             return counts
+
+        return await self.write(operation)
+
+    async def delete_account(self, user_id: str, *, email_rate_limit_key: str) -> dict[str, Any]:
+        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            account = connection.execute(
+                "SELECT email FROM user_account WHERE id=?", (user_id,)
+            ).fetchone()
+            if account is None:
+                raise ValueError("account not found")
+            running = connection.execute(
+                """SELECT COUNT(*) FROM task WHERE owner_user_id=?
+                   AND status IN ('queued','running','pausing','stopping')""",
+                (user_id,),
+            ).fetchone()[0]
+            if int(running):
+                raise AccountDeletionBlocked("active tasks must finish or stop first")
+            task_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM task WHERE owner_user_id=?", (user_id,)
+                ).fetchone()[0]
+            )
+            files = [
+                row[0]
+                for row in connection.execute(
+                    """SELECT e.snapshot_path FROM evidence e JOIN task t ON t.id=e.task_id
+                       WHERE t.owner_user_id=? AND e.snapshot_path IS NOT NULL""",
+                    (user_id,),
+                ).fetchall()
+            ]
+            for column in ("html_path", "pdf_path"):
+                files.extend(
+                    row[0]
+                    for row in connection.execute(
+                        f"""SELECT r.{column} FROM report r JOIN task t ON t.id=r.task_id
+                            WHERE t.owner_user_id=? AND r.{column} IS NOT NULL""",
+                        (user_id,),
+                    ).fetchall()
+                )
+            connection.execute("DELETE FROM auth_challenge WHERE email=?", (account["email"],))
+            connection.execute(
+                "DELETE FROM auth_rate_limit WHERE key_hash=?", (email_rate_limit_key,)
+            )
+            deleted = connection.execute("DELETE FROM user_account WHERE id=?", (user_id,)).rowcount
+            if deleted != 1:
+                raise ValueError("account not found")
+            return {"tasks": task_count, "files": list(dict.fromkeys(files))}
 
         return await self.write(operation)
 

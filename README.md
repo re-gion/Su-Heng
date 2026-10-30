@@ -100,6 +100,10 @@ docker compose -f compose.demo.yml up --build -d
 docker compose -f compose.demo.yml down
 ```
 
+### Linux 服务器受控测试部署
+
+仓库包含单机 Compose + Caddy 的 HTTPS 配置草案，账号使用邮箱验证码，应用端口不直接发布到公网。开始前阅读[公网 Linux 服务器部署教程](docs/公网%20Linux%20服务器部署教程.md)。系统支持用户自助删除账号和所属任务数据；面向公众的隐私说明、服务条款页面及必要业务信息仍待补齐。完成这些准备和实际服务器验收前，这套配置只适合受控测试，不应开放公众注册。
+
 ### 本地运行（Windows PowerShell）
 
 本地模式支持设置页配置、任务历史和实验性评论插件：

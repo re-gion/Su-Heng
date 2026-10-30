@@ -32,12 +32,15 @@ import {
 import { useTaskStream } from './events/useTaskStream'
 import { TaskProgress } from './events/TaskProgress'
 import { CommentQuickRead } from './CommentQuickRead'
+import type { AuthView } from './AuthGate'
 import type { ForumItem } from './events/state'
 import './styles.css'
 import './form.css'
 import './suheng.css'
 import brandLockup from './assets/brand/suheng-lockup.svg'
 import brandSymbol from './assets/brand/suheng-symbol.svg'
+
+const localAuth: AuthView = { enabled: false, user: null, signOut: async () => undefined, deleteAccount: async () => undefined }
 
 const roleLabels: Record<string, string> = { analyst_a: '事实调查', analyst_b: '媒体传播', analyst_c: '历史洞察', moderator: '协作主持', verifier: '证据核验', reporter: '报告撰写', utility: '通用辅助' }
 const originLabels: Record<string, string> = { inherit: '继承默认配置', config: '配置页', env: '环境变量', default: '系统默认' }
@@ -271,7 +274,7 @@ function TopicSelectionPanel({ data, selectedTopic, manualTopic, onSelect, onMan
   </section>
 }
 
-function App() {
+function App({ auth = localAuth }: { auth?: AuthView }) {
   const initialTask = useMemo(() => new URLSearchParams(location.search).get('task'), [])
   const [taskId, setTaskId] = useState<string | null>(initialTask)
   const [streamRevision, setStreamRevision] = useState(0)
@@ -358,7 +361,7 @@ function App() {
   const qualityRecoveryMessages = stream.forum.filter((item) => item.phase === 'quality_recovery')
 
   return <>
-    <header className="masthead"><div className="brand-line"><a className="brand-home" href="/" aria-label="溯衡首页"><img src={brandLockup} alt="溯衡" width="138" height="64" /></a><span>公开材料 · 证据回查 · 审慎研判</span><button className="text-button" disabled={appCapabilities?.demo_mode} onClick={() => setScreen('settings')}>{appCapabilities?.demo_mode ? '演示站只读' : '系统配置 ↗'}</button></div>
+    <header className="masthead"><div className="brand-line"><a className="brand-home" href="/" aria-label="溯衡首页"><img src={brandLockup} alt="溯衡" width="138" height="64" /></a><span>公开材料 · 证据回查 · 审慎研判</span>{(!auth.enabled || auth.user?.is_admin) && <button className="text-button" disabled={appCapabilities?.demo_mode} onClick={() => setScreen('settings')}>{appCapabilities?.demo_mode ? '演示站只读' : '系统配置 ↗'}</button>}{auth.user && <span className="auth-user-menu"><span title={auth.user.email}>{auth.user.email}</span><button className="text-button" onClick={() => void auth.signOut()}>退出</button><button className="text-button auth-delete-button" onClick={() => { if (window.confirm('删除账号将永久移除该账号的调查任务、报告和本地快照。此操作无法撤销。')) void action(auth.deleteAccount) }}>删除账号与数据</button></span>}</div>
       <div className="hero-copy"><h1>舆情调查与研判</h1><p className="hero-note">从事件事实、媒体报道到评论样本，逐项核对来源，保留判断依据。</p></div>
     </header>
     <main>

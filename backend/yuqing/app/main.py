@@ -6,7 +6,7 @@ import secrets
 import time
 from collections.abc import AsyncIterable, Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol
 
@@ -15,7 +15,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from yuqing.agents.comment_analysis import OpenAICommentAgent
 from yuqing.agents.loader import load_definitions
@@ -41,6 +41,15 @@ from yuqing.render.ir_migrations import (
     CURRENT_SCHEMA_VERSION,
     UnsupportedReportVersion,
     migrate_report,
+)
+from yuqing.services.auth import (
+    SESSION_COOKIE_NAME,
+    AuthSettings,
+    CodeRateLimited,
+    EmailAuthService,
+    InvalidCode,
+    InvalidEmail,
+    MailDeliveryError,
 )
 from yuqing.services.budget import (
     DEFAULT_BUDGET_TABLE,
@@ -83,7 +92,7 @@ from yuqing.services.task_diagnostics import refresh_report_runtime, task_timing
 from yuqing.services.topic_discovery import OpenAITopicQueryPlanner, TopicDiscovery
 from yuqing.services.translation import OpenAITranslator
 from yuqing.services.v1_orchestrator import V1Orchestrator
-from yuqing.storage.db import Database
+from yuqing.storage.db import AccountDeletionBlocked, AccountTaskLimitExceeded, Database
 from yuqing.storage.models import TaskCreate, TaskRecord
 from yuqing.storage.snapshots import SnapshotStore
 
@@ -97,6 +106,16 @@ class Orchestrator(Protocol):
 
 
 OrchestratorFactory = Callable[[Database, EventBus], Orchestrator]
+
+
+class EmailCodeRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class EmailCodeVerification(EmailCodeRequest):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 KNOWN_AGENT_TOOLS = {
     "web_search",
     "fetch_page",
@@ -341,6 +360,8 @@ def create_app(
     policy_checker: PolicyChecker | None = None,
     pdf_exporter: PdfExporter | None = None,
     demo_mode: bool | None = None,
+    auth_required: bool | None = None,
+    auth_mail_sender: Callable[[str, str], None] | None = None,
 ) -> FastAPI:
     data_dir = Path(runtime_dir or os.getenv("YUQING_DATA_DIR", Path.cwd() / "data")).resolve()
     factory = orchestrator_factory or _build_default_orchestrator(data_dir)
@@ -349,8 +370,24 @@ def create_app(
         if demo_mode is not None
         else os.getenv("YUQING_DEMO_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
     )
+    requires_auth = (
+        auth_required
+        if auth_required is not None
+        else os.getenv("YUQING_AUTH_REQUIRED", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if requires_auth and is_demo:
+        raise ValueError("YUQING_AUTH_REQUIRED cannot be combined with YUQING_DEMO_MODE")
+    auth_settings = AuthSettings.from_env() if requires_auth else None
+    if auth_settings is not None:
+        auth_settings.validate()
     demo_daily_limit = max(1, int(os.getenv("YUQING_DEMO_DAILY_LIMIT", "3")))
     demo_concurrency_limit = max(1, int(os.getenv("YUQING_DEMO_CONCURRENCY_LIMIT", "1")))
+    account_daily_limit = max(1, int(os.getenv("YUQING_ACCOUNT_DAILY_TASK_LIMIT", "3")))
+    account_concurrency_limit = max(1, int(os.getenv("YUQING_ACCOUNT_CONCURRENCY_LIMIT", "1")))
+    account_max_depth = os.getenv("YUQING_ACCOUNT_MAX_DEPTH", "standard").strip().lower()
+    if account_max_depth not in {"quick", "standard", "deep"}:
+        raise ValueError("YUQING_ACCOUNT_MAX_DEPTH must be quick, standard, or deep")
     hotlist_urls = [
         item.strip() for item in os.getenv("YUQING_HOTLIST_URLS", "").split(",") if item.strip()
     ]
@@ -390,6 +427,11 @@ def create_app(
         await database.initialize()
         orphaned = await database.mark_orphaned_tasks()
         app.state.database = database
+        app.state.auth_service = (
+            EmailAuthService(database, auth_settings, mail_sender=auth_mail_sender)
+            if auth_settings is not None
+            else None
+        )
         app.state.events = EventBus(database)
         app.state.orphaned = orphaned
         app.state.jobs = set()
@@ -475,7 +517,14 @@ def create_app(
             await close_resources()
         await database.close()
 
-    app = FastAPI(title="舆情专报 Agent", version="0.3.0", lifespan=lifespan)
+    app = FastAPI(
+        title="舆情专报 Agent",
+        version="0.3.0",
+        lifespan=lifespan,
+        docs_url=None if requires_auth else "/docs",
+        redoc_url=None if requires_auth else "/redoc",
+        openapi_url=None if requires_auth else "/openapi.json",
+    )
     demo_cookie_name = "yuqing_demo_session"
 
     def demo_owner_hash(request: Request) -> str | None:
@@ -483,10 +532,48 @@ def create_app(
         return hashlib.sha256(value.encode()).hexdigest() if value else None
 
     @app.middleware("http")
-    async def demo_report_privacy(request: Request, call_next):
+    async def request_access_control(request: Request, call_next):
+        path = request.url.path
+        if requires_auth and path.startswith("/api/"):
+            auth_public_paths = {
+                "/api/auth/request-code",
+                "/api/auth/verify-code",
+                "/api/auth/logout",
+            }
+            is_auth_public = path in auth_public_paths
+            is_health = path == "/api/health"
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                origin = request.headers.get("origin", "").rstrip("/")
+                if origin != auth_settings.public_origin:
+                    return error_response("ORIGIN_REJECTED", "请求来源不匹配。", 403)
+            if not is_auth_public and not is_health:
+                auth_service: EmailAuthService = request.app.state.auth_service
+                auth_user = await auth_service.user_for_token(
+                    request.cookies.get(SESSION_COOKIE_NAME)
+                )
+                if auth_user is None:
+                    return error_response("AUTH_REQUIRED", "请先登录。", 401)
+                request.state.auth_user = auth_user
+                if path.startswith("/api/config") and not auth_user["is_admin"]:
+                    return error_response("ADMIN_REQUIRED", "该操作仅管理员可用。", 403)
+                parts = path.split("/")
+                owner_user_id = str(auth_user["id"])
+                if len(parts) >= 4 and parts[2] == "tasks":
+                    if not await request.app.state.database.task_owned_by(parts[3], owner_user_id):
+                        return error_response("RESOURCE_NOT_FOUND", "资源不存在。", 404)
+                elif len(parts) >= 4 and parts[2] == "reports":
+                    if not await request.app.state.database.report_owned_by(
+                        parts[3], owner_user_id
+                    ):
+                        return error_response("RESOURCE_NOT_FOUND", "资源不存在。", 404)
+                elif len(parts) >= 4 and parts[2] == "evidence":
+                    if not await request.app.state.database.evidence_owned_by(
+                        parts[3], owner_user_id
+                    ):
+                        return error_response("RESOURCE_NOT_FOUND", "资源不存在。", 404)
+
         if not is_demo:
             return await call_next(request)
-        path = request.url.path
         task_id = None
         if path.startswith("/api/tasks/"):
             task_id = path.split("/", 4)[3]
@@ -532,6 +619,148 @@ def create_app(
 
     def services(request: Request) -> tuple[Database, EventBus]:
         return request.app.state.database, request.app.state.events
+
+    allowed_file_roots = ((data_dir / "snapshots").resolve(), (data_dir / "reports").resolve())
+
+    def remove_local_materials(raw_paths: list[str]) -> tuple[int, int]:
+        removed = 0
+        checked = 0
+        for raw_path in set(raw_paths):
+            path = Path(raw_path).resolve()
+            if not any(path == root or root in path.parents for root in allowed_file_roots):
+                continue
+            if not path.is_file():
+                continue
+            checked += 1
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed, checked
+
+    @app.post("/api/auth/request-code")
+    async def request_login_code(payload: EmailCodeRequest, request: Request):
+        if not requires_auth:
+            return error_response("AUTH_DISABLED", "当前实例未启用账号登录。", 404)
+        auth_service: EmailAuthService = request.app.state.auth_service
+        client_ip = request.headers.get("x-real-ip") or (
+            request.client.host if request.client else "unknown"
+        )
+        try:
+            await auth_service.request_code(payload.email, client_ip)
+        except InvalidEmail as exc:
+            return error_response("EMAIL_INVALID", str(exc), 422)
+        except CodeRateLimited as exc:
+            return error_response(
+                "AUTH_RATE_LIMITED",
+                "验证码请求过于频繁，请稍后重试。",
+                429,
+                recoverable=True,
+                details={"retry_after_seconds": exc.retry_after_seconds},
+            )
+        except MailDeliveryError:
+            return error_response(
+                "MAIL_UNAVAILABLE", "验证码邮件暂时发送失败，请稍后重试。", 503, recoverable=True
+            )
+        return {"message": "验证码已发送，请检查邮箱。", "expires_in_seconds": 600}
+
+    @app.post("/api/auth/verify-code")
+    async def verify_login_code(payload: EmailCodeVerification, request: Request):
+        if not requires_auth:
+            return error_response("AUTH_DISABLED", "当前实例未启用账号登录。", 404)
+        auth_service: EmailAuthService = request.app.state.auth_service
+        try:
+            token, user = await auth_service.verify_code(payload.email, payload.code)
+        except InvalidEmail as exc:
+            return error_response("EMAIL_INVALID", str(exc), 422)
+        except InvalidCode as exc:
+            return error_response("CODE_INVALID", str(exc), 401)
+        response = JSONResponse({"user": user})
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            token,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            max_age=auth_service.session_max_age,
+            path="/",
+        )
+        return response
+
+    @app.get("/api/auth/me")
+    async def current_user(request: Request):
+        if not requires_auth:
+            return {"auth_required": False, "user": None}
+        auth_user = getattr(request.state, "auth_user", None)
+        if auth_user is None:
+            return error_response("AUTH_REQUIRED", "请先登录。", 401)
+        return {"auth_required": True, "user": auth_user}
+
+    @app.post("/api/auth/logout")
+    async def logout(request: Request):
+        if requires_auth:
+            auth_service: EmailAuthService = request.app.state.auth_service
+            await auth_service.revoke_token(request.cookies.get(SESSION_COOKIE_NAME))
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(
+            SESSION_COOKIE_NAME, path="/", secure=requires_auth, httponly=True, samesite="strict"
+        )
+        return response
+
+    @app.delete("/api/auth/account")
+    async def delete_own_account(request: Request):
+        if not requires_auth:
+            return error_response("AUTH_DISABLED", "当前实例未启用账号登录。", 404)
+        database, _ = services(request)
+        auth_user = request.state.auth_user
+        if auth_user["is_admin"]:
+            assert auth_settings is not None
+            admin_emails = sorted(auth_settings.admin_emails)
+            placeholders = ",".join("?" for _ in admin_emails)
+            other_admins = await database.fetch_one(
+                f"""SELECT COUNT(*) AS count FROM user_account
+                    WHERE id<>? AND email COLLATE NOCASE IN ({placeholders})""",
+                (str(auth_user["id"]), *admin_emails),
+            )
+            if other_admins is None or int(other_admins["count"]) == 0:
+                return error_response(
+                    "LAST_ADMIN_ACCOUNT",
+                    "这是当前唯一的管理员账号。请先让另一位管理员邮箱完成注册，再删除本账号。",
+                    409,
+                )
+        owned_tasks = await database.fetch_all(
+            "SELECT id FROM task WHERE owner_user_id=?", (str(auth_user["id"]),)
+        )
+        if any(str(row["id"]) in request.app.state.comment_analysis_jobs for row in owned_tasks):
+            return error_response(
+                "ACCOUNT_TASKS_BUSY", "请等待账号下正在进行的评论分析结束后再删除账号。", 409
+            )
+        auth_service: EmailAuthService = request.app.state.auth_service
+        try:
+            deleted = await database.delete_account(
+                str(auth_user["id"]),
+                email_rate_limit_key=auth_service.email_rate_limit_key(str(auth_user["email"])),
+            )
+        except AccountDeletionBlocked:
+            return error_response(
+                "ACCOUNT_TASKS_BUSY", "请先停止或等待账号下的调查任务结束，再删除账号。", 409
+            )
+        except ValueError:
+            return error_response("AUTH_REQUIRED", "登录状态已失效，请重新登录。", 401)
+        removed, checked = await asyncio.to_thread(remove_local_materials, deleted["files"])
+        response = JSONResponse(
+            {
+                "ok": True,
+                "deleted_tasks": deleted["tasks"],
+                "files_removed": removed,
+                "files_pending_cleanup": checked - removed,
+            }
+        )
+        response.delete_cookie(
+            SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="strict"
+        )
+        return response
 
     def local_plugin_request(request: Request) -> bool:
         host = (request.url.hostname or "").lower()
@@ -617,6 +846,8 @@ def create_app(
 
     @app.get("/api/health")
     async def health(request: Request) -> dict[str, Any]:
+        if requires_auth:
+            return {"status": "ok", "version": "0.3.0"}
         database, _ = services(request)
         wal = await database.fetch_one("PRAGMA journal_mode")
         public_config = await ConfigService(database).public()
@@ -804,6 +1035,15 @@ def create_app(
         payload: TaskCreate, request: Request, background: BackgroundTasks
     ) -> Any:
         database, _ = services(request)
+        auth_user = getattr(request.state, "auth_user", None)
+        if requires_auth and auth_user and not auth_user["is_admin"]:
+            depth_rank = {"quick": 1, "standard": 2, "deep": 3}
+            if depth_rank[payload.depth] > depth_rank[account_max_depth]:
+                return error_response(
+                    "ACCOUNT_DEPTH_LIMIT",
+                    f"当前账号最多使用{account_max_depth}模式。",
+                    422,
+                )
         if payload.comment_mode != "off" or payload.comment_urls:
             access_error = comment_plugin_access_error(request)
             if access_error is not None:
@@ -876,7 +1116,32 @@ def create_app(
                 else "event"
             }
         )
-        task = await database.create_task(payload)
+        try:
+            task = await database.create_task(
+                payload,
+                owner_user_id=str(auth_user["id"]) if requires_auth and auth_user else None,
+                daily_limit=account_daily_limit if requires_auth else None,
+                concurrency_limit=account_concurrency_limit if requires_auth else None,
+                quota_period=(
+                    datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+                    if requires_auth
+                    else None
+                ),
+            )
+        except AccountTaskLimitExceeded as exc:
+            if exc.limit == "daily":
+                return error_response(
+                    "ACCOUNT_DAILY_LIMIT",
+                    f"每个账号每天最多创建 {account_daily_limit} 个任务。",
+                    429,
+                    recoverable=True,
+                )
+            return error_response(
+                "ACCOUNT_CONCURRENCY_LIMIT",
+                f"每个账号同时最多运行 {account_concurrency_limit} 个任务。",
+                429,
+                recoverable=True,
+            )
         if is_demo:
             assert demo_session is not None
             await database.bind_demo_owner(
@@ -1271,7 +1536,11 @@ def create_app(
         request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 20
     ) -> dict[str, Any]:
         database, _ = services(request)
-        tasks = await database.list_tasks(limit)
+        auth_user = getattr(request.state, "auth_user", None)
+        tasks = await database.list_tasks(
+            limit,
+            owner_user_id=str(auth_user["id"]) if requires_auth and auth_user else None,
+        )
         if is_demo:
             owner_hash = demo_owner_hash(request)
             tasks = [
@@ -1914,8 +2183,8 @@ def create_app(
             },
         )
 
-    frontend_dist = Path(__file__).parents[3] / "frontend" / "dist"
-    if frontend_dist.is_dir():
+    frontend_dist = _resolve_frontend_dist(Path.cwd(), Path(__file__))
+    if frontend_dist is not None:
         app.frontend("/", directory=frontend_dist)
     else:
 
@@ -1926,6 +2195,14 @@ def create_app(
             )
 
     return app
+
+
+def _resolve_frontend_dist(working_directory: Path, module_file: Path) -> Path | None:
+    candidates = (
+        working_directory / "frontend" / "dist",
+        module_file.parents[3] / "frontend" / "dist",
+    )
+    return next((path for path in candidates if (path / "index.html").is_file()), None)
 
 
 app = create_app()

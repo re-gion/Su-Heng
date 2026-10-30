@@ -8,6 +8,47 @@ export type CreatedTask = {
 
 type ErrorEnvelope = { error?: { code?: string; message?: string; details?: { scope_label?: string; proposed_scope?: string } } }
 
+export type AuthUser = { id: string; email: string; is_admin: boolean }
+export type AuthStatus = { auth_required: boolean; user: AuthUser | null }
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const response = await fetch('/api/auth/me')
+  if (response.status === 401) return { auth_required: true, user: null }
+  if (!response.ok) throw new Error('无法检查登录状态')
+  return response.json() as Promise<AuthStatus>
+}
+
+async function authMutation(path: string, payload?: unknown): Promise<Record<string, unknown>> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: payload === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const envelope = (await response.json()) as ErrorEnvelope
+    throw new Error(envelope.error?.message ?? `操作失败（HTTP ${response.status}）`)
+  }
+  return response.json() as Promise<Record<string, unknown>>
+}
+
+export const requestLoginCode = (email: string) => authMutation('/api/auth/request-code', { email })
+
+export async function verifyLoginCode(email: string, code: string): Promise<AuthUser> {
+  const result = await authMutation('/api/auth/verify-code', { email, code })
+  return result.user as AuthUser
+}
+
+export const logout = () => authMutation('/api/auth/logout')
+
+export async function deleteMyAccount(): Promise<{ deleted_tasks: number; files_pending_cleanup: number }> {
+  const response = await fetch('/api/auth/account', { method: 'DELETE' })
+  if (!response.ok) {
+    const envelope = (await response.json()) as ErrorEnvelope
+    throw new Error(envelope.error?.message ?? `操作失败（HTTP ${response.status}）`)
+  }
+  return response.json() as Promise<{ deleted_tasks: number; files_pending_cleanup: number }>
+}
+
 export class TaskCreationError extends Error {
   constructor(public code: string, message: string, public scopeLabel?: string) {
     super(message)
