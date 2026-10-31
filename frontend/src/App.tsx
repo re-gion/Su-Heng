@@ -37,6 +37,7 @@ import type { ForumItem } from './events/state'
 import './styles.css'
 import './form.css'
 import './suheng.css'
+import './task-list-feedback.css'
 import brandLockup from './assets/brand/suheng-lockup.svg'
 import brandSymbol from './assets/brand/suheng-symbol.svg'
 
@@ -299,10 +300,24 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
   const [formError, setFormError] = useState('')
   const [pendingScope, setPendingScope] = useState<{ key: string; label: string } | null>(null)
   const [tasks, setTasks] = useState<TaskListItem[]>([])
+  const [taskListLoading, setTaskListLoading] = useState(true)
+  const [taskListError, setTaskListError] = useState('')
+  const [taskListRevision, setTaskListRevision] = useState(0)
   const [appCapabilities, setAppCapabilities] = useState<CommentPluginStatus | null>(null)
   const stream = useTaskStream(taskId, streamRevision)
   const draftKey = JSON.stringify([query, note, timeFrom, timeTo, depth, sourceScope, sourceLanguages, commentMode, commentUrls])
-  useEffect(() => { void listTasks().then(setTasks).catch(() => setTasks([])) }, [taskId, stream.status])
+  useEffect(() => {
+    let active = true
+    setTaskListLoading(true)
+    setTaskListError('')
+    void listTasks()
+      .then((value) => { if (active) setTasks(value) })
+      .catch((error: unknown) => {
+        if (active) setTaskListError(error instanceof Error ? error.message : '无法读取任务记录。')
+      })
+      .finally(() => { if (active) setTaskListLoading(false) })
+    return () => { active = false }
+  }, [taskId, stream.status, taskListRevision])
   useEffect(() => { void getCommentPluginStatus().then(setAppCapabilities).catch(() => setAppCapabilities(null)) }, [])
   useEffect(() => {
     if (!taskId) {
@@ -372,7 +387,13 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
       </form>{pendingScope?.key === draftKey && <div className="scope-confirmation" role="alert"><h3>确认调查范围</h3><p>{pendingScope.label}</p><p>确认后，调查、评论和报告都按此范围处理；明确不符合范围的内容会被排除；审查未完成会单独说明。</p><div><button type="button" disabled={submitting} onClick={() => void confirmInstitutionScope()}>按公开事件范围继续</button><button type="button" className="quiet" onClick={() => setPendingScope(null)}>返回修改</button></div></div>}{formError && <p className="error">{formError}</p>}</section>
 
 
-      {tasks.length > 0 && <section className="task-shelf"><span className="section-kicker">历史 / 任务台账</span><div className="task-list">{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.resolved_event_query ?? item.event_query}</strong><small>{taskStatusLabels[item.status] ?? item.status} · {item.task_id}</small></button><div className="task-actions">{item.topic_selection_required && <button onClick={() => selectTask(item.task_id)}>选择事件</button>}{item.comment_selection_required && <button onClick={() => selectTask(item.task_id)}>确认评论</button>}{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); setTasks(await listTasks()) })}>删除</button>}</div></article>)}</div></section>}
+      <section className="task-shelf">
+        <span className="section-kicker">历史 / 任务台账</span>
+        {taskListError && <p className="task-list-feedback" role="alert">任务记录读取失败：{taskListError}<button type="button" className="quiet" onClick={() => setTaskListRevision((value) => value + 1)}>重试</button></p>}
+        {!taskListError && taskListLoading && tasks.length === 0 && <p className="task-list-feedback muted" aria-live="polite">正在读取任务记录…</p>}
+        {!taskListError && !taskListLoading && tasks.length === 0 && <p className="task-list-feedback muted">当前账号暂无调查记录。</p>}
+        {tasks.length > 0 && <div className="task-list">{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.resolved_event_query ?? item.event_query}</strong><small>{taskStatusLabels[item.status] ?? item.status} · {item.task_id}</small></button><div className="task-actions">{item.topic_selection_required && <button onClick={() => selectTask(item.task_id)}>选择事件</button>}{item.comment_selection_required && <button onClick={() => selectTask(item.task_id)}>确认评论</button>}{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); setTasks(await listTasks()) })}>删除</button>}</div></article>)}</div>}
+      </section>
 
       {taskId && <>
         <section className="run-console"><div className="run-status"><span className={`status-dot ${stream.status}`} /><div><span className="section-kicker">02 / {taskStatusLabels[stream.status] ?? stream.status}</span><h2>{phaseLabels[stream.phase] ?? stream.phase}</h2><p className="mono">{taskId} · EVENT {String(stream.lastSeq).padStart(3, '0')}</p></div><div className="run-actions">{stream.status === 'running' && canStopTask && <button onClick={() => void action(() => pauseTask(taskId))}>暂停</button>}{stream.phase === 'comment_collection' && <button onClick={() => void action(() => stopCommentCollection(taskId))}>停止评论采集</button>}{canStopTask && <button onClick={() => void action(async () => { await stopTask(taskId); selectTask(taskId) })}>停止并出报告</button>}{stream.reportUrl && <a className="report-link" href={stream.reportUrl}>查看调查报告 →</a>}</div></div>
