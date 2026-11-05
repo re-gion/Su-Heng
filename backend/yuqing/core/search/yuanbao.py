@@ -32,7 +32,7 @@ class YuanbaoSearchProvider:
     async def search(self, params: SearchParams) -> list[SearchResult]:
         payload: dict[str, object] = {"Query": params.query}
         if self.version != "lite":
-            payload.update(Mode=0, Cnt=min(50, ((params.top_k + 9) // 10) * 10))
+            payload.update(Mode=2, Cnt=min(50, ((params.top_k + 9) // 10) * 10))
         # WSA accepts one inclusive site only. Multiple allowed sites remain a
         # union at the local guard instead of silently searching only its first.
         if len(params.include_domains) == 1:
@@ -74,27 +74,54 @@ class YuanbaoSearchProvider:
             page = json.loads(encoded)
             if not isinstance(page, dict):
                 raise ValueError("元宝搜索网页结构不合格")
-            if page.get("vr"):
-                continue
-            url, title = page.get("url"), page.get("title")
-            snippet = page.get("content") or page.get("passage")
+            # Mixed mode returns web pages and vertical results. A vertical
+            # card may place its source fields under display. Keep only cards
+            # with a traceable HTTP(S) source, and retain their summary identity.
+            display = page.get("display") if page.get("vr") else None
+            display = display if isinstance(display, dict) else {}
+            normalized = {
+                **page,
+                **{
+                    key: display[key]
+                    for key in ("url", "title", "date", "site")
+                    if display.get(key)
+                },
+            }
+            url, title = normalized.get("url"), normalized.get("title")
+            snippet = next(
+                (
+                    value
+                    for value in (
+                        page.get("content"),
+                        page.get("passage"),
+                        display.get("content"),
+                        display.get("passage"),
+                    )
+                    if isinstance(value, str) and value.strip()
+                ),
+                None,
+            )
+            if snippet is None and display:
+                snippet = json.dumps(display, ensure_ascii=False)
             if not all(isinstance(value, str) and value.strip() for value in (url, title, snippet)):
                 continue
             parts = urlsplit(url)
             if parts.scheme not in {"https", "http"} or not parts.hostname or parts.username:
                 continue
             raw = {**page, "date_provenance": "search_provider"}
-            date_value = page.get("date")
-            date_page = page
+            date_value = normalized.get("date")
+            date_page = normalized
             if isinstance(date_value, str) and re.fullmatch(
                 r"\d{4}/\d{2}/\d{2}(?: \d{2}:\d{2}:\d{2})?", date_value
             ):
-                date_page = {**page, "date": date_value.replace("/", "-")}
+                date_page = {**normalized, "date": date_value.replace("/", "-")}
             result = SearchResult(
                 url=url,
                 title=title,
                 snippet=snippet,
-                source_name=page.get("site") if isinstance(page.get("site"), str) else None,
+                source_name=normalized.get("site")
+                if isinstance(normalized.get("site"), str)
+                else None,
                 published_at=_published_at_value(date_page),
                 provider=self.name,
                 lang=params.lang,
