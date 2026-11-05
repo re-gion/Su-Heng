@@ -93,7 +93,8 @@ function forumSummaryItems(value: unknown): ForumSummaryItem[] {
 }
 
 const providerLabels: Record<string, string> = {
-  langsearch: 'LangSearch',
+  langsearch: 'LangSearch', // Historical event replay.
+  yuanbao: '元宝搜索',
   qianfan: '千帆',
   bocha: '博查',
   exa: 'Exa',

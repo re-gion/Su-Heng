@@ -89,6 +89,7 @@ class Database:
         connection.executescript(schema)
         task_columns = {row[1] for row in connection.execute("PRAGMA table_info(task)").fetchall()}
         task_migrations = {
+            "source_scope_resolution": "TEXT",
             "owner_user_id": "TEXT REFERENCES user_account(id) ON DELETE CASCADE",
             "resolved_event_query": "TEXT",
             "request_kind": "TEXT NOT NULL DEFAULT 'event' CHECK (request_kind IN ('event','topic_discovery'))",
@@ -293,9 +294,18 @@ class Database:
     @staticmethod
     def _task_record(row: sqlite3.Row) -> TaskRecord:
         value = dict(row)
+        value["source_scope_resolution"] = json.loads(
+            value.get("source_scope_resolution") or "null"
+        )
         value["source_languages"] = json.loads(value.get("source_languages") or "[]")
         value["comment_urls"] = json.loads(value.get("comment_urls") or "[]")
         return TaskRecord.model_validate(value)
+
+    async def set_source_scope_resolution(self, task_id: str, value: dict) -> None:
+        await self.execute_write(
+            "UPDATE task SET source_scope_resolution=?,updated_at=? WHERE id=?",
+            (json.dumps(value, ensure_ascii=False), now_iso(), task_id),
+        )
 
     async def set_resolved_event_query(self, task_id: str, value: str | None) -> None:
         await self.execute_write(
@@ -1136,6 +1146,9 @@ class Database:
         """Atomically reserve provider quota across daily/monthly/lifetime windows."""
 
         def operation(connection: sqlite3.Connection) -> bool:
+            # SELECT alone does not start a SQLite transaction. Lock before
+            # checking so other processes cannot reserve the same remainder.
+            connection.execute("BEGIN IMMEDIATE")
             for scope, period_key, limit, amount in entries:
                 row = connection.execute(
                     "SELECT used FROM provider_quota WHERE provider=? AND period_key=?",

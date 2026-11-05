@@ -439,6 +439,9 @@ async def test_local_history_and_hotlist_are_bound_into_full_report(
         ]
     )
     task = await database.create_task(TaskCreate(event_query="甲品牌食品召回"))
+    english_only = await history.prepare_task_context(task.id, task.event_query, languages=["en"])
+    assert english_only == ""
+    assert await database.list_evidence(task.id) == []
     prepared = await history.prepare_task_context(task.id, task.event_query)
     local_evidence = (await database.list_evidence(task.id))[0]
     await database.add_claim(

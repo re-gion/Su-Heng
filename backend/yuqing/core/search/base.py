@@ -16,9 +16,6 @@ class SearchParams(BaseModel):
     # the value as the provider's wire format avoids silently changing the
     # requested UTC date in an adapter.
     freshness: str = "noLimit"
-    # Explicit historical dates may be a preferred investigation window rather
-    # than a hard cutoff. Only callers with that contract opt into recovery.
-    allow_freshness_fallback: bool = False
     include_domains: list[str] = Field(default_factory=list)
     exclude_domains: list[str] = Field(default_factory=list)
     lang: str = "zh"
@@ -26,9 +23,6 @@ class SearchParams(BaseModel):
     # Full text is an opt-in at the provider boundary.  It is deliberately
     # represented separately from fetched evidence/snapshots.
     contents_text: bool = True
-    # The free LangSearch tier meters returned text tokens. Investigation uses
-    # snippets there while keeping Exa full text available in the same chain.
-    langsearch_contents_text: bool | None = None
     max_characters: int = Field(default=3000, ge=256, le=20_000)
     priority: Literal["normal", "critical"] = "normal"
 

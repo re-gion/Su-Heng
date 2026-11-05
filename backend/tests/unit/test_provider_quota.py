@@ -37,7 +37,7 @@ class MemoryQuotaDatabase:
 
 
 class StaticProvider:
-    name = "langsearch"
+    name = "yuanbao"
     capabilities = {"freshness"}
     retry_managed = True
 
@@ -140,31 +140,24 @@ async def test_exa_task_guard_does_not_record_cost_for_rejected_search():
 
 
 @pytest.mark.anyio
-async def test_langsearch_records_actual_tokens_without_inventing_public_tpd_limit():
+async def test_yuanbao_monthly_and_task_limits_survive_rebinding():
     database = MemoryQuotaDatabase()
-    provider = QuotaAwareSearchProvider(
-        StaticProvider(),
-        ProviderQuotaManager(database),  # type: ignore[arg-type]
-    )
-
-    results = await provider.search(SearchParams(query="测试"))
-
-    assert results
-    assert (
-        database.used[
-            (
-                "search:langsearch:tokens",
-                next(
-                    key
-                    for scope, key in database.used
-                    if scope == "search:langsearch:tokens" and key.startswith("day:")
-                ),
-            )
-        ]
-        == 100
-    )
-    status = await ProviderQuotaManager(database).public_status()  # type: ignore[arg-type]
-    assert status["langsearch"]["activity"] == {"day_calls": 1, "month_calls": 1}
+    manager = ProviderQuotaManager(database, environ={"YUANBAO_MAX_CALLS_PER_MONTH": "3"})
+    provider = QuotaAwareSearchProvider(StaticProvider(), manager, max_calls_per_task=2)
+    await provider.bind_task("first")
+    await provider.search(SearchParams(query="测试"))
+    restored = QuotaAwareSearchProvider(StaticProvider(), manager, max_calls_per_task=2)
+    await restored.bind_task("first")
+    await restored.search(SearchParams(query="测试"))
+    with pytest.raises(ProviderQuotaExceeded):
+        await restored.search(SearchParams(query="测试"))
+    await provider.bind_task("second")
+    await provider.search(SearchParams(query="测试"))
+    with pytest.raises(ProviderQuotaExceeded):
+        await provider.search(SearchParams(query="测试", priority="critical"))
+    status = (await manager.public_status())["yuanbao"]
+    assert status["windows"][0]["used"] == 3
+    assert status["activity"] == {"day_calls": 3, "month_calls": 3}
 
 
 @pytest.mark.anyio
@@ -279,7 +272,7 @@ async def test_public_status_exposes_local_limits_without_claiming_upstream_quot
     assert status["qianfan"]["windows"][0]["used"] == 40
     assert status["qianfan"]["windows"][0]["normal_limit"] == 40
     assert status["qianfan"]["activity"] == {"day_calls": 40, "month_calls": 40}
-    assert status["langsearch"]["state"] == "metered_without_fixed_limit"
+    assert status["yuanbao"]["windows"][0]["normal_limit"] == 3000
 
 
 @pytest.mark.anyio
@@ -290,3 +283,50 @@ async def test_firecrawl_status_shows_monthly_limit_and_local_daily_usage():
     status = await manager.fetch_status()
     assert status["windows"][0]["used"] == 1
     assert status["activity"] == {"day_calls": 1, "month_calls": 1}
+
+
+@pytest.mark.asyncio
+async def test_independent_database_writers_cannot_overspend_quota_bundle(tmp_path):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from yuqing.storage.db import Database
+
+    path = tmp_path / "shared-quota.db"
+    seed = Database(path)
+    await seed.initialize()
+    await seed.close()
+
+    def worker(_):
+        async def reserve():
+            database = Database(path)
+            await database.initialize()
+            try:
+                return sum(
+                    [
+                        await database.consume_quota_bundle(
+                            [
+                                ("search:yuanbao:calls", "month:2026-11", 7, 1),
+                                ("search:yuanbao:task_calls", "task:shared", 5, 1),
+                            ]
+                        )
+                        for _ in range(6)
+                    ]
+                )
+            finally:
+                await database.close()
+
+        return asyncio.run(reserve())
+
+    def compete():
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            return list(pool.map(worker, range(4)))
+
+    assert sum(await asyncio.to_thread(compete)) == 5
+    check = Database(path)
+    await check.initialize()
+    try:
+        assert await check.provider_usage("search:yuanbao:calls", "month:2026-11") == 5
+        assert await check.provider_usage("search:yuanbao:task_calls", "task:shared") == 5
+    finally:
+        await check.close()

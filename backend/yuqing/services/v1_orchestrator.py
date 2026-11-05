@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -43,8 +44,11 @@ from yuqing.services.institution_scope import (
 )
 from yuqing.services.investigation_scope import (
     InvestigationScope,
+    detect_text_language,
 )
 from yuqing.services.moderation import Moderator, ModeratorReview
+from yuqing.services.search_planning import SearchPlanning
+from yuqing.services.source_scope import SourceScopeResolver
 from yuqing.services.source_tiers import bundled_classifier, registrable_domain
 from yuqing.services.task_diagnostics import refresh_report_runtime, task_timing
 from yuqing.services.topic_discovery import TopicDiscovery, TopicDiscoveryRequest
@@ -87,8 +91,7 @@ def ensure_requested_languages(plan, requested_languages: Sequence[str], event_q
             )
         queries.append(selected)
     queries.extend(item for item in allowed if item not in queries)
-    # 主调查不得把模型额外建议的语种当成用户授权。境外补充由独立阶段显式放行，
-    # 不在这里偷偷扩大检索范围。
+    # 主调查与境外补充都尊重用户明确选择的语言。
     return plan.model_copy(update={"queries": queries[:6]})
 
 
@@ -172,6 +175,7 @@ class V1Orchestrator:
         self.max_inner_rounds = max(1, max_inner_rounds)
         self.budgets = dict(budgets or DEFAULT_BUDGET_TABLE)
         self.usage = usage
+        self.search_planning = SearchPlanning(usage)
         self.models_used = dict(models_used or {})
         self.closeables = tuple(closeables)
         self._limitations: list[str] = []
@@ -468,7 +472,7 @@ class V1Orchestrator:
         scope = InvestigationScope(
             event_query=task.resolved_event_query or task.event_query,
             languages=tuple(task.source_languages),
-            source_scope=task.source_scope,
+            source_scope=task.effective_source_scope,
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
@@ -980,7 +984,7 @@ class V1Orchestrator:
                 topic=task.event_query,
                 manual_event_query=manual_query,
                 languages=tuple(task.source_languages),
-                source_scope=task.source_scope,
+                source_scope=task.effective_source_scope,
                 date_from=date_from_override or task.time_range_from,
                 date_to=date_to_override or task.time_range_to,
                 max_search_calls=max(0, budget.search_calls - self._search_calls),
@@ -1032,6 +1036,9 @@ class V1Orchestrator:
             )
             return True
         await self.database.set_resolved_event_query(task.id, None)
+        restored = await self.database.get_task(task.id)
+        resolution = await SourceScopeResolver(self.usage).resolve(restored)
+        await self.database.set_source_scope_resolution(task.id, resolution)
         await self.database.save_checkpoint(
             task.id,
             "topic:selection",
@@ -1346,7 +1353,7 @@ class V1Orchestrator:
         scope = InvestigationScope(
             event_query=event_query,
             languages=tuple(task.source_languages),
-            source_scope=task.source_scope,
+            source_scope=task.effective_source_scope,
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
@@ -1357,7 +1364,6 @@ class V1Orchestrator:
             lang=task.source_languages[0],
             region=_default_region(task.source_languages[0]),
             freshness="noLimit",
-            langsearch_contents_text=False,
         )
 
         def accept(result):
@@ -1912,6 +1918,7 @@ class V1Orchestrator:
                     event_query,
                     date_from=task.time_range_from if task else None,
                     date_to=task.time_range_to if task else None,
+                    languages=task.source_languages if task else ["zh", "en"],
                 )
                 if local_context:
                     scoped_query += f"\n{local_context}"
@@ -1973,10 +1980,24 @@ class V1Orchestrator:
         task = await self.database.get_task(task_id)
         requested_languages = task.source_languages if task else ["zh", "en"]
         search_languages = list(requested_languages)
-        if search_phase == "foreign_supplement" and "en" not in search_languages:
-            search_languages.append("en")
         plan = ensure_requested_languages(plan, search_languages, event_query)
-        if agent_name == "history_insight" and "【章节缺口专项补查】" in event_query:
+        translated_queries = []
+        for query in plan.queries:
+            translated = await self.search_planning.translate(query.query, query.language)
+            if translated is not None:
+                translated_queries.append(query.model_copy(update={"query": translated}))
+            else:
+                message = f"{query.language} 检索词翻译未完成，该语言未冒充有效覆盖。"
+                if message not in self._limitations:
+                    self._limitations.append(message)
+        plan = plan.model_copy(update={"queries": translated_queries})
+        if not plan.queries:
+            return {"agent": agent_name, "status": "partial"}
+        if (
+            agent_name == "history_insight"
+            and "【章节缺口专项补查】" in event_query
+            and "zh" in search_languages
+        ):
             current_facts = " ".join(
                 item.text
                 for item in await self.database.list_claims(task_id)
@@ -2006,7 +2027,11 @@ class V1Orchestrator:
                     )
                 )
             if recovery_queries:
-                plan = plan.model_copy(update={"queries": [*recovery_queries, *plan.queries]})
+                plan = ensure_requested_languages(
+                    plan.model_copy(update={"queries": [*recovery_queries, *plan.queries]}),
+                    search_languages,
+                    event_query,
+                )
         scope = InvestigationScope(
             # Topic tasks keep the user's broad input in task.event_query for
             # provenance.  Investigation relevance must use the event the user
@@ -2014,7 +2039,7 @@ class V1Orchestrator:
             # enter the evidence inventory.
             event_query=(task.resolved_event_query or event_query) if task else event_query,
             languages=tuple(requested_languages),
-            source_scope=task.source_scope if task else "auto",
+            source_scope=task.effective_source_scope if task else "auto",
             date_from=task.time_range_from if task else None,
             date_to=task.time_range_to if task else None,
         )
@@ -2068,6 +2093,13 @@ class V1Orchestrator:
                         "queries": [query.model_dump(mode="json")],
                     },
                 )
+                translated_query = await self.search_planning.translate(query.query, query.language)
+                if translated_query is None:
+                    message = f"{query.language} 检索词翻译未完成，该语言未冒充有效覆盖。"
+                    if message not in self._limitations:
+                        self._limitations.append(message)
+                    continue
+                query = query.model_copy(update={"query": translated_query})
                 params = SearchParams(
                     query=query.query,
                     top_k=top_k,
@@ -2081,17 +2113,18 @@ class V1Orchestrator:
                     ),
                     lang=query.language,
                     region=query.region,
-                    langsearch_contents_text=False,
-                    allow_freshness_fallback=True,
                 )
                 rejected_reasons: dict[str, int] = {}
+                result_scopes: dict[tuple[str, str, str], InvestigationScope] = {}
 
                 def classify_for_scope(
                     result,
                     reason_counts=rejected_reasons,
                     query_text=query.query,
+                    scopes=result_scopes,
                 ):
-                    decision = scope.classify_result(
+                    item_scope = scopes.get((result.url, result.title, result.snippet), scope)
+                    decision = item_scope.classify_result(
                         result,
                         agent=agent_name,
                         phase=search_phase,
@@ -2121,7 +2154,25 @@ class V1Orchestrator:
                                 self._limitations.append(limitation)
                         return allowed
 
-                    def accept_for_scope(item: SearchResult):
+                    async def accept_for_scope(
+                        item: SearchResult, query_text=query.query, scopes=result_scopes
+                    ):
+                        decision = scope.classify_result(
+                            item, agent=agent_name, phase=search_phase, search_query=query_text
+                        )
+                        if decision.reasons == (
+                            "subject_mismatch",
+                        ) and decision.detected_language != detect_text_language(scope.event_query):
+                            alias = await self.search_planning.subject_alias(
+                                scope.event_query, item
+                            )
+                            if alias:
+                                scopes[(item.url, item.title, item.snippet)] = replace(
+                                    scope,
+                                    subject_aliases=tuple(
+                                        dict.fromkeys((*scope.subject_aliases, alias))
+                                    ),
+                                )
                         decision = classify_for_scope(item)
                         return decision.accepted, decision.reasons
 
@@ -2148,7 +2199,9 @@ class V1Orchestrator:
                     ]
                 results = []
                 for result in raw_results:
-                    decision = scope.classify_result(
+                    decision = result_scopes.get(
+                        (result.url, result.title, result.snippet), scope
+                    ).classify_result(
                         result,
                         agent=agent_name,
                         phase=search_phase,
@@ -2207,7 +2260,9 @@ class V1Orchestrator:
                     if self.evidence.needs_direct_fetch(record):
                         updated = await self._fetch_once(
                             record,
-                            scope=scope,
+                            scope=result_scopes.get(
+                                (record.url, record.title, record.snippet or ""), scope
+                            ),
                             agent=agent_name,
                             phase=search_phase,
                             investigation=summary_phase != "quality_recovery",
@@ -2236,7 +2291,11 @@ class V1Orchestrator:
                 inventory = [
                     item
                     for item in complete_inventory
-                    if item.kind == "local_dataset"
+                    if (
+                        item.kind == "local_dataset"
+                        and detect_text_language(f"{item.title} {item.snippet or ''}", item.lang)
+                        in {language.split("-", 1)[0] for language in requested_languages}
+                    )
                     or (
                         (item.extra or {}).get("scope_status") == "history"
                         and item.published_at
@@ -2750,7 +2809,7 @@ class V1Orchestrator:
         scope = InvestigationScope(
             event_query=task.resolved_event_query or task.event_query,
             languages=tuple(task.source_languages),
-            source_scope=task.source_scope,
+            source_scope=task.effective_source_scope,
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
@@ -2936,6 +2995,23 @@ class V1Orchestrator:
         token_limit = self.budget_for(task.depth).token_limit
         stop_requested = task.status == "stopping"
         checkpoint = await self.database.latest_checkpoint(task_id)
+        if not stop_requested and (
+            not checkpoint
+            or checkpoint.get("phase") not in {"verified", "comments_ready", "investigated"}
+        ):
+            resolution = await SourceScopeResolver(self.usage).resolve(task)
+            if resolution != task.source_scope_resolution:
+                await self.database.set_source_scope_resolution(task_id, resolution)
+                await self.events.emit(
+                    task_id,
+                    "agent.status",
+                    {
+                        "agent": "source_scope",
+                        "phase": "classified",
+                        "source_scope_resolution": resolution,
+                    },
+                )
+                task = await self.database.get_task(task_id)
         if self.models_used and not task.config_snapshot:
             await self.database.set_task_config_snapshot(
                 task_id,
@@ -3004,7 +3080,7 @@ class V1Orchestrator:
         elif task.investigation_scope == "public_event":
             investigation_query += f"\n【公开事件隐私边界】{PUBLIC_EVENT_INSTRUCTION}"
         investigation_query += (
-            f"\n信源范围：{task.source_scope}；检索语言：{', '.join(task.source_languages)}。"
+            f"\n信源范围：{task.effective_source_scope}；检索语言：{', '.join(task.source_languages)}。"
             "最终报告使用中文；外文原文不可被译文替换。"
         )
         if not stop_requested and phase not in {"comments_ready", "verified"}:
@@ -3155,7 +3231,7 @@ class V1Orchestrator:
                         },
                     )
                     break
-                if task.source_scope == "domestic" and high_gaps:
+                if task.effective_source_scope == "domestic" and high_gaps:
                     search_phase = "foreign_supplement"
                     self._limitations.append(
                         "国内优先检索后仍有明确高优先级证据缺口，下一轮已启用带标签的境外补充检索；外文原文保留。"

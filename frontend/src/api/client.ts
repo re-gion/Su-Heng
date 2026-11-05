@@ -156,7 +156,7 @@ export type PublicConfig = {
     default: { api_key: string | null; base_url: string; model: string }
     roles: Record<string, { api_key: string | null; base_url: string | null; model: string | null; effective: { api_key: string | null; base_url: string; model: string }; source: Record<string, string> }>
   }
-  search: { provider_order: string[]; keys: Record<string, string | null>; quota: Record<string, ProviderQuotaStatus> }
+  search: { provider_order: string[]; keys: Record<string, string | null>; quota: Record<string, ProviderQuotaStatus>; yuanbao?: { version: string; max_calls_per_task: number; max_calls_per_month: number } }
   fetch: { provider_order: string[]; keys: Record<string, string | null>; quota?: Record<string, ProviderQuotaStatus> }
   comments: { enabled: boolean }
   budget: {
@@ -251,6 +251,10 @@ export async function listTasks(): Promise<TaskListItem[]> {
 }
 
 export type TaskDetail = {
+  source_scope?: 'auto' | 'domestic' | 'global'
+  source_languages?: string[]
+  effective_source_scope?: 'domestic' | 'global'
+  source_scope_resolution?: { category: string; reason: string; status: string; stage: string } | null
   timing?: import('../events/state').TaskTiming
   call_diagnostics?: { recorded_requests: number; recorded_tokens: number; queue_ms: number; request_ms: number }
   investigation_scope?: 'general' | 'institution' | 'public_event'

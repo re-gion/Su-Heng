@@ -239,7 +239,7 @@ def test_event_context_does_not_match_a_fragment_inside_an_unrelated_topic():
             "刘经南认为，地点、校舍、设备、档案和图书资料的继承，"
             "以及少量师资的延续体现了一脉相承。武汉大学校方回应称，有大量史实。"
         ),
-        provider="langsearch",
+        provider="yuanbao",
         lang="zh",
     )
 
@@ -266,7 +266,7 @@ def test_same_incident_court_update_need_not_repeat_official_notice_verbs():
             "事发2023年10月，武大女学生在社媒发文称，"
             "当年7月在图书馆自习时受到性骚扰。她因此指控男方行为。"
         ),
-        provider="langsearch",
+        provider="yuanbao",
         lang="zh",
     )
 
@@ -315,7 +315,7 @@ def test_history_scope_accepts_other_incident_without_current_subject():
 def test_english_history_search_rejects_generic_pages_without_spending_next_provider():
     scope = InvestigationScope(
         event_query="武汉大学通报图书馆事件调查复核情况",
-        languages=("zh",),
+        languages=("zh", "en"),
         source_scope="domestic",
     )
     comparable = result(
@@ -352,7 +352,7 @@ def test_english_history_search_rejects_generic_pages_without_spending_next_prov
 def test_foreign_event_uses_explicit_subject_alias_without_admitting_other_universities():
     scope = InvestigationScope(
         event_query="武汉大学通报图书馆事件调查复核情况",
-        languages=("zh",),
+        languages=("zh", "en"),
         source_scope="domestic",
         subject_aliases=("Wuhan University",),
     )
@@ -417,7 +417,7 @@ def test_same_institution_library_forum_does_not_pass_incident_gate():
 def test_english_same_institution_other_incident_needs_library_context():
     scope = InvestigationScope(
         event_query="武汉大学通报图书馆事件调查复核情况",
-        languages=("zh",),
+        languages=("zh", "en"),
         source_scope="domestic",
         subject_aliases=("Wuhan University",),
     )
@@ -442,7 +442,7 @@ def test_english_same_institution_other_incident_needs_library_context():
 def test_english_result_can_match_event_from_provider_text_lead():
     scope = InvestigationScope(
         event_query="武汉大学通报图书馆事件调查复核情况",
-        languages=("zh",),
+        languages=("zh", "en"),
         source_scope="domestic",
         subject_aliases=("Wuhan University",),
     )
@@ -561,11 +561,11 @@ def test_publisher_search_metadata_date_is_recognized_from_saved_page():
     )
 
 
-def test_foreign_supplement_allows_original_language_but_never_hides_the_label():
+def test_foreign_supplement_respects_selected_language_but_never_hides_the_label():
     scope = InvestigationScope(
         event_query="武汉大学图书馆事件",
         subject_aliases=("Wuhan University",),
-        languages=("zh",),
+        languages=("zh", "en"),
         source_scope="domestic",
         date_from="2023-01-01",
         date_to="2026-01-01",
@@ -586,6 +586,24 @@ def test_foreign_supplement_allows_original_language_but_never_hides_the_label()
     assert decision.main_eligible is True
     assert decision.bucket == "foreign_supplement"
     assert decision.display_label == "境外补充"
+
+    blocked = InvestigationScope(
+        event_query=scope.event_query,
+        subject_aliases=scope.subject_aliases,
+        languages=("zh",),
+        source_scope="domestic",
+    ).classify_result(
+        result(
+            title="Wuhan University responds to library allegation",
+            url="https://www.reuters.com/example",
+            published_at=None,
+            lang="en",
+        ),
+        agent="media_propagation",
+        phase="foreign_supplement",
+    )
+    assert not blocked.accepted
+    assert "language_not_allowed" in blocked.reasons
 
 
 def test_domestic_source_found_during_supplement_remains_domestic_main_evidence():

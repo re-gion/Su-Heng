@@ -2,6 +2,7 @@
 
 - 状态：已接受
 - 日期：2026-09-22
+- 2026-11-05：当前主源与 LangSearch 专用日期重试已由 [ADR-0011](0011-yuanbao-and-automatic-source-scope.md) 取代；本页保留历史理由。
 
 ## 背景
 

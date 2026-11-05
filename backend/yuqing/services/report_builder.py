@@ -307,6 +307,8 @@ class BriefReportBuilder:
                 "investigation_scope": task.investigation_scope,
                 "depth": task.depth,
                 "source_scope": task.source_scope,
+                "effective_source_scope": task.effective_source_scope,
+                "source_scope_resolution": task.source_scope_resolution,
                 "source_languages": task.source_languages,
                 "comment_mode": task.comment_mode,
                 "time_range_from": task.time_range_from,

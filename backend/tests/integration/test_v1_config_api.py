@@ -22,7 +22,7 @@ def test_config_api_masks_secrets_supports_partial_override_and_clear(
     monkeypatch.setenv("DEFAULT_API_KEY", "sk-default-secret")
     monkeypatch.setenv("DEFAULT_BASE_URL", "https://api.example.com/v1")
     monkeypatch.setenv("DEFAULT_MODEL", "default-model")
-    monkeypatch.setenv("LANGSEARCH_API_KEY", "ls-secret-123")
+    monkeypatch.setenv("YUANBAO_API_KEY", "ls-secret-123")
     monkeypatch.delenv("LLM_VERIFIER_MODEL", raising=False)
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
     with TestClient(app) as client:
@@ -45,8 +45,8 @@ def test_config_api_masks_secrets_supports_partial_override_and_clear(
 
 
 def test_config_api_exposes_domestic_foreign_search_and_fetch_order(runtime_dir: Path, monkeypatch):
-    monkeypatch.setenv("SEARCH_PROVIDER_ORDER", "langsearch,qianfan,bocha,exa,tavily,serper")
-    monkeypatch.setenv("LANGSEARCH_API_KEY", "langsearch-env-secret")
+    monkeypatch.setenv("SEARCH_PROVIDER_ORDER", "yuanbao,qianfan,bocha,exa,tavily,serper")
+    monkeypatch.setenv("YUANBAO_API_KEY", "yuanbao-env-secret")
     monkeypatch.setenv("QIANFAN_API_KEY", "qianfan-env-secret")
     monkeypatch.setenv("BOCHA_API_KEY", "bocha-env-secret")
     monkeypatch.setenv("EXA_API_KEY", "exa-env-secret")
@@ -93,7 +93,7 @@ def test_config_api_exposes_domestic_foreign_search_and_fetch_order(runtime_dir:
     assert initial.status_code == 200
     initial_payload = initial.json()
     assert initial_payload["search"]["provider_order"] == [
-        "langsearch",
+        "yuanbao",
         "exa",
         "qianfan",
         "bocha",
@@ -101,7 +101,7 @@ def test_config_api_exposes_domestic_foreign_search_and_fetch_order(runtime_dir:
         "serper",
     ]
     assert set(initial_payload["search"]["keys"]) >= {
-        "langsearch",
+        "yuanbao",
         "qianfan",
         "bocha",
         "exa",
@@ -150,19 +150,19 @@ def test_config_api_rejects_unknown_search_or_fetch_provider(runtime_dir: Path):
 def test_config_api_uses_fixed_search_order_and_rejects_legacy_override(
     runtime_dir: Path, monkeypatch
 ):
-    monkeypatch.setenv("SEARCH_PROVIDER_ORDER", "langsearch,qianfan,zhipu,tavily,serper")
+    monkeypatch.setenv("SEARCH_PROVIDER_ORDER", "yuanbao,qianfan,zhipu,tavily,serper")
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
 
     with TestClient(app) as client:
         current = client.get("/api/config")
         reordered = client.put(
             "/api/config",
-            json={"search": {"provider_order": ["serper", "langsearch"]}},
+            json={"search": {"provider_order": ["serper", "yuanbao"]}},
         )
 
     assert current.status_code == 200
     assert current.json()["search"]["provider_order"] == [
-        "langsearch",
+        "yuanbao",
         "exa",
         "qianfan",
         "bocha",
@@ -252,3 +252,96 @@ def test_config_api_exposes_and_validates_the_depth_budget(runtime_dir: Path):
     assert reset.status_code == 200
     assert reset.json()["budget"]["overrides"] == {}
     assert reset.json()["budget"]["effective"] == reset.json()["budget"]["defaults"]
+
+
+def test_yuanbao_config_alias_limits_and_legacy_provider_rejection(runtime_dir, monkeypatch):
+    monkeypatch.delenv("YUANBAO_API_KEY", raising=False)
+    monkeypatch.setenv("TENCENTCLOUD_WSA_APIKEY", "wsa-alias-secret")
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
+    with TestClient(app) as client:
+        initial = client.get("/api/config").json()
+        assert initial["search"]["keys"]["yuanbao"] is not None
+        assert "wsa-alias-secret" not in str(initial)
+        assert initial["search"]["yuanbao"] == {
+            "version": "standard",
+            "max_calls_per_task": 60,
+            "max_calls_per_month": 3000,
+        }
+        saved = client.put(
+            "/api/config",
+            json={
+                "search": {
+                    "yuanbao": {
+                        "version": "lite",
+                        "max_calls_per_task": 3,
+                        "max_calls_per_month": 7,
+                    }
+                }
+            },
+        )
+        assert saved.status_code == 200
+        assert saved.json()["search"]["quota"]["yuanbao"]["windows"][0]["normal_limit"] == 7
+        for value in [[], None, False]:
+            assert client.put("/api/config", json={"search": {"yuanbao": value}}).status_code == 422
+        for version in [[], {}, None, True]:
+            assert (
+                client.put(
+                    "/api/config", json={"search": {"yuanbao": {"version": version}}}
+                ).status_code
+                == 422
+            )
+        for value in [-1, True, 1.5, "2"]:
+            assert (
+                client.put(
+                    "/api/config", json={"search": {"yuanbao": {"max_calls_per_month": value}}}
+                ).status_code
+                == 422
+            )
+        assert (
+            client.put(
+                "/api/config", json={"search": {"keys": {"langsearch": "retired"}}}
+            ).status_code
+            == 422
+        )
+        assert client.get("/api/config").json()["search"]["yuanbao"]["max_calls_per_month"] == 7
+
+
+def test_yuanbao_connection_test_checks_results_and_monthly_guard(runtime_dir, monkeypatch):
+    import httpx
+
+    import yuqing.app.main as main_module
+    from yuqing.core.search.yuanbao import YuanbaoSearchProvider
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"Response": {"Pages": []}})
+
+    def provider(key, **kwargs):
+        return YuanbaoSearchProvider(
+            key, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), **kwargs
+        )
+
+    monkeypatch.setattr(main_module, "YuanbaoSearchProvider", provider)
+    monkeypatch.setenv("YUANBAO_API_KEY", "fixture-key")
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
+    with TestClient(app) as client:
+        client.put("/api/config", json={"search": {"yuanbao": {"max_calls_per_month": 1}}})
+        empty = client.post("/api/config/test", json={"kind": "search", "provider": "yuanbao"})
+        assert empty.json()["ok"] is False
+        blocked = client.post("/api/config/test", json={"kind": "search", "provider": "yuanbao"})
+        assert blocked.json()["ok"] is False
+        assert len(calls) == 1
+        assert (
+            client.get("/api/config").json()["search"]["quota"]["yuanbao"]["windows"][0]["used"]
+            == 1
+        )
+
+        client.put(
+            "/api/config",
+            json={"search": {"yuanbao": {"max_calls_per_month": 100, "max_calls_per_task": 0}}},
+        )
+        disabled = client.post("/api/config/test", json={"kind": "search", "provider": "yuanbao"})
+        assert disabled.json()["ok"] is False
+        assert len(calls) == 1

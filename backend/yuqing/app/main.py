@@ -27,7 +27,6 @@ from yuqing.core.fetch import BuiltinFetchProvider, FetchChain, FirecrawlCloudPr
 from yuqing.core.llm.factory import LLMClientFactory
 from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message
 from yuqing.core.search.chain import SearchChain
-from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 from yuqing.core.search.providers import (
     BochaSearchProvider,
     ExaSearchProvider,
@@ -36,6 +35,7 @@ from yuqing.core.search.providers import (
     TavilySearchProvider,
     ZhipuSearchProvider,
 )
+from yuqing.core.search.yuanbao import YuanbaoSearchProvider
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import (
     CURRENT_SCHEMA_VERSION,
@@ -207,7 +207,7 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         skills_directory=skills_dir,
     )
     provider_types = {
-        "langsearch": LangSearchProvider,
+        "yuanbao": YuanbaoSearchProvider,
         "zhipu": ZhipuSearchProvider,
         "qianfan": QianfanSearchProvider,
         "bocha": BochaSearchProvider,
@@ -215,7 +215,6 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         "tavily": TavilySearchProvider,
         "serper": SerperSearchProvider,
     }
-    langsearch_limiters: dict[str, LangSearchLimiter] = {}
     provider_rate_limiters: dict[tuple[str, str], ProviderRateLimiter] = {}
     search_failures: dict[str, int] = {}
     search_opened_at: dict[str, float] = {}
@@ -241,7 +240,9 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         }
         environ = dict(os.environ)
         environ.update(stored)
-        quotas = ProviderQuotaManager(database)
+        if not environ.get("YUANBAO_API_KEY"):
+            environ["YUANBAO_API_KEY"] = environ.get("TENCENTCLOUD_WSA_APIKEY", "")
+        quotas = ProviderQuotaManager(database, environ=environ)
         allow_proxy_fake_ip = environ.get("YUQING_FETCH_ALLOW_PROXY_FAKE_IP", "false").lower() in {
             "1",
             "true",
@@ -276,14 +277,13 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             key = environ.get(f"{name.upper()}_API_KEY", "").strip()
             if not key:
                 continue
-            if name == "langsearch":
-                limiter = langsearch_limiters.setdefault(
-                    key, LangSearchLimiter(0.22, max_calls_per_minute=290)
-                )
-                raw_provider = LangSearchProvider(key, limiter=limiter)
-            else:
-                raw_provider = provider_types[name](key)
+            raw_provider = (
+                provider_types[name](key, version=environ.get("YUANBAO_VERSION", "standard"))
+                if name == "yuanbao"
+                else provider_types[name](key)
+            )
             interval = {
+                "yuanbao": 0.22,
                 "qianfan": 1.05,
                 "bocha": 1.05,
                 "exa": 0.11,
@@ -299,6 +299,7 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
                     quotas,
                     limiter=limiter,
                     max_calls_per_task={
+                        "yuanbao": quotas.yuanbao_task_limit,
                         "qianfan": 20,
                         "bocha": 10,
                         "tavily": 20,
@@ -984,7 +985,7 @@ def create_app(
             if payload.get("kind") == "search":
                 name = str(payload.get("provider") or "")
                 provider_type = {
-                    "langsearch": LangSearchProvider,
+                    "yuanbao": YuanbaoSearchProvider,
                     "zhipu": ZhipuSearchProvider,
                     "qianfan": QianfanSearchProvider,
                     "bocha": BochaSearchProvider,
@@ -994,7 +995,20 @@ def create_app(
                 }.get(name)
                 if provider_type is None:
                     raise ValueError("未知搜索 provider")
-                provider = provider_type(environ.get(f"{name.upper()}_API_KEY", ""))
+                provider = provider_type(
+                    environ.get(f"{name.upper()}_API_KEY", ""),
+                    **(
+                        {"version": environ.get("YUANBAO_VERSION", "standard")}
+                        if name == "yuanbao"
+                        else {}
+                    ),
+                )
+                quotas = ProviderQuotaManager(database, environ=environ)
+                provider = QuotaAwareSearchProvider(
+                    provider,
+                    quotas,
+                    max_calls_per_task=quotas.yuanbao_task_limit if name == "yuanbao" else None,
+                )
                 try:
                     result = await provider.search(
                         __import__(
@@ -1003,6 +1017,8 @@ def create_app(
                     )
                 finally:
                     await provider.client.aclose()
+                if not result:
+                    raise ValueError("搜索未返回可用网页，尚未通过语义连接测试")
                 return {
                     "ok": True,
                     "kind": "search",
@@ -1557,6 +1573,10 @@ def create_app(
                     "task_id": task.id,
                     "event_query": task.event_query,
                     "resolved_event_query": task.resolved_event_query,
+                    "source_scope": task.source_scope,
+                    "source_languages": task.source_languages,
+                    "effective_source_scope": task.effective_source_scope,
+                    "source_scope_resolution": task.source_scope_resolution,
                     "status": task.status,
                     "phase": task.phase,
                     "depth": task.depth,
@@ -1594,6 +1614,7 @@ def create_app(
         outcome = await database.checkpoint(task_id, "investigation:outcome")
         recovery = await database.checkpoint(task_id, "report:quality_recovery")
         report_quality = json.loads(report["ir_json"]).get("quality", {}) if report else {}
+        scope_task = database._task_record(row)
         return {
             "task_id": task_id,
             "investigation_outcome": outcome,
@@ -1607,6 +1628,10 @@ def create_app(
             "event_query": row["event_query"],
             "investigation_scope": row["investigation_scope"],
             "resolved_event_query": row["resolved_event_query"],
+            "source_scope": scope_task.source_scope,
+            "source_languages": scope_task.source_languages,
+            "effective_source_scope": scope_task.effective_source_scope,
+            "source_scope_resolution": scope_task.source_scope_resolution,
             "status": row["status"],
             "phase": row["phase"],
             "progress": {

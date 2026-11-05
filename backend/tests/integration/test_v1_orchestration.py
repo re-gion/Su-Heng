@@ -954,13 +954,13 @@ async def test_selected_event_falls_back_past_noise_and_clears_retrieval_gate(ru
     )
     await database.set_resolved_event_query(task.id, "武汉大学通报图书馆事件调查复核情况")
     primary = StaticProvider(
-        "langsearch",
+        "yuanbao",
         [
             SearchResult(
                 url="https://xxgk.hubu.edu.cn/info/1234/5678.htm",
                 title="新生复查期间有关举报、调查及处理结果（2023年）",
                 snippet=("湖北大学新生复查正常完成。" + "普通正文。" * 80 + "相关链接：武汉大学。"),
-                provider="langsearch",
+                provider="yuanbao",
             )
         ],
     )
@@ -1019,26 +1019,24 @@ async def test_selected_event_falls_back_past_noise_and_clears_retrieval_gate(ru
     assert {item.extra["scope_status"] for item in evidence} == {"main"}
     assert all(item.fetch_status == "fetched" for item in evidence)
     assert claims[0].badge == "verified"
-    assert search_events[0].data["continued_from"] == "langsearch"
+    assert search_events[0].data["continued_from"] == "yuanbao"
     assert search_events[0].data["degraded_from"] is None
     assert search_events[0].data["provider_diagnostics"][0]["status"] == (
         "relevance_filtered_empty"
     )
-    first_attempt, recovery = search_events[0].data["provider_diagnostics"][:2]
+    first_attempt, fallback_attempt = search_events[0].data["provider_diagnostics"][:2]
     assert first_attempt["freshness"] == "2023-01-01..2026-01-01"
-    assert recovery["provider"] == "langsearch"
-    assert recovery["freshness"] == "noLimit"
-    assert recovery["recovery_reason"] == "relax_preferred_date_window"
-    # Counts belong to each attempt, rather than being copied from the provider total.
+    assert fallback_attempt["provider"] == "qianfan"
+    assert fallback_attempt["freshness"] == "2023-01-01..2026-01-01"
+    assert fallback_attempt["recovery_reason"] is None
     assert first_attempt["rejected"] == {"subject_mismatch": 1}
-    assert recovery["rejected"] == {"subject_mismatch": 1}
     report_ir = __import__("json").loads(report["ir_json"])
     assert report_ir["quality"]["release_label"] != "retrieval_diagnostic"
     await database.close()
 
 
 @pytest.mark.asyncio
-async def test_investigation_adds_exa_when_langsearch_results_share_one_publisher(runtime_dir):
+async def test_investigation_adds_exa_when_yuanbao_results_share_one_publisher(runtime_dir):
     database = Database(runtime_dir / "search-source-coverage.db")
     await database.initialize()
     event_query = "武汉大学图书馆事件调查复核"
@@ -1051,14 +1049,14 @@ async def test_investigation_adds_exa_when_langsearch_results_share_one_publishe
         )
     )
     await database.set_resolved_event_query(task.id, event_query)
-    langsearch = StaticProvider(
-        "langsearch",
+    yuanbao = StaticProvider(
+        "yuanbao",
         [
             SearchResult(
                 url=f"https://{host}/story-{index}",
                 title=f"武汉大学图书馆事件调查复核进展 {index}",
                 snippet="武汉大学图书馆事件调查复核进展。",
-                provider="langsearch",
+                provider="yuanbao",
                 lang="zh",
             )
             for index, host in enumerate(("www.news.cn", "www.xinhuanet.com"), start=1)
@@ -1081,7 +1079,7 @@ async def test_investigation_adds_exa_when_langsearch_results_share_one_publishe
     orchestrator = V1Orchestrator(
         database,
         events,
-        search=SearchChain([langsearch, exa, qianfan]),
+        search=SearchChain([yuanbao, exa, qianfan]),
         fetcher=DatedPageFetcher(),
         snapshots=SnapshotStore(runtime_dir / "snapshots"),
         agents={"fact_investigator": MultiEvidenceAgent("fact_investigator")},
@@ -1098,9 +1096,9 @@ async def test_investigation_adds_exa_when_langsearch_results_share_one_publishe
     search_events = [
         event for event in await events.history(task.id) if event.event == "search.result"
     ]
-    assert {item.provider for item in evidence} == {"langsearch", "exa"}
+    assert {item.provider for item in evidence} == {"yuanbao", "exa"}
     assert len(evidence) == 3
-    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 1, 0)
+    assert (yuanbao.calls, exa.calls, qianfan.calls) == (1, 1, 0)
     assert search_events[0].data["hits"] == 3
     assert search_events[0].data["raw_hits"] == 3
     assert search_events[0].data["provider"] == "exa"
@@ -1603,3 +1601,169 @@ async def test_v1_resume_from_verified_checkpoint_only_builds_report(runtime_dir
     )
     assert any("第二轮分析不完整" in item["text"] for item in limitations)
     await restarted.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase,languages", [("primary", ["en"]), ("foreign_supplement", ["zh"])])
+async def test_search_recovery_never_adds_unrequested_language(runtime_dir, phase, languages):
+    from yuqing.storage.models import ClaimCreate, EvidenceCreate
+
+    class RecordingSearch:
+        name = "recording"
+        capabilities = set()
+
+        def __init__(self):
+            self.calls = []
+
+        async def search(self, params):
+            self.calls.append(params)
+            return []
+
+    class PlannedAgent(NamedAgent):
+        async def plan(self, event_query):
+            return InvestigationPlan(
+                queries=[
+                    SearchQuery(query="Wuhan University library complaint", language="en"),
+                    SearchQuery(query="武汉大学图书馆投诉", language="zh"),
+                ]
+            )
+
+    database = Database(runtime_dir / "language-recovery.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(
+            TaskCreate(
+                event_query="Wuhan University library complaint",
+                depth="quick",
+                source_languages=languages,
+            )
+        )
+        evidence = await database.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://example.cn/source",
+                title="机构通报",
+                snippet="机构发布情况说明。",
+            )
+        )
+        await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                agent="fact_investigator",
+                text="高校处分经法院判决复核，网络情况待查。",
+                evidence_ids=[evidence.local_id],
+            ),
+            max_claims=10,
+            max_evidence_per_claim=5,
+        )
+        search = RecordingSearch()
+        agent = PlannedAgent("history_insight")
+        runner = V1Orchestrator(
+            database,
+            EventBus(database),
+            search=search,
+            fetcher=FailFetcher(),
+            snapshots=SnapshotStore(runtime_dir / "snapshots"),
+            agents={"history_insight": agent},
+            moderator=ReleaseModerator(),
+            verifier=FixtureVerifier(),
+            reports_dir=runtime_dir / "reports",
+        )
+        await runner._run_agent(
+            task_id=task.id,
+            event_query=task.event_query + "【章节缺口专项补查】",
+            agent_name="history_insight",
+            agent=agent,
+            board=await ForumBoard.restore(database, task.id),
+            outer_round=1,
+            top_k=5,
+            search_phase=phase,
+        )
+        assert search.calls
+        assert {item.lang for item in search.calls} == set(languages)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_language_match_is_checked_for_each_material(runtime_dir):
+    from yuqing.services.search_planning import SearchPlanning
+
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, role, system, data, **kwargs):
+            self.calls += 1
+            item = json.loads(data)
+            return {
+                "same_subject": True,
+                "same_event_context": "laboratory" not in item["material"],
+                "confidence": "high",
+                "alias": "Wuhan University",
+            }
+
+    class PlannedAgent(NamedAgent):
+        async def plan(self, event_query):
+            return InvestigationPlan(
+                queries=[
+                    SearchQuery(
+                        query="Wuhan University library complaint investigation", language="en"
+                    )
+                ]
+            )
+
+    db = Database(runtime_dir / "cross-language-material.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(
+            TaskCreate(
+                event_query="武汉大学图书馆投诉调查", source_scope="global", source_languages=["en"]
+            )
+        )
+        provider = StaticProvider(
+            "tavily",
+            [
+                SearchResult(
+                    url=f"https://example.org/{name}",
+                    title=title,
+                    snippet=title,
+                    content_text=title * 30,
+                    content_origin="provider_fulltext",
+                    lang="en",
+                    provider="tavily",
+                )
+                for name, title in [
+                    ("library", "Wuhan University investigates library complaint"),
+                    ("fire", "Wuhan University investigates laboratory fire"),
+                ]
+            ],
+        )
+        agent = PlannedAgent("fact_investigator")
+        runner = V1Orchestrator(
+            db,
+            EventBus(db),
+            search=SearchChain([provider]),
+            fetcher=FailFetcher(),
+            snapshots=SnapshotStore(runtime_dir / "snapshots"),
+            agents={"fact_investigator": agent},
+            moderator=ReleaseModerator(),
+            verifier=FixtureVerifier(),
+            reports_dir=runtime_dir / "reports",
+        )
+        gateway = Gateway()
+        runner.search_planning = SearchPlanning(gateway)
+        await runner._run_agent(
+            task_id=task.id,
+            event_query=task.event_query,
+            agent_name="fact_investigator",
+            agent=agent,
+            board=await ForumBoard.restore(db, task.id),
+            outer_round=1,
+            top_k=5,
+        )
+        evidence = await db.list_evidence(task.id)
+        assert [item.url for item in evidence] == ["https://example.org/library"]
+        assert evidence[0].extra["scope_status"] == "main"
+        assert gateway.calls == 2
+    finally:
+        await db.close()

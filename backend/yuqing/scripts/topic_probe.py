@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import os
 import sys
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,7 +14,6 @@ from yuqing.core.fetch import BuiltinFetchProvider, FetchChain, FirecrawlCloudPr
 from yuqing.core.llm.factory import LLMClientFactory
 from yuqing.core.llm.gateway import LLMGateway
 from yuqing.core.search.chain import SearchChain
-from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 from yuqing.core.search.providers import (
     BochaSearchProvider,
     ExaSearchProvider,
@@ -21,21 +22,24 @@ from yuqing.core.search.providers import (
     TavilySearchProvider,
     ZhipuSearchProvider,
 )
+from yuqing.core.search.yuanbao import YuanbaoSearchProvider
 from yuqing.services.configuration import DEFAULT_SEARCH_PROVIDER_ORDER, ConfigService
 from yuqing.services.provider_quota import (
     ProviderQuotaManager,
     QuotaAwareFetchProvider,
     QuotaAwareSearchProvider,
 )
+from yuqing.services.source_scope import SourceScopeResolver
 from yuqing.services.topic_discovery import (
     OpenAITopicQueryPlanner,
     TopicDiscovery,
     TopicDiscoveryRequest,
 )
 from yuqing.storage.db import Database
+from yuqing.storage.models import TaskCreate, TaskRecord
 
 PROVIDERS = {
-    "langsearch": LangSearchProvider,
+    "yuanbao": YuanbaoSearchProvider,
     "zhipu": ZhipuSearchProvider,
     "qianfan": QianfanSearchProvider,
     "bocha": BochaSearchProvider,
@@ -53,7 +57,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--date-from")
     parser.add_argument("--date-to")
     parser.add_argument("--source-scope", choices=("auto", "domestic", "global"), default="auto")
+    parser.add_argument("--languages", default="zh,en", help="逗号分隔的语言允许列表")
     args = parser.parse_args()
+    args.languages = TaskCreate(
+        event_query=args.topic, source_languages=args.languages.split(",")
+    ).source_languages
     args.data_dir = str(Path(args.data_dir).resolve())
     return args
 
@@ -64,17 +72,23 @@ async def main(args: argparse.Namespace) -> None:
     environ = await ConfigService(database).resolved_environ()
     order = [name for name in DEFAULT_SEARCH_PROVIDER_ORDER if name in PROVIDERS]
     providers = []
-    quotas = ProviderQuotaManager(database)
+    quotas = ProviderQuotaManager(database, environ=environ)
     for name in order:
         key = environ.get(f"{name.upper()}_API_KEY", "").strip()
         if not key:
             continue
         provider = (
-            LangSearchProvider(key, limiter=LangSearchLimiter(0.22, max_calls_per_minute=290))
-            if name == "langsearch"
+            PROVIDERS[name](key, version=environ.get("YUANBAO_VERSION", "standard"))
+            if name == "yuanbao"
             else PROVIDERS[name](key)
         )
-        providers.append(QuotaAwareSearchProvider(provider, quotas))
+        providers.append(
+            QuotaAwareSearchProvider(
+                provider,
+                quotas,
+                max_calls_per_task=quotas.yuanbao_task_limit if name == "yuanbao" else None,
+            )
+        )
     if not providers:
         await database.close()
         raise RuntimeError("未配置任何搜索 Provider")
@@ -103,15 +117,33 @@ async def main(args: argparse.Namespace) -> None:
         fetcher = FetchChain(builtin)
     llm_factory = LLMClientFactory(environ)
     try:
+        gateway = LLMGateway(llm_factory)
+        now = datetime.now(UTC).isoformat()
+        probe_task = TaskRecord(
+            id="probe-" + uuid.uuid4().hex,
+            event_query=args.topic,
+            request_kind="topic_discovery",
+            source_scope=args.source_scope,
+            source_languages=args.languages,
+            depth="quick",
+            status="running",
+            outer_round=0,
+            tokens_used=0,
+            cost_estimate=0,
+            created_at=now,
+            updated_at=now,
+        )
+        resolution = await SourceScopeResolver(gateway).resolve(probe_task)
+        print(__import__("json").dumps({"source_scope_resolution": resolution}, ensure_ascii=False))
         outcome = await TopicDiscovery(
             SearchChain(providers),
             fetcher,
-            planner=OpenAITopicQueryPlanner(LLMGateway(llm_factory)),
+            planner=OpenAITopicQueryPlanner(gateway),
         ).discover(
             TopicDiscoveryRequest(
                 topic=args.topic,
-                languages=("zh",),
-                source_scope=args.source_scope,
+                languages=tuple(args.languages),
+                source_scope=resolution["effective_scope"],
                 date_from=args.date_from,
                 date_to=args.date_to,
                 max_search_calls=8,

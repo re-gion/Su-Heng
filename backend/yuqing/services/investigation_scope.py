@@ -50,7 +50,7 @@ _ENGLISH_INSTITUTION_PATTERN = re.compile(
 )
 _ENGLISH_EVENT_ACTION = re.compile(
     r"\b(?:alleg\w*|accus\w*|disciplin\w*|harass\w*|investigat\w*|"
-    r"misconduct|review\w*|respond\w*|ruling\w*|scandal|complaint\w*)\b",
+    r"misconduct|review\w*|respond\w*|ruling\w*|scandal|complaint\w*|outage\w*|recall\w*|breach\w*|leak\w*|fire|crash\w*)\b",
     re.IGNORECASE,
 )
 _HISTORY_ACTION_ZH = (
@@ -442,7 +442,7 @@ class InvestigationScope:
                 reasons=("event_mismatch",),
                 detected_language=detected,
             )
-        if detected not in allowed_languages and not foreign_supplement:
+        if detected not in allowed_languages:
             reasons.append("language_not_allowed")
         if self.source_scope == "domestic" and not is_domestic_url(result.url):
             if not foreign_supplement:
@@ -459,7 +459,13 @@ class InvestigationScope:
         if (
             agent != "history_insight"
             and query_language != detected
-            and not _ENGLISH_EVENT_ACTION.search(f"{text} {body_lead}")
+            and not (
+                (detected == "en" and _ENGLISH_EVENT_ACTION.search(f"{text} {body_lead}"))
+                or (
+                    detected == "zh"
+                    and any(marker in f"{text} {body_lead}" for marker in _EVENT_ACTION_ZH)
+                )
+            )
         ):
             return ScopeDecision(
                 accepted=False,
@@ -468,6 +474,18 @@ class InvestigationScope:
                 reasons=("event_mismatch",),
                 detected_language=detected,
             )
+        if agent != "history_insight" and query_language != detected and detected == "zh":
+            context = _event_context_anchors(search_query or "", subject_anchors)
+            if not context or not any(
+                anchor in normalized_text or anchor in body_lead.casefold() for anchor in context
+            ):
+                return ScopeDecision(
+                    accepted=False,
+                    main_eligible=False,
+                    bucket="rejected",
+                    reasons=("event_mismatch",),
+                    detected_language=detected,
+                )
         if agent != "history_insight" and query_language != detected and detected == "en":
             english_subjects = tuple(
                 alias.casefold()

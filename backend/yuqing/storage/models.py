@@ -65,6 +65,7 @@ class TaskRecord(BaseModel):
     status: TaskStatus
     phase: str = "planning"
     source_scope: SourceScope = "auto"
+    source_scope_resolution: dict[str, Any] | None = None
     source_languages: list[str] = ["zh", "en"]
     comment_mode: CommentMode = "off"
     comment_urls: list[str] = []
@@ -74,6 +75,13 @@ class TaskRecord(BaseModel):
     config_snapshot: str | None = None
     created_at: str
     updated_at: str
+
+    @property
+    def effective_source_scope(self) -> SourceScope:
+        if self.source_scope != "auto":
+            return self.source_scope
+        value = self.source_scope_resolution or {}
+        return "domestic" if value.get("effective_scope") == "domestic" else "global"
 
 
 class EvidenceCreate(BaseModel):

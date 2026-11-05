@@ -18,7 +18,7 @@ from yuqing.services.budget import (
 from yuqing.services.provider_quota import ProviderQuotaManager
 from yuqing.storage.db import Database
 
-DOMESTIC_SEARCH_PROVIDERS = ("langsearch", "exa", "qianfan", "bocha")
+DOMESTIC_SEARCH_PROVIDERS = ("yuanbao", "exa", "qianfan", "bocha")
 FOREIGN_SEARCH_PROVIDERS = ("exa", "tavily", "serper")
 DEFAULT_SEARCH_PROVIDER_ORDER = tuple(
     dict.fromkeys((*DOMESTIC_SEARCH_PROVIDERS, *FOREIGN_SEARCH_PROVIDERS))
@@ -33,6 +33,8 @@ SECRET_KEYS = {
     *(f"LLM_{role.upper()}_API_KEY" for role in ROLES),
     *(f"{name.upper()}_API_KEY" for name in SEARCH_PROVIDERS),
     "FIRECRAWL_API_KEY",
+    "TENCENTCLOUD_WSA_APIKEY",
+    "LANGSEARCH_API_KEY",  # Legacy secret remains secret; never used for new requests.
 }
 MASK_PATTERN = re.compile(r"^.{1,12}-?\*{3}.{3}$")
 
@@ -53,6 +55,8 @@ class ConfigService:
         stored = await self.database.config_values()
         merged = dict(self.environ)
         merged.update({key: value for key, value in stored.items() if value != ""})
+        if not merged.get("YUANBAO_API_KEY"):
+            merged["YUANBAO_API_KEY"] = merged.get("TENCENTCLOUD_WSA_APIKEY", "")
         return stored, merged
 
     @staticmethod
@@ -65,7 +69,7 @@ class ConfigService:
 
     async def public(self) -> dict[str, Any]:
         stored, values = await self._values()
-        quota_status = await ProviderQuotaManager(self.database).public_status()
+        quota_status = await ProviderQuotaManager(self.database, environ=values).public_status()
         default_values = {
             "api_key": values.get("DEFAULT_API_KEY", "").strip() or None,
             "base_url": values.get("DEFAULT_BASE_URL", "").strip() or "https://api.deepseek.com/v1",
@@ -110,6 +114,11 @@ class ConfigService:
                     for name in DEFAULT_SEARCH_PROVIDER_ORDER
                 },
                 "quota": quota_status,
+                "yuanbao": {
+                    "version": values.get("YUANBAO_VERSION", "standard"),
+                    "max_calls_per_task": int(values.get("YUANBAO_MAX_CALLS_PER_TASK", "60")),
+                    "max_calls_per_month": int(values.get("YUANBAO_MAX_CALLS_PER_MONTH", "3000")),
+                },
             },
             "fetch": {
                 "provider_order": fetch_order,
@@ -161,6 +170,24 @@ class ConfigService:
             raise ValueError("search 必须是对象")
         if "provider_order" in search:
             raise ValueError("搜索顺序已经固定，不再支持 provider_order 配置")
+        yuanbao = search.get("yuanbao", {})
+        if not isinstance(yuanbao, dict):
+            raise ValueError("search.yuanbao 必须是对象")
+        for field, value in yuanbao.items():
+            if field == "version":
+                if not isinstance(value, str) or value not in {"lite", "standard", "flagship"}:
+                    raise ValueError("元宝版本必须为 lite、standard 或 flagship")
+                changes["YUANBAO_VERSION"] = value
+            elif field in {"max_calls_per_task", "max_calls_per_month"}:
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 0 <= value <= 1_000_000
+                ):
+                    raise ValueError("元宝调用上限必须为 0 至 1000000 的整数")
+                changes[f"YUANBAO_{field.upper()}"] = str(value)
+            else:
+                raise ValueError(f"未知元宝配置：{field}")
         search_keys = search.get("keys") or {}
         if not isinstance(search_keys, dict):
             raise ValueError("search.keys 必须是对象")
@@ -216,6 +243,8 @@ class ConfigService:
         stored = await self.database.config_values()
         values = dict(self.environ)
         values.update(stored)
+        if not values.get("YUANBAO_API_KEY"):
+            values["YUANBAO_API_KEY"] = values.get("TENCENTCLOUD_WSA_APIKEY", "")
         # 旧版 SQLite/.env 可能仍保存可调整顺序；运行时统一迁移到当前固定策略。
         values["SEARCH_PROVIDER_ORDER"] = ",".join(DEFAULT_SEARCH_PROVIDER_ORDER)
         return values

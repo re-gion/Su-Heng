@@ -2,7 +2,6 @@
 
 from .base import SearchParams, SearchProvider, SearchResult
 from .chain import SearchChain, SearchChainExhausted
-from .langsearch import LangSearchProvider
 from .providers import (
     BochaSearchProvider,
     ExaSearchProvider,
@@ -11,11 +10,12 @@ from .providers import (
     TavilySearchProvider,
     ZhipuSearchProvider,
 )
+from .yuanbao import YuanbaoSearchProvider
 
 __all__ = [
     "BochaSearchProvider",
     "ExaSearchProvider",
-    "LangSearchProvider",
+    "YuanbaoSearchProvider",
     "QianfanSearchProvider",
     "SearchChain",
     "SearchChainExhausted",

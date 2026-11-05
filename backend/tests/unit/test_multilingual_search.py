@@ -22,7 +22,7 @@ class Provider:
 
 @pytest.mark.asyncio
 async def test_non_chinese_search_uses_foreign_provider_group():
-    domestic = Provider("langsearch")
+    domestic = Provider("yuanbao")
     global_provider = Provider("tavily")
     chain = SearchChain([domestic, global_provider])
 
@@ -32,7 +32,7 @@ async def test_non_chinese_search_uses_foreign_provider_group():
     # domestic quota on a query that the foreign providers cover directly.
     assert len(domestic.calls) == 0
     assert len(global_provider.calls) == 1
-    assert [item.name for item in chain.providers] == ["langsearch", "tavily"]
+    assert [item.name for item in chain.providers] == ["yuanbao", "tavily"]
 
 
 @pytest.mark.asyncio

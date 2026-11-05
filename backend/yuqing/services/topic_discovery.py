@@ -6,6 +6,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from itertools import zip_longest
 from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 
@@ -20,6 +21,7 @@ from yuqing.services.investigation_scope import (
     is_domestic_url,
     title_matches_subject,
 )
+from yuqing.services.search_planning import SearchPlanning
 from yuqing.services.source_tiers import SourceRole, SourceTierClassifier
 
 DiscoveryRound = Literal["initial", "recovery", "manual_preflight"]
@@ -93,6 +95,32 @@ _EVENT_MARKERS = (
     "解约",
     "收购",
 )
+_EVENT_WORDS_EN = re.compile(
+    r"\b(?:incident|controvers\w*|complaint\w*|alleg\w*|accus\w*|investigat\w*|"
+    r"recall\w*|outage\w*|lawsuit\w*|ruling\w*|scandal\w*|misconduct|"
+    r"respond\w*|response|apolog\w*|leak\w*|crash\w*|resign\w*|"
+    r"suspend\w*|disciplin\w*|fire|explosion|fatal\w*|fraud|breach\w*)\b",
+    re.I,
+)
+_GENERIC_QUERY_WORDS = {
+    "latest",
+    "news",
+    "reports",
+    "report",
+    "official",
+    "update",
+    "updates",
+    "event",
+    "events",
+    "recent",
+    "information",
+}
+
+
+def _event_like(text: str) -> bool:
+    return any(marker in text for marker in _EVENT_MARKERS) or bool(_EVENT_WORDS_EN.search(text))
+
+
 _CLUSTER_STOP = {
     "武汉大学",
     "大学舆情",
@@ -134,7 +162,7 @@ class OpenAITopicQueryPlanner:
         values: list[str] = []
         for raw in result.get("queries", []):
             candidate = re.sub(r"\s+", " ", str(raw)).strip()
-            residual = candidate.replace(core, "")
+            residual = re.sub(re.escape(core), "", candidate, flags=re.I)
             residual = re.sub(
                 r"(?:19|20)\d{2}|舆情|舆论|热点|事件|争议|通报|回应|官方|调查|最新|具体",
                 "",
@@ -142,8 +170,13 @@ class OpenAITopicQueryPlanner:
             )
             if (
                 4 <= len(candidate) <= 120
-                and core in candidate
-                and len(re.sub(r"[^\u4e00-\u9fff]", "", residual)) >= 2
+                and core.casefold() in candidate.casefold()
+                and (
+                    len(re.sub(r"[^\u4e00-\u9fff]", "", residual)) >= 2
+                    or bool(
+                        set(re.findall(r"[a-z]{3,}", residual.casefold())) - _GENERIC_QUERY_WORDS
+                    )
+                )
                 and candidate not in values
             ):
                 values.append(candidate)
@@ -244,7 +277,7 @@ class _Document:
 
 
 def topic_core(topic: str) -> str:
-    return _TOPIC_SUFFIX.sub("", re.sub(r"\s+", "", topic)).strip("：:，,。.!！?？")
+    return _TOPIC_SUFFIX.sub("", re.sub(r"\s+", " ", topic).strip()).strip("：:，,。.!！?？")
 
 
 def _clean_title(value: str) -> str:
@@ -263,14 +296,61 @@ def _event_terms(value: str, topic: str) -> set[str]:
         if compact[index : index + size] not in _CLUSTER_STOP
     }
     terms.update(marker for marker in _EVENT_MARKERS if marker in value)
+    english = value.casefold()
+    for removable in (topic, topic_core(topic)):
+        english = english.replace(removable.casefold(), " ")
+    stop = _GENERIC_QUERY_WORDS | {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "over",
+        "after",
+        "into",
+        "university",
+        "company",
+        "says",
+        "said",
+        "officials",
+        "student",
+        "students",
+        "investigation",
+        "investigates",
+        "investigate",
+        "investigating",
+        "response",
+        "responds",
+        "respond",
+        "official",
+        "new",
+        "statement",
+        "issues",
+        "following",
+        "about",
+        "amid",
+        "before",
+        "during",
+    }
+    words = [word for word in re.findall(r"[a-z]{3,}", english) if word not in stop]
+    terms.update(words)
+    terms.update(" ".join(words[index : index + 2]) for index in range(len(words) - 1))
     return terms
 
 
 def _same_event(left: _Document, right: _Document) -> bool:
     shared = left.event_terms & right.event_terms
-    if any(len(term) >= 3 and term not in _EVENT_MARKERS for term in shared):
+    if any(
+        len(term) >= 3 and re.search(r"[\u4e00-\u9fff]", term) and term not in _EVENT_MARKERS
+        for term in shared
+    ):
         return True
     union = left.event_terms | right.event_terms
+    if not any(re.search(r"[\u4e00-\u9fff]", term) for term in union):
+        # A common actor, investigation verb or isolated noun is not an event
+        # identity. Prefer splitting uncertain English clusters over fabricating
+        # multi-source confirmation of two different incidents.
+        return any(" " in term for term in shared) and len(shared) >= 3
     return bool(union) and len(shared) / len(union) >= 0.24
 
 
@@ -289,6 +369,7 @@ class TopicDiscovery:
         self.search = search
         self.fetcher = fetcher
         self.planner = planner
+        self.search_planning = SearchPlanning(getattr(planner, "gateway", None))
         self.source_classifier = source_classifier or SourceTierClassifier.bundled()
         self.today = today
 
@@ -381,7 +462,15 @@ class TopicDiscovery:
                 f"{item.result.title} {item.result.snippet} {item.body[:1200]}", request.topic
             )
 
-        limited = len(configured_names) < 2 or len(successful_providers) < 2
+        attempted_languages = {
+            attempt.language
+            for attempt in attempts
+            if attempt.provider != "query_planner" and attempt.status in {"found", "empty"}
+        }
+        missing_languages = set(request.languages) - attempted_languages
+        limited = (
+            len(configured_names) < 2 or len(successful_providers) < 2 or bool(missing_languages)
+        )
         candidates = tuple(
             sorted(
                 (
@@ -396,6 +485,13 @@ class TopicDiscovery:
             coverage_message = "当前没有 Provider 返回合格材料，候选完整性无法确认。"
         elif len(successful_providers) < 2:
             coverage_message = "当前只有一条有效检索路径，候选完整性和最高置信度受到限制。"
+        if missing_languages:
+            coverage_message = (
+                (coverage_message or "")
+                + " 未完成检索的语种："
+                + ", ".join(sorted(missing_languages))
+                + "。"
+            )
         coverage = ProviderCoverage(
             configured=len(configured_names),
             attempted=tuple(sorted(attempted_providers)),
@@ -490,7 +586,7 @@ class TopicDiscovery:
         recovery_hints: Sequence[str] = (),
     ) -> list[tuple[str, str]]:
         core = request.manual_event_query or topic_core(request.topic)
-        queries: list[tuple[str, str]] = []
+        groups: list[list[tuple[str, str]]] = []
         for language in request.languages or ("zh",):
             if request.manual_event_query:
                 values = [core, f"{core} 通报 回应 判决"]
@@ -535,9 +631,30 @@ class TopicDiscovery:
                         f"{core} 舆情 事件 最新 通报",
                     ]
                 )
-            queries.extend((language, value[:200]) for value in values)
-        limit = 2 if request.manual_event_query else 3 if not recovery else 5
-        return list(dict.fromkeys(queries))[:limit]
+            if not language.startswith("zh"):
+                if request.manual_event_query:
+                    values = [core, f"{core} official response investigation ruling"]
+                elif recovery:
+                    values = [
+                        f"{hint} follow up investigation outcome" for hint in recovery_hints[:2]
+                    ] + [
+                        f"{core} investigation review outcome",
+                        f"{core} official response",
+                        f"{core} court ruling regulatory action",
+                        f"{core} complaint incident apology",
+                    ]
+                else:
+                    # Model suggestions are already language-directed. Replace
+                    # only the deterministic Chinese fallback wording.
+                    values = values[:-3] + [
+                        f"{core} investigation official response",
+                        f"{core} complaint controversy ruling",
+                        f"{core} incident latest developments",
+                    ]
+            groups.append(list(dict.fromkeys((language, value[:200]) for value in values)))
+        limit = max(len(groups), 2 if request.manual_event_query else 3 if not recovery else 5)
+        queries = [item for group in zip_longest(*groups) for item in group if item is not None]
+        return queries[:limit]
 
     async def _search_round(
         self,
@@ -554,18 +671,34 @@ class TopicDiscovery:
         recovery_hints: list[str],
     ) -> int:
         used = 0
-        for language, query in queries:
+        scheduled = list(queries)
+        visited_languages: set[str] = set()
+        for language, query in scheduled:
+            visited_languages.add(language)
+            translated = await self.search_planning.translate(query, language)
+            if translated is None:
+                attempts.append(
+                    DiscoveryAttempt(
+                        round=round_name,
+                        query=query,
+                        language=language,
+                        provider="query_planner",
+                        status="failed",
+                        error="query_translation_unavailable",
+                    )
+                )
+                continue
+            query = translated
             params = SearchParams(
                 query=query,
                 top_k=10,
                 freshness="noLimit",
                 lang=language,
                 priority="critical" if round_name != "initial" else "normal",
-                langsearch_contents_text=False,
             )
             route = getattr(self.search, "providers_for", None)
             language_providers = route(params) if callable(route) else list(providers)
-            for provider in language_providers:
+            for provider_index, provider in enumerate(language_providers):
                 if getattr(provider, "task_limit_reached", False):
                     attempts.append(
                         DiscoveryAttempt(
@@ -588,6 +721,9 @@ class TopicDiscovery:
                         )
                     )
                     return used
+                remaining_languages = set(request.languages) - visited_languages
+                if provider_index > 0 and remaining_calls - used <= len(remaining_languages):
+                    break
                 used += 1
                 attempted_providers.add(provider.name)
                 try:
@@ -609,6 +745,14 @@ class TopicDiscovery:
                 for raw_item in raw:
                     item = raw_item.model_copy(update={"provider": provider.name, "lang": language})
                     reason = self._reject_reason(item, request, effective)
+                    if reason == "subject_mismatch" and detect_text_language(
+                        request.topic
+                    ) != detect_text_language(f"{item.title} {item.snippet}"):
+                        alias = await self.search_planning.subject_alias(request.topic, item)
+                        if alias:
+                            reason = self._reject_reason(
+                                item, request, effective, subject_confirmed=True
+                            )
                     if reason:
                         rejected[reason] += 1
                         if reason in {
@@ -620,9 +764,7 @@ class TopicDiscovery:
                                 title_matches_subject(
                                     request.topic, f"{title} {item.snippet[:320]}"
                                 )
-                                and any(
-                                    marker in f"{title} {item.snippet}" for marker in _EVENT_MARKERS
-                                )
+                                and _event_like(f"{title} {item.snippet}")
                                 and title not in recovery_hints
                             ):
                                 recovery_hints.append(title)
@@ -668,22 +810,24 @@ class TopicDiscovery:
         item: SearchResult,
         request: TopicDiscoveryRequest,
         effective: EffectiveTimeRange,
+        *,
+        subject_confirmed: bool = False,
     ) -> str | None:
         title = _clean_title(item.title)
         snippet = re.sub(r"\s+", " ", item.snippet or "").strip()
         text = f"{title} {snippet}"
         if not title or title.casefold() in {value.casefold() for value in _GENERIC_TITLES}:
             return "generic_or_routine"
-        if any(marker in title for marker in _ROUTINE_MARKERS) and not any(
-            marker in text for marker in _EVENT_MARKERS
-        ):
+        if any(marker in title for marker in _ROUTINE_MARKERS) and not _event_like(text):
             return "generic_or_routine"
         # Long provider snippets often append site-wide related links. Only the title and
         # leading summary may establish the subject; a footer mention must not admit the page.
         subject_text = f"{title} {snippet[:320]}"
-        if not title_matches_subject(request.topic, subject_text, fallback_to_query=True):
+        if not subject_confirmed and not title_matches_subject(
+            request.topic, subject_text, fallback_to_query=True
+        ):
             return "subject_mismatch"
-        if not any(marker in text for marker in _EVENT_MARKERS):
+        if not _event_like(text):
             return "not_event_like"
         allowed = {language.split("-", 1)[0].lower() for language in request.languages}
         if detect_text_language(text, item.lang) not in allowed:

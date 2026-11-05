@@ -2,12 +2,10 @@ import json
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
-import httpx
 import pytest
 
 from yuqing.core.search.base import SearchParams, SearchResult
 from yuqing.core.search.chain import SearchChain, SearchChainExhausted
-from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 from yuqing.services.investigation_scope import InvestigationScope
 
 
@@ -42,73 +40,18 @@ def test_chinese_search_uses_exa_before_limited_domestic_backups():
     chain = SearchChain(
         [
             Provider(name, result=[])
-            for name in ("langsearch", "exa", "qianfan", "bocha", "tavily", "serper")
+            for name in ("yuanbao", "exa", "qianfan", "bocha", "tavily", "serper")
         ]
     )
 
     assert [
         provider.name
         for provider in chain.providers_for(SearchParams(query="武汉大学图书馆事件", lang="zh"))
-    ] == ["langsearch", "exa", "qianfan", "bocha"]
+    ] == ["yuanbao", "exa", "qianfan", "bocha"]
     assert [
         provider.name
         for provider in chain.providers_for(SearchParams(query="campus case", lang="en"))
     ] == ["exa", "tavily", "serper"]
-
-
-@pytest.mark.asyncio
-async def test_langsearch_limiter_enforces_minute_window(monkeypatch):
-    now = 100.0
-    sleeps: list[float] = []
-
-    async def fake_sleep(delay: float):
-        nonlocal now
-        sleeps.append(delay)
-        now += delay
-
-    monkeypatch.setattr("yuqing.core.search.langsearch.time.monotonic", lambda: now)
-    monkeypatch.setattr("yuqing.core.search.langsearch.asyncio.sleep", fake_sleep)
-    limiter = LangSearchLimiter(0, max_calls_per_minute=2)
-
-    await limiter.acquire()
-    await limiter.acquire()
-    await limiter.acquire()
-
-    assert sleeps == [pytest.approx(60.0)]
-
-
-@pytest.mark.asyncio
-async def test_langsearch_429_honors_retry_after_and_retries(monkeypatch):
-    now = 100.0
-    sleeps: list[float] = []
-
-    async def fake_sleep(delay: float):
-        nonlocal now
-        sleeps.append(delay)
-        now += delay
-
-    monkeypatch.setattr("yuqing.core.search.langsearch.time.monotonic", lambda: now)
-    monkeypatch.setattr("yuqing.core.search.langsearch.asyncio.sleep", fake_sleep)
-    request = httpx.Request("POST", "https://api.langsearch.com/v1/web-search")
-    client = SequenceClient(
-        [
-            httpx.Response(429, headers={"Retry-After": "2"}, request=request),
-            httpx.Response(
-                200,
-                json={"data": {"webPages": {"value": []}}},
-                request=request,
-            ),
-        ]
-    )
-    provider = LangSearchProvider(
-        "secret",
-        client=client,
-        limiter=LangSearchLimiter(0, max_calls_per_minute=10),
-    )
-
-    assert await provider.search(SearchParams(query="限流恢复")) == []
-    assert client.calls == 2
-    assert sleeps == [pytest.approx(2.0)]
 
 
 def test_search_result_repairs_lone_surrogates_from_provider_payload():
@@ -282,7 +225,7 @@ async def test_search_chain_tries_next_provider_when_caller_rejects_irrelevant_r
 
 @pytest.mark.asyncio
 async def test_search_chain_counts_fallback_requests_against_task_budget():
-    primary = Provider("langsearch", result=[])
+    primary = Provider("yuanbao", result=[])
     fallback = Provider("qianfan", result=[])
     chain = SearchChain([primary, fallback])
     reservations = 0
@@ -308,13 +251,13 @@ async def test_search_chain_counts_fallback_requests_against_task_budget():
 @pytest.mark.asyncio
 async def test_chinese_event_reaches_exa_without_spending_qianfan():
     free = Provider(
-        "langsearch",
+        "yuanbao",
         result=[
             SearchResult(
                 url="https://zh.wikipedia.org/wiki/example-history-dispute",
                 title="武汉大学校史争议",
                 snippet="武汉大学校方回应称，校舍和图书资料的继承有大量史实。",
-                provider="langsearch",
+                provider="yuanbao",
                 lang="zh",
             )
         ],
@@ -350,15 +293,15 @@ async def test_chinese_event_reaches_exa_without_spending_qianfan():
 
 
 @pytest.mark.asyncio
-async def test_langsearch_one_source_is_supplemented_by_exa_without_spending_qianfan():
-    langsearch = Provider(
-        "langsearch",
+async def test_yuanbao_one_source_is_supplemented_by_exa_without_spending_qianfan():
+    yuanbao = Provider(
+        "yuanbao",
         result=[
             SearchResult(
                 url=f"https://www.zaobao.com.sg/story-{index}",
                 title=f"事件报道 {index}",
                 snippet="与事件相关",
-                provider="langsearch",
+                provider="yuanbao",
             )
             for index in (1, 2)
         ],
@@ -381,7 +324,7 @@ async def test_langsearch_one_source_is_supplemented_by_exa_without_spending_qia
         ],
     )
     qianfan = Provider("qianfan", result=[])
-    chain = SearchChain([langsearch, exa, qianfan])
+    chain = SearchChain([yuanbao, exa, qianfan])
 
     results = await chain.search_filtered(
         SearchParams(query="具体事件", top_k=2, lang="zh"),
@@ -394,30 +337,30 @@ async def test_langsearch_one_source_is_supplemented_by_exa_without_spending_qia
         "https://www.zaobao.com.sg/story-1",
         "https://www.news.cn/event-report",
     ]
-    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 1, 0)
+    assert (yuanbao.calls, exa.calls, qianfan.calls) == (1, 1, 0)
     assert [item["status"] for item in chain.last_diagnostics] == [
         "insufficient_coverage",
         "success",
     ]
-    assert chain.last_continued_from == "langsearch"
+    assert chain.last_continued_from == "yuanbao"
 
 
 @pytest.mark.asyncio
-async def test_langsearch_diverse_sources_do_not_spend_exa():
-    langsearch = Provider(
-        "langsearch",
+async def test_yuanbao_diverse_sources_do_not_spend_exa():
+    yuanbao = Provider(
+        "yuanbao",
         result=[
             SearchResult(
                 url=f"https://{host}/report",
                 title="相关报道",
                 snippet="与事件相关",
-                provider="langsearch",
+                provider="yuanbao",
             )
             for host in ("news.cn", "people.com.cn")
         ],
     )
     exa = Provider("exa", result=[])
-    chain = SearchChain([langsearch, exa])
+    chain = SearchChain([yuanbao, exa])
 
     results = await chain.search_filtered(
         SearchParams(query="具体事件", lang="zh"),
@@ -427,25 +370,25 @@ async def test_langsearch_diverse_sources_do_not_spend_exa():
     )
 
     assert len(results) == 2
-    assert (langsearch.calls, exa.calls) == (1, 0)
+    assert (yuanbao.calls, exa.calls) == (1, 0)
 
 
 @pytest.mark.asyncio
-async def test_exa_budget_exhaustion_preserves_langsearch_lead():
-    langsearch = Provider(
-        "langsearch",
+async def test_exa_budget_exhaustion_preserves_yuanbao_lead():
+    yuanbao = Provider(
+        "yuanbao",
         result=[
             SearchResult(
                 url="https://www.zaobao.com.sg/story-1",
                 title="事件报道",
                 snippet="与事件相关",
-                provider="langsearch",
+                provider="yuanbao",
             )
         ],
     )
     exa = Provider("exa", result=[])
     qianfan = Provider("qianfan", result=[])
-    chain = SearchChain([langsearch, exa, qianfan])
+    chain = SearchChain([yuanbao, exa, qianfan])
     reservations = 0
 
     async def reserve():
@@ -461,29 +404,29 @@ async def test_exa_budget_exhaustion_preserves_langsearch_lead():
         source_group=lambda item: urlsplit(item.url).hostname or "",
     )
 
-    assert [item.provider for item in results] == ["langsearch"]
-    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 0, 0)
+    assert [item.provider for item in results] == ["yuanbao"]
+    assert (yuanbao.calls, exa.calls, qianfan.calls) == (1, 0, 0)
     assert chain.last_diagnostics[-1]["status"] == "budget_exhausted"
-    assert chain.last_provider == "langsearch"
+    assert chain.last_provider == "yuanbao"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exa_error", [False, True])
-async def test_exa_without_new_material_tries_limited_api_and_keeps_langsearch(exa_error):
-    langsearch = Provider(
-        "langsearch",
+async def test_exa_without_new_material_tries_limited_api_and_keeps_yuanbao(exa_error):
+    yuanbao = Provider(
+        "yuanbao",
         result=[
             SearchResult(
                 url="https://www.zaobao.com.sg/story-1",
                 title="事件报道",
                 snippet="与事件相关",
-                provider="langsearch",
+                provider="yuanbao",
             )
         ],
     )
     exa = Provider("exa", result=[], error=RuntimeError("temporary") if exa_error else None)
     qianfan = Provider("qianfan", result=[])
-    chain = SearchChain([langsearch, exa, qianfan])
+    chain = SearchChain([yuanbao, exa, qianfan])
 
     results = await chain.search_filtered(
         SearchParams(query="具体事件", lang="zh"),
@@ -491,21 +434,21 @@ async def test_exa_without_new_material_tries_limited_api_and_keeps_langsearch(e
         min_source_groups=2,
     )
 
-    assert [item.provider for item in results] == ["langsearch"]
-    assert (langsearch.calls, exa.calls, qianfan.calls) == (1, 1, 1)
-    assert chain.last_provider == "langsearch"
+    assert [item.provider for item in results] == ["yuanbao"]
+    assert (yuanbao.calls, exa.calls, qianfan.calls) == (1, 1, 1)
+    assert chain.last_provider == "yuanbao"
 
 
 @pytest.mark.asyncio
 async def test_chinese_sparse_sources_use_qianfan_then_stop_before_bocha():
-    langsearch = Provider(
-        "langsearch",
+    yuanbao = Provider(
+        "yuanbao",
         result=[
             SearchResult(
                 url="https://news.cn/event",
                 title="事件报道",
                 snippet="与事件相关",
-                provider="langsearch",
+                provider="yuanbao",
             )
         ],
     )
@@ -532,7 +475,7 @@ async def test_chinese_sparse_sources_use_qianfan_then_stop_before_bocha():
         ],
     )
     bocha = Provider("bocha", result=[])
-    chain = SearchChain([langsearch, exa, qianfan, bocha])
+    chain = SearchChain([yuanbao, exa, qianfan, bocha])
 
     results = await chain.search_filtered(
         SearchParams(query="具体事件", lang="zh"),
@@ -541,8 +484,8 @@ async def test_chinese_sparse_sources_use_qianfan_then_stop_before_bocha():
         source_group=lambda item: urlsplit(item.url).hostname or "",
     )
 
-    assert [item.provider for item in results] == ["langsearch", "qianfan"]
-    assert (langsearch.calls, exa.calls, qianfan.calls, bocha.calls) == (1, 1, 1, 0)
+    assert [item.provider for item in results] == ["yuanbao", "qianfan"]
+    assert (yuanbao.calls, exa.calls, qianfan.calls, bocha.calls) == (1, 1, 1, 0)
     assert [item["status"] for item in chain.last_diagnostics] == [
         "insufficient_coverage",
         "insufficient_coverage",
@@ -552,7 +495,7 @@ async def test_chinese_sparse_sources_use_qianfan_then_stop_before_bocha():
 
 @pytest.mark.asyncio
 async def test_chinese_sparse_sources_reach_bocha_with_task_budget():
-    langsearch = Provider("langsearch", result=[])
+    yuanbao = Provider("yuanbao", result=[])
     exa = Provider(
         "exa",
         result=[
@@ -576,7 +519,7 @@ async def test_chinese_sparse_sources_reach_bocha_with_task_budget():
             )
         ],
     )
-    chain = SearchChain([langsearch, exa, qianfan, bocha])
+    chain = SearchChain([yuanbao, exa, qianfan, bocha])
     reservations = 0
 
     async def reserve():
@@ -593,7 +536,7 @@ async def test_chinese_sparse_sources_reach_bocha_with_task_budget():
     )
 
     assert [item.provider for item in results] == ["exa", "bocha"]
-    assert (langsearch.calls, exa.calls, qianfan.calls, bocha.calls) == (1, 1, 1, 1)
+    assert (yuanbao.calls, exa.calls, qianfan.calls, bocha.calls) == (1, 1, 1, 1)
     assert reservations == 4
 
 
@@ -662,7 +605,7 @@ async def test_history_case_from_exa_does_not_fall_through_to_tavily():
     tavily = Provider("tavily", result=[])
     scope = InvestigationScope(
         event_query="武汉大学通报图书馆事件调查复核情况",
-        languages=("zh",),
+        languages=("zh", "en"),
         source_scope="domestic",
     )
     query = "university student misconduct investigation outcome case"

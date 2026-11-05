@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS task (
   time_range_from TEXT,
   time_range_to TEXT,
   source_scope TEXT NOT NULL DEFAULT 'auto' CHECK (source_scope IN ('auto','domestic','global')),
+  source_scope_resolution TEXT,
   source_languages TEXT NOT NULL DEFAULT '["zh","en"]',
   comment_mode TEXT NOT NULL DEFAULT 'off' CHECK (comment_mode IN ('off','smart','manual','hybrid')),
   comment_urls TEXT NOT NULL DEFAULT '[]',

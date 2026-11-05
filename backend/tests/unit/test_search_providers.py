@@ -4,7 +4,6 @@ import httpx
 import pytest
 
 from yuqing.core.search.base import SearchParams
-from yuqing.core.search.langsearch import LangSearchLimiter, LangSearchProvider
 from yuqing.core.search.providers import (
     BochaSearchProvider,
     ExaSearchProvider,
@@ -22,87 +21,6 @@ def _client(captured: dict, body: dict, *, status_code: int = 200) -> httpx.Asyn
         return httpx.Response(status_code, json=body, request=request)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
-@pytest.mark.asyncio
-async def test_langsearch_uses_current_camel_case_filters_and_provider_fulltext():
-    captured: dict = {}
-    client = _client(
-        captured,
-        {
-            "code": 200,
-            "log_id": "ls-1",
-            "data": {
-                "webPages": {
-                    "value": [
-                        {
-                            "url": "https://example.com/article",
-                            "name": "标题",
-                            "text": "网页全文",
-                            "datePublished": "2026-09-01T00:00:00Z",
-                        }
-                    ]
-                }
-            },
-            "usage": {"input_tokens": 2, "output_tokens": 8},
-        },
-    )
-    provider = LangSearchProvider(
-        "key", client=client, limiter=LangSearchLimiter(0, max_calls_per_minute=10)
-    )
-    results = await provider.search(
-        SearchParams(
-            query="事件",
-            freshness="2026-09-01..2026-09-22",
-            include_domains=["example.com"],
-            exclude_domains=["ads.example.com"],
-        )
-    )
-
-    assert captured["payload"]["contents"] == {"text": {"maxCharacters": 3000}}
-    assert captured["payload"]["includeDomains"] == ["example.com"]
-    assert captured["payload"]["excludeDomains"] == ["ads.example.com"]
-    assert "summary" not in captured["payload"]
-    assert results[0].content_text == "网页全文"
-    assert results[0].content_origin == "provider_fulltext"
-    assert results[0].usage == {"input_tokens": 2, "output_tokens": 8}
-    assert results[0].provider_metadata["log_id"] == "ls-1"
-    await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_langsearch_snippet_first_keeps_exa_text_setting_independent():
-    captured: dict = {}
-    client = _client(
-        captured,
-        {
-            "data": {
-                "webPages": {
-                    "value": [
-                        {
-                            "url": "https://example.com/article",
-                            "name": "事件标题",
-                            "snippet": "事件摘要",
-                            "text": "上游意外返回的正文",
-                        }
-                    ]
-                }
-            }
-        },
-    )
-    provider = LangSearchProvider(
-        "key", client=client, limiter=LangSearchLimiter(0, max_calls_per_minute=10)
-    )
-
-    results = await provider.search(
-        SearchParams(query="事件", contents_text=True, langsearch_contents_text=False)
-    )
-
-    assert captured["payload"]["contents"] == {"text": False}
-    assert results[0].snippet == "事件摘要"
-    assert results[0].content_text is None
-    assert results[0].content_origin == "search_snippet"
-    await client.aclose()
 
 
 @pytest.mark.asyncio

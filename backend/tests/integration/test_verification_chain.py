@@ -58,7 +58,7 @@ async def test_provider_fulltext_is_reusable_but_not_promoted_to_direct_snapshot
                 url="https://example.com/report",
                 title="公开报告",
                 snippet="公开报告摘要",
-                provider="langsearch",
+                provider="yuanbao",
                 content_text=provider_text,
                 content_origin="provider_fulltext",
             )

@@ -57,7 +57,7 @@ class StaticPlanner:
 
 @pytest.mark.asyncio
 async def test_initial_discovery_uses_specific_planned_query_before_generic_templates():
-    free = StaticProvider("langsearch", [])
+    free = StaticProvider("yuanbao", [])
     discovery = TopicDiscovery(StaticSearch([free]), StaticFetcher(), planner=StaticPlanner())
 
     await discovery.discover(
@@ -207,7 +207,7 @@ async def test_candidate_sources_allow_mixed_timezone_and_missing_publish_dates(
 @pytest.mark.asyncio
 async def test_discovery_stops_before_third_provider_after_two_productive_paths():
     first = StaticProvider(
-        "langsearch",
+        "yuanbao",
         [
             result(
                 "https://www.whu.edu.cn/notice.html",
@@ -255,12 +255,12 @@ async def test_discovery_stops_before_third_provider_after_two_productive_paths(
     assert first.calls
     assert second.calls
     assert reserve.calls == []
-    assert outcome.provider_coverage.successful == ("langsearch", "qianfan")
+    assert outcome.provider_coverage.successful == ("qianfan", "yuanbao")
 
 
 @pytest.mark.asyncio
 async def test_empty_http_response_is_not_counted_as_effective_provider_coverage():
-    empty = StaticProvider("langsearch", [])
+    empty = StaticProvider("yuanbao", [])
     productive = StaticProvider(
         "qianfan",
         [

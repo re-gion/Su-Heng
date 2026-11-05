@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from yuqing.services.investigation_scope import detect_text_language
 from yuqing.storage.db import Database, now_iso
 from yuqing.storage.models import EvidenceCreate
 
@@ -350,8 +351,19 @@ class HistoricalDataService:
         *,
         date_from: str | None = None,
         date_to: str | None = None,
+        languages: list[str] | None = None,
     ) -> str:
         matches = await self.dataset_query(event_query)
+        if languages is not None:
+            allowed = {language.split("-", 1)[0] for language in languages}
+            matches = [
+                match
+                for match in matches
+                if detect_text_language(
+                    f"{match.source_title or match.event_name} {match.summary or ''}"
+                )
+                in allowed
+            ]
         for match in matches:
             evidence = await self.database.add_evidence(
                 EvidenceCreate(
@@ -369,6 +381,9 @@ class HistoricalDataService:
                     source_tier=4,
                     published_at=match.source_published_at,
                     retrieval_query=event_query,
+                    lang=detect_text_language(
+                        f"{match.source_title or match.event_name} {match.summary or ''}"
+                    ),
                     provider="local_dataset",
                     kind="local_dataset",
                     extra={
@@ -397,6 +412,10 @@ class HistoricalDataService:
         hot_points = await self.hotlist_query(
             event_query, date_from=date_from, date_to=date_to, limit=50
         )
+        if languages is not None:
+            hot_points = [
+                point for point in hot_points if detect_text_language(point.title) in allowed
+            ]
         lines = ["本地历史库命中（仅作辅助检索，不用于预测）："]
         lines.extend(
             f"- {item.event_name}（{item.event_time_start or '时间未知'}）：{item.summary}；"

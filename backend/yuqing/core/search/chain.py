@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
@@ -21,7 +22,7 @@ class SearchChainExhausted(RuntimeError):
 class SearchChain:
     name = "search_chain"
     capabilities = {"freshness", "domain_filter", "publish_time"}
-    domestic_names = ("langsearch", "exa", "qianfan", "bocha", "zhipu")
+    domestic_names = ("yuanbao", "exa", "qianfan", "bocha", "zhipu")
     foreign_names = ("exa", "tavily", "serper")
 
     def __init__(
@@ -125,7 +126,7 @@ class SearchChain:
     async def search_filtered(
         self,
         params: SearchParams,
-        accept: Callable[[SearchResult], SearchAcceptance],
+        accept: Callable[[SearchResult], SearchAcceptance | Awaitable[SearchAcceptance]],
         *,
         before_call: Callable[[], Awaitable[bool]] | None = None,
         min_source_groups: int = 1,
@@ -190,7 +191,8 @@ class SearchChain:
         self,
         params: SearchParams,
         *,
-        accept: Callable[[SearchResult], SearchAcceptance] | None = None,
+        accept: Callable[[SearchResult], SearchAcceptance | Awaitable[SearchAcceptance]]
+        | None = None,
         before_call: Callable[[], Awaitable[bool]] | None = None,
         min_source_groups: int = 1,
         source_group: Callable[[SearchResult], str] | None = None,
@@ -215,7 +217,7 @@ class SearchChain:
         pending: list[tuple[SearchProvider, SearchParams, str | None]] = [
             (provider, params, None) for provider in eligible
         ]
-        for index, (provider, params, recovery_reason) in enumerate(pending):
+        for provider, params, recovery_reason in pending:
             rejected: dict[str, int] = {}
 
             def record(
@@ -233,30 +235,6 @@ class SearchChain:
                         **entry,
                     }
                 )
-
-            def schedule_date_recovery(
-                current_provider=provider,
-                request=params,
-                recovery=recovery_reason,
-                position=index,
-            ) -> None:
-                # Only one extra request, through the same quota/budget/breaker
-                # path. Never relax strict/recent windows, domains or relevance.
-                if (
-                    current_provider.name == "langsearch"
-                    and accept is not None
-                    and request.allow_freshness_fallback
-                    and request.freshness[:1].isdigit()
-                    and recovery is None
-                ):
-                    pending.insert(
-                        position + 1,
-                        (
-                            current_provider,
-                            request.model_copy(update={"freshness": "noLimit"}),
-                            "relax_preferred_date_window",
-                        ),
-                    )
 
             if required and required not in provider.capabilities:
                 record({"provider": provider.name, "status": "skipped", "reason": "capability"})
@@ -343,13 +321,14 @@ class SearchChain:
                         "accepted_count": 0,
                     }
                 )
-                schedule_date_recovery()
                 continue
             scoped_count = len(results)
             if accept is not None:
                 accepted_results = []
                 for item in results:
                     decision = accept(item)
+                    if inspect.isawaitable(decision):
+                        decision = await decision
                     accepted, reasons = decision if isinstance(decision, tuple) else (decision, ())
                     if accepted:
                         accepted_results.append(item)
@@ -367,7 +346,6 @@ class SearchChain:
                         "accepted_count": 0,
                     }
                 )
-                schedule_date_recovery()
                 continue
             accepted_count = len(results)
             if candidate_results:

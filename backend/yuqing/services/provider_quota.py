@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -71,8 +72,17 @@ def _amount(provider: str, params: SearchParams) -> int:
 
 
 class ProviderQuotaManager:
-    def __init__(self, database: Database):
+    def __init__(self, database: Database, *, environ: Mapping[str, str] | None = None):
         self.database = database
+        values = os.environ if environ is None else environ
+        self.yuanbao_task_limit = int(values.get("YUANBAO_MAX_CALLS_PER_TASK", "60"))
+        self.yuanbao_month_limit = int(values.get("YUANBAO_MAX_CALLS_PER_MONTH", "3000"))
+        if min(self.yuanbao_task_limit, self.yuanbao_month_limit) < 0:
+            raise ValueError("元宝搜索调用上限不能为负数")
+        self.policies = {
+            **POLICIES,
+            "yuanbao": (QuotaWindow("month", self.yuanbao_month_limit, self.yuanbao_month_limit),),
+        }
 
     async def reserve(
         self,
@@ -83,7 +93,7 @@ class ProviderQuotaManager:
         task_id: str | None = None,
         task_limit: int | None = None,
     ) -> None:
-        policy = POLICIES.get(provider, ())
+        policy = self.policies.get(provider, ())
         now = datetime.now().astimezone()
         amount = _amount(provider, params)
         entries = [
@@ -110,25 +120,12 @@ class ProviderQuotaManager:
                 f"search:{provider}:observed_calls", _period_key(period, now), 1
             )
 
-    async def record_unbounded_usage(self, provider: str, usage: dict[str, Any]) -> None:
-        if provider != "langsearch":
-            return
-        tokens = int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
-        if tokens <= 0:
-            return
-        now = datetime.now().astimezone()
-        for period in ("day", "month"):
-            await self.database.record_provider_usage(
-                "search:langsearch:tokens", _period_key(period, now), tokens
-            )
-
     async def public_status(self) -> dict[str, dict[str, Any]]:
         """Return local protection counters without presenting them as provider billing facts."""
 
         now = datetime.now().astimezone()
         today = _period_key("day", now)
         month = _period_key("month", now)
-        langsearch_used = await self.database.provider_usage("search:langsearch:tokens", today)
         statuses: dict[str, dict[str, Any]] = {
             "exa": {
                 "state": "metered_without_fixed_limit",
@@ -147,25 +144,8 @@ class ProviderQuotaManager:
                     }
                 ],
             },
-            "langsearch": {
-                "state": "metered_without_fixed_limit",
-                "upstream_quota_verified": False,
-                "activity": await self._activity("langsearch", today, month),
-                "windows": [
-                    {
-                        "period": "day",
-                        "period_key": today,
-                        "unit": "tokens",
-                        "used": langsearch_used,
-                        "normal_limit": None,
-                        "critical_limit": None,
-                        "normal_remaining": None,
-                        "critical_remaining": None,
-                    }
-                ],
-            },
         }
-        for provider, policy in POLICIES.items():
+        for provider, policy in self.policies.items():
             windows: list[dict[str, Any]] = []
             normal_limit_reached = False
             critical_limit_reached = False
@@ -315,11 +295,6 @@ class QuotaAwareSearchProvider:
         if self.limiter is not None:
             await self.limiter.acquire()
         results = await self.provider.search(params)
-        usage = getattr(self.provider, "last_usage", {})
-        if not usage and results:
-            usage = results[0].usage or {}
-        if isinstance(usage, dict):
-            await self.quotas.record_unbounded_usage(self.name, usage)
         return results
 
     def __getattr__(self, name: str) -> Any:
