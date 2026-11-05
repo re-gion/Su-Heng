@@ -25,7 +25,7 @@ from yuqing.core.comments import adapter_for_url
 from yuqing.core.events import EventBus
 from yuqing.core.fetch import BuiltinFetchProvider, FetchChain, FirecrawlCloudProvider
 from yuqing.core.llm.factory import LLMClientFactory
-from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message
+from yuqing.core.llm.gateway import LLMGateway, sanitize_upstream_message, upstream_diagnostic
 from yuqing.core.search.chain import SearchChain
 from yuqing.core.search.providers import (
     BochaSearchProvider,
@@ -50,6 +50,7 @@ from yuqing.services.auth import (
     InvalidCode,
     InvalidEmail,
     MailDeliveryError,
+    RegistrationNotAllowed,
 )
 from yuqing.services.budget import (
     DEFAULT_BUDGET_TABLE,
@@ -80,6 +81,7 @@ from yuqing.services.public_interest import (
     INSTITUTION_SCOPE_CATEGORY,
     PUBLIC_EVENT_CATEGORY,
     PolicyChecker,
+    PublicInterestCheckUnavailable,
     PublicInterestDecision,
     assess_public_interest,
 )
@@ -316,10 +318,10 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             )
             for name in ("fact_investigator", "media_propagation", "history_insight")
         }
-        model_names = {
-            role: f"{llm_factory.config(role).base_url}|{llm_factory.config(role).model}"
-            for role in ("analyst_a", "analyst_b", "analyst_c", "moderator", "verifier", "reporter")
-        }
+        model_names = {}
+        for role in ("analyst_a", "analyst_b", "analyst_c", "moderator", "verifier", "reporter"):
+            role_config = llm_factory.config(role)
+            model_names[role] = f"{role_config.protocol}|{role_config.base_url}|{role_config.model}"
         return V1Orchestrator(
             database,
             events,
@@ -652,6 +654,8 @@ def create_app(
             await auth_service.request_code(payload.email, client_ip)
         except InvalidEmail as exc:
             return error_response("EMAIL_INVALID", str(exc), 422)
+        except RegistrationNotAllowed as exc:
+            return error_response("REGISTRATION_NOT_ALLOWED", str(exc), 403)
         except CodeRateLimited as exc:
             return error_response(
                 "AUTH_RATE_LIMITED",
@@ -675,6 +679,8 @@ def create_app(
             token, user = await auth_service.verify_code(payload.email, payload.code)
         except InvalidEmail as exc:
             return error_response("EMAIL_INVALID", str(exc), 422)
+        except RegistrationNotAllowed as exc:
+            return error_response("REGISTRATION_NOT_ALLOWED", str(exc), 403)
         except InvalidCode as exc:
             return error_response("CODE_INVALID", str(exc), 401)
         response = JSONResponse({"user": user})
@@ -980,7 +986,11 @@ def create_app(
                     "role": role,
                     "latency_ms": round((time.perf_counter() - started) * 1000),
                     "sample": reply,
-                    "resolved": {"base_url": resolved.base_url, "model": resolved.model},
+                    "resolved": {
+                        "base_url": resolved.base_url,
+                        "model": resolved.model,
+                        "protocol": resolved.protocol,
+                    },
                 }
             if payload.get("kind") == "search":
                 name = str(payload.get("provider") or "")
@@ -1083,11 +1093,45 @@ def create_app(
         try:
             decision = await policy_checker(database, payload.event_query, payload.user_note)
         except Exception as exc:
+            if isinstance(exc, PublicInterestCheckUnavailable):
+                reason_messages = {
+                    "invalid_json": "模型返回内容不是有效 JSON",
+                    "invalid_fields": "模型返回字段缺失或类型不正确",
+                    "unknown_category": "模型返回了未支持的公共性类别",
+                    "inconsistent_decision": "模型返回的放行结论与类别不一致",
+                    "invalid_output": "模型返回结果未通过公共性门禁校验",
+                }
+                return error_response(
+                    "POLICY_CHECK_INVALID_OUTPUT",
+                    "公共性门禁未能得到有效判定（"
+                    + reason_messages.get(exc.reason_code, reason_messages["invalid_output"])
+                    + "）。请重试；若重复出现，请检查 utility 模型的 JSON 输出能力。",
+                    503,
+                    recoverable=True,
+                    details={
+                        "reason_code": exc.reason_code,
+                        "attempts": exc.attempts,
+                    },
+                )
+            diagnostic = upstream_diagnostic(exc, stage="public_interest")
+            details = {
+                "category": diagnostic["category"],
+                "status": diagnostic["status"],
+                "error_type": diagnostic["error_type"],
+            }
+            if diagnostic["status"] and diagnostic["status"] >= 500:
+                message = (
+                    f"公共性门禁上游服务返回 HTTP {diagnostic['status']}，"
+                    "请稍后重试；若持续发生，请检查中转站状态。"
+                )
+            else:
+                message = f"公共性门禁暂时不可用：{type(exc).__name__}"
             return error_response(
                 "POLICY_CHECK_UNAVAILABLE",
-                f"公共性门禁暂时不可用：{type(exc).__name__}",
+                message,
                 503,
                 recoverable=True,
+                details=details,
             )
         if not decision.allowed:
             if decision.category == INSTITUTION_SCOPE_CATEGORY:

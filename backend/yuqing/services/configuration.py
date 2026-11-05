@@ -74,6 +74,7 @@ class ConfigService:
             "api_key": values.get("DEFAULT_API_KEY", "").strip() or None,
             "base_url": values.get("DEFAULT_BASE_URL", "").strip() or "https://api.deepseek.com/v1",
             "model": values.get("DEFAULT_MODEL", "").strip() or "deepseek-chat",
+            "protocol": values.get("DEFAULT_PROTOCOL", "").strip().lower() or "openai",
         }
         default = {
             field: mask_secret(value) if field == "api_key" else value
@@ -81,7 +82,7 @@ class ConfigService:
         }
         default["source"] = {
             field: self._origin(f"DEFAULT_{field.upper()}", stored, self.environ)
-            for field in ("api_key", "base_url", "model")
+            for field in ("api_key", "base_url", "model", "protocol")
         }
         roles: dict[str, Any] = {}
         for role in ROLES:
@@ -89,7 +90,7 @@ class ConfigService:
             explicit: dict[str, str | None] = {}
             effective: dict[str, str | None] = {}
             source: dict[str, str] = {}
-            for field in ("api_key", "base_url", "model"):
+            for field in ("api_key", "base_url", "model", "protocol"):
                 key = prefix + field.upper()
                 raw = values.get(key, "").strip() or None
                 explicit[field] = mask_secret(raw) if field == "api_key" else raw
@@ -152,7 +153,7 @@ class ConfigService:
             if not isinstance(llm.get("default"), dict):
                 raise ValueError("llm.default 必须是对象")
             for field, value in (llm.get("default") or {}).items():
-                if field in {"api_key", "base_url", "model"}:
+                if field in {"api_key", "base_url", "model", "protocol"}:
                     changes[f"DEFAULT_{field.upper()}"] = value
         role_values = llm.get("roles") or {}
         if not isinstance(role_values, dict):
@@ -163,7 +164,7 @@ class ConfigService:
             if not isinstance(fields, dict):
                 raise ValueError(f"LLM 角色 {role} 必须是对象")
             for field, value in (fields or {}).items():
-                if field in {"api_key", "base_url", "model"}:
+                if field in {"api_key", "base_url", "model", "protocol"}:
                     changes[f"LLM_{role.upper()}_{field.upper()}"] = value
         search = payload.get("search") or {}
         if not isinstance(search, dict):
@@ -236,6 +237,8 @@ class ConfigService:
                 parsed = urlparse(value)
                 if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                     raise ValueError(f"{key} 必须是 http(s) URL")
+            if key.endswith("PROTOCOL") and value and value.lower() not in {"openai", "anthropic"}:
+                raise ValueError(f"{key} 必须是 openai 或 anthropic")
         await self.database.set_config_values(changes, secret_keys=SECRET_KEYS)
         return await self.public()
 

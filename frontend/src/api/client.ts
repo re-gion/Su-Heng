@@ -153,8 +153,8 @@ export type ProviderQuotaStatus = {
 
 export type PublicConfig = {
   llm: {
-    default: { api_key: string | null; base_url: string; model: string }
-    roles: Record<string, { api_key: string | null; base_url: string | null; model: string | null; effective: { api_key: string | null; base_url: string; model: string }; source: Record<string, string> }>
+    default: { api_key: string | null; base_url: string; model: string; protocol: 'openai' | 'anthropic' }
+    roles: Record<string, { api_key: string | null; base_url: string | null; model: string | null; protocol: 'openai' | 'anthropic' | null; effective: { api_key: string | null; base_url: string; model: string; protocol: 'openai' | 'anthropic' }; source: Record<string, string> }>
   }
   search: { provider_order: string[]; keys: Record<string, string | null>; quota: Record<string, ProviderQuotaStatus>; yuanbao?: { version: string; max_calls_per_task: number; max_calls_per_month: number } }
   fetch: { provider_order: string[]; keys: Record<string, string | null>; quota?: Record<string, ProviderQuotaStatus> }
@@ -240,8 +240,8 @@ export async function updateConfig(payload: unknown): Promise<PublicConfig> {
   return mutation('/api/config', 'PUT', payload) as Promise<PublicConfig>
 }
 
-export async function testConfig(payload: { kind: 'llm'; role: string } | { kind: 'search'; provider: string }): Promise<{ ok: boolean; sample?: string; error?: { message?: string }; latency_ms: number }> {
-  return mutation('/api/config/test', 'POST', payload) as Promise<{ ok: boolean; sample?: string; error?: { message?: string }; latency_ms: number }>
+export async function testConfig(payload: { kind: 'llm'; role: string } | { kind: 'search'; provider: string }): Promise<{ ok: boolean; sample?: string; error?: { message?: string }; latency_ms: number; resolved?: { base_url: string; model: string; protocol?: 'openai' | 'anthropic' } }> {
+  return mutation('/api/config/test', 'POST', payload) as Promise<{ ok: boolean; sample?: string; error?: { message?: string }; latency_ms: number; resolved?: { base_url: string; model: string; protocol?: 'openai' | 'anthropic' } }>
 }
 
 export async function listTasks(): Promise<TaskListItem[]> {

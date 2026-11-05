@@ -1,7 +1,9 @@
 import pytest
-from pydantic import ValidationError
 
-from yuqing.services.public_interest import assess_public_interest
+from yuqing.services.public_interest import (
+    PublicInterestCheckUnavailable,
+    assess_public_interest,
+)
 
 
 class FlakyGateway:
@@ -78,18 +80,20 @@ async def test_policy_gate_requires_named_category_and_retries_invalid_pair(monk
 
 
 @pytest.mark.asyncio
-async def test_policy_gate_raises_after_second_invalid_output(monkeypatch):
+async def test_policy_gate_reports_invalid_output_after_second_invalid_result(monkeypatch):
     gateway = FlakyGateway(
         [
-            {"answer": "not-a-decision"},
-            {"allowed": "是", "reason": "", "category": ""},
+            {"allowed": True, "reason": "未知类别", "category": "policy"},
+            {"allowed": True, "reason": "未知类别", "category": "policy"},
         ]
     )
     monkeypatch.setattr("yuqing.services.public_interest.ConfigService", StubConfigService)
     monkeypatch.setattr("yuqing.services.public_interest.LLMGateway", lambda _f: gateway)
     monkeypatch.setattr("yuqing.services.public_interest.LLMClientFactory", StubFactory)
 
-    with pytest.raises((ValueError, ValidationError)):
+    with pytest.raises(PublicInterestCheckUnavailable) as exc_info:
         await assess_public_interest(None, "某事件", None)
 
     assert len(gateway.prompts) == 2
+    assert exc_info.value.reason_code == "unknown_category"
+    assert "category 只能是" in gateway.prompts[1]

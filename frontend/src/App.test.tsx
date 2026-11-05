@@ -123,6 +123,37 @@ describe('V2 task desk', () => {
     })
   })
 
+  it('saves the selected Anthropic protocol for a model role', async () => {
+    const config = await (await baseFetch('/api/config')).json() as Record<string, any>
+    config.llm.roles = {
+      analyst_a: {
+        api_key: null,
+        base_url: null,
+        model: null,
+        protocol: null,
+        effective: { api_key: 'sk-***key', base_url: 'https://relay.example', model: 'claude-test', protocol: 'openai' },
+        source: { api_key: 'env', base_url: 'env', model: 'env', protocol: 'inherit' },
+      },
+    }
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/config' && init?.method === 'PUT') return Promise.resolve(json(config))
+      if (String(input) === '/api/config') return Promise.resolve(json(config))
+      return baseFetch(input, init)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '系统配置 ↗' }))
+    fireEvent.change(await screen.findByLabelText('事实调查 接口协议'), { target: { value: 'anthropic' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url, init]) => String(url) === '/api/config' && init?.method === 'PUT')
+      expect(call).toBeTruthy()
+      expect(JSON.parse(String(call?.[1]?.body)).llm.roles.analyst_a.protocol).toBe('anthropic')
+    })
+  })
+
   it('pauses a broad topic until a concrete event is selected', async () => {
     history.replaceState(null, '', '/?task=t-topic')
     render(<App />)

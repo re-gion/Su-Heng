@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime
 from types import SimpleNamespace
@@ -552,6 +553,102 @@ async def test_agent_429_preserves_prior_work_and_explains_stage(
     assert any(
         event.event == "agent.status" and event.data.get("phase") == phase for event in events
     )
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_budget_reached_stops_agent_before_reflection(runtime_dir):
+    from yuqing.storage.models import ClaimCreate, EvidenceCreate
+
+    class CountingAgent(NamedAgent):
+        def __init__(self):
+            super().__init__("fact_investigator")
+            self.summaries = 0
+            self.reflections = 0
+
+        async def summarize(self, event_query, evidence):
+            self.summaries += 1
+            return await super().summarize(event_query, evidence)
+
+        async def reflect(self, event_query, claims):
+            self.reflections += 1
+            return await super().reflect(event_query, claims)
+
+    database = Database(runtime_dir / "claim-budget-stop.db")
+    await database.initialize()
+    task = await database.create_task(
+        TaskCreate(event_query="陈述预算上限测试", depth="quick", source_languages=["zh"])
+    )
+    evidence = await database.add_evidence(
+        EvidenceCreate(
+            task_id=task.id,
+            url="https://www.gov.cn/budget-test",
+            title="陈述预算上限测试公开材料",
+            snippet="陈述预算上限测试已有主管部门公开材料。",
+            kind="web",
+        )
+    )
+    for index in range(14):
+        await database.add_claim(
+            ClaimCreate(
+                task_id=task.id,
+                text=f"已有预算陈述第 {index + 1} 项。",
+                agent="fact_investigator",
+                evidence_ids=[evidence.local_id],
+            ),
+            max_claims=15,
+            max_evidence_per_claim=3,
+        )
+
+    agent = CountingAgent()
+    search = FixtureSearchProvider(
+        [
+            SearchResult(
+                url="https://www.gov.cn/budget-new",
+                title="陈述预算上限测试补充公开材料",
+                snippet="陈述预算上限测试另有主管部门公开材料。",
+                source_name="主管部门",
+                provider="fixture",
+            )
+        ]
+    )
+    orchestrator = V1Orchestrator(
+        database,
+        EventBus(database),
+        search=search,
+        fetcher=FailFetcher(),
+        snapshots=SnapshotStore(runtime_dir / "snapshots"),
+        agents={"fact_investigator": agent},
+        moderator=ReleaseModerator(),
+        verifier=FixtureVerifier(),
+        reports_dir=runtime_dir / "reports",
+        max_inner_rounds=2,
+    )
+    orchestrator._budget_depth = "quick"
+    board = await ForumBoard.restore(database, task.id)
+
+    result = await orchestrator._run_agent(
+        task_id=task.id,
+        event_query=task.event_query,
+        agent_name="fact_investigator",
+        agent=agent,
+        board=board,
+        outer_round=1,
+        top_k=5,
+        claim_budget_stop=asyncio.Event(),
+    )
+
+    assert result["status"] == "partial"
+    assert len(await database.list_claims(task.id)) == 15
+    assert agent.summaries == 1
+    assert agent.reflections == 0
+    warnings = [
+        event
+        for event in await orchestrator.events.history(task.id)
+        if event.event == "warning" and event.data.get("code") == "CLAIM_BUDGET_REACHED"
+    ]
+    assert len(warnings) == 1
+    assert "停止并行调查席后续模型调用" in warnings[0].data["message"]
     await database.close()
 
 

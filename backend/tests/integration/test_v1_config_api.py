@@ -22,6 +22,7 @@ def test_config_api_masks_secrets_supports_partial_override_and_clear(
     monkeypatch.setenv("DEFAULT_API_KEY", "sk-default-secret")
     monkeypatch.setenv("DEFAULT_BASE_URL", "https://api.example.com/v1")
     monkeypatch.setenv("DEFAULT_MODEL", "default-model")
+    monkeypatch.delenv("DEFAULT_PROTOCOL", raising=False)
     monkeypatch.setenv("YUANBAO_API_KEY", "ls-secret-123")
     monkeypatch.delenv("LLM_VERIFIER_MODEL", raising=False)
     app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
@@ -29,10 +30,15 @@ def test_config_api_masks_secrets_supports_partial_override_and_clear(
         initial = client.get("/api/config")
         changed = client.put(
             "/api/config",
-            json={"llm": {"roles": {"verifier": {"model": "verify-model"}}}},
+            json={
+                "llm": {"roles": {"verifier": {"model": "verify-model", "protocol": "anthropic"}}}
+            },
         )
         current = client.get("/api/config")
-        cleared = client.put("/api/config", json={"llm": {"roles": {"verifier": {"model": None}}}})
+        cleared = client.put(
+            "/api/config",
+            json={"llm": {"roles": {"verifier": {"model": None, "protocol": None}}}},
+        )
 
     assert initial.status_code == 200
     assert "default-secret" not in initial.text
@@ -40,8 +46,23 @@ def test_config_api_masks_secrets_supports_partial_override_and_clear(
     assert changed.status_code == 200
     assert current.json()["llm"]["roles"]["verifier"]["effective"]["model"] == "verify-model"
     assert current.json()["llm"]["roles"]["verifier"]["source"]["model"] == "config"
+    assert current.json()["llm"]["roles"]["verifier"]["effective"]["protocol"] == "anthropic"
+    assert current.json()["llm"]["roles"]["verifier"]["source"]["protocol"] == "config"
     assert cleared.status_code == 200
     assert cleared.json()["llm"]["roles"]["verifier"]["effective"]["model"] == "default-model"
+    assert cleared.json()["llm"]["roles"]["verifier"]["effective"]["protocol"] == "openai"
+
+
+def test_config_api_rejects_unknown_llm_protocol(runtime_dir: Path):
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/config",
+            json={"llm": {"roles": {"utility": {"protocol": "claude-code"}}}},
+        )
+
+    assert response.status_code == 422
+    assert "必须是 openai 或 anthropic" in response.json()["error"]["message"]
 
 
 def test_config_api_exposes_domestic_foreign_search_and_fetch_order(runtime_dir: Path, monkeypatch):

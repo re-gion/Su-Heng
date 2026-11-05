@@ -10,6 +10,9 @@
         Referrer-Policy no-referrer
         -Server
     }
+    basic_auth {
+        preview $2a$14$sZvRnXp7kdZ25lO8uVIwAePczhmEeBrPQkltipCzu73SVx/K.NSjm
+    }
     reverse_proxy app:8000 {
         # app 不发布宿主机端口，且 Caddy 覆盖此值后，后端才信任它用于验证码限流。
         header_up X-Real-IP {remote_host}

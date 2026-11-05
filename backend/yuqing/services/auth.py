@@ -40,6 +40,10 @@ class InvalidCode(ValueError):
     pass
 
 
+class RegistrationNotAllowed(ValueError):
+    pass
+
+
 class CodeRateLimited(ValueError):
     def __init__(self, retry_after_seconds: int):
         super().__init__("verification code rate limit reached")
@@ -54,6 +58,7 @@ class MailDeliveryError(RuntimeError):
 class AuthSettings:
     session_secret: str
     admin_emails: frozenset[str]
+    allowed_emails: frozenset[str]
     smtp_host: str
     smtp_port: int
     smtp_security: str
@@ -69,9 +74,15 @@ class AuthSettings:
             for email in os.getenv("YUQING_ADMIN_EMAILS", "").split(",")
             if email.strip()
         )
+        allowed_emails = frozenset(
+            email.strip().casefold()
+            for email in os.getenv("YUQING_AUTH_ALLOWED_EMAILS", "").split(",")
+            if email.strip()
+        )
         return cls(
             session_secret=os.getenv("YUQING_AUTH_SESSION_SECRET", ""),
             admin_emails=admin_emails,
+            allowed_emails=allowed_emails,
             smtp_host=os.getenv("YUQING_SMTP_HOST", "").strip(),
             smtp_port=int(os.getenv("YUQING_SMTP_PORT", "587")),
             smtp_security=os.getenv("YUQING_SMTP_SECURITY", "starttls").strip().lower(),
@@ -86,6 +97,8 @@ class AuthSettings:
             raise ValueError("YUQING_AUTH_SESSION_SECRET must be at least 32 bytes")
         if not self.admin_emails or any(not valid_email(email) for email in self.admin_emails):
             raise ValueError("YUQING_ADMIN_EMAILS must contain at least one valid email")
+        if any(not valid_email(email) for email in self.allowed_emails):
+            raise ValueError("YUQING_AUTH_ALLOWED_EMAILS must contain valid email addresses")
         if not self.smtp_host or not self.mail_from or not valid_email(self.mail_from):
             raise ValueError("YUQING_SMTP_HOST and a valid YUQING_SMTP_FROM are required")
         if not 1 <= self.smtp_port <= 65535:
@@ -155,6 +168,9 @@ class EmailAuthService:
     def is_admin(self, email: str) -> bool:
         return email.casefold() in self.settings.admin_emails
 
+    def can_register(self, email: str) -> bool:
+        return email.casefold() in self.settings.allowed_emails
+
     def _key_hash(self, scope: str, value: str) -> str:
         message = f"{scope}:{value}".encode()
         return hmac.new(
@@ -172,6 +188,12 @@ class EmailAuthService:
 
     async def request_code(self, raw_email: str, client_ip: str) -> None:
         email = normalize_email(raw_email)
+        if not self.can_register(email):
+            existing_user = await self.database.fetch_one(
+                "SELECT 1 FROM user_account WHERE email=? COLLATE NOCASE", (email,)
+            )
+            if existing_user is None:
+                raise RegistrationNotAllowed("该邮箱未获准创建账号。")
         now = _utc_now()
         now_text = _iso(now)
         email_key = self._key_hash("email", email)
@@ -283,6 +305,8 @@ class EmailAuthService:
                 "SELECT id,email FROM user_account WHERE email=? COLLATE NOCASE", (email,)
             ).fetchone()
             if user is None:
+                if not self.can_register(email):
+                    return "registration_not_allowed", None, None
                 user_id = f"u_{uuid.uuid4().hex}"
                 connection.execute(
                     "INSERT INTO user_account(id,email,created_at) VALUES(?,?,?)",
@@ -302,6 +326,8 @@ class EmailAuthService:
             return "ok", user_id, email
 
         status, user_id, verified_email = await self.database.write(operation)
+        if status == "registration_not_allowed":
+            raise RegistrationNotAllowed("该邮箱未获准创建账号。")
         if status != "ok" or user_id is None or verified_email is None:
             raise InvalidCode("验证码无效或已过期，请重新获取。")
         return token, {

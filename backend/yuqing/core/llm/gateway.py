@@ -5,11 +5,13 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import time
 import uuid
 import weakref
-from contextlib import contextmanager, nullcontext
+from collections import deque
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -24,22 +26,172 @@ from yuqing.core.llm.factory import LLMClientFactory
 from yuqing.core.llm.roles import LLMRole
 from yuqing.core.text_safety import repair_unicode_scalars
 
-_MODEL_SLOTS: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop, dict[tuple[str, str, int], asyncio.Semaphore]
+_ENDPOINT_GATES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[str, str, int], _AdaptiveEndpointGate]
 ] = weakref.WeakKeyDictionary()
+_INITIAL_ENDPOINT_INFLIGHT = 2
+_DEFAULT_ENDPOINT_INFLIGHT_CEILING = 64
+_MAX_ENDPOINT_INFLIGHT_CEILING = 256
+_ACCOUNT_QUOTA_COOLDOWN_SECONDS = 60.0
 
 
-def _model_slot(config: Any) -> asyncio.Semaphore:
-    """Bound simultaneous calls sharing one endpoint and credential across tasks."""
+class _AdaptiveEndpointGate:
+    """FIFO endpoint queue with additive increase and shared rate-limit cooldown."""
+
+    def __init__(self, max_inflight: int):
+        self.max_inflight = max_inflight
+        self.inflight_limit = min(_INITIAL_ENDPOINT_INFLIGHT, max_inflight)
+        self.inflight = 0
+        self._condition = asyncio.Condition()
+        self._waiters: deque[object] = deque()
+        self._successes = 0
+        self._transient_failures = 0
+        self._rate_limit_failures = 0
+        self._cooldown_until = 0.0
+        self._quota_blocked_until = 0.0
+        self._quota_probe_active = False
+        self._quota_resume_limit = self.inflight_limit
+
+    async def _acquire(self) -> bool:
+        ticket = object()
+        async with self._condition:
+            self._waiters.append(ticket)
+            try:
+                while True:
+                    now = time.monotonic()
+                    if self._quota_blocked_until > now:
+                        raise LLMRateLimitBlocked(
+                            "account_quota", math.ceil(self._quota_blocked_until - now)
+                        )
+                    if (
+                        self._quota_blocked_until
+                        and not self._quota_probe_active
+                        and self.inflight == 0
+                        and self._waiters[0] is ticket
+                    ):
+                        # After the quota cooldown, admit exactly one probe.
+                        self._quota_probe_active = True
+                        self._waiters.popleft()
+                        self.inflight += 1
+                        self._condition.notify_all()
+                        return True
+                    if (
+                        self._waiters[0] is ticket
+                        and self.inflight < self.inflight_limit
+                        and now >= self._cooldown_until
+                    ):
+                        self._waiters.popleft()
+                        self.inflight += 1
+                        self._condition.notify_all()
+                        return False
+                    delay = max(0.0, self._cooldown_until - now)
+                    if delay:
+                        try:
+                            await asyncio.wait_for(self._condition.wait(), timeout=delay)
+                        except TimeoutError:
+                            pass
+                    else:
+                        await self._condition.wait()
+            except BaseException:
+                if ticket in self._waiters:
+                    self._waiters.remove(ticket)
+                    self._condition.notify_all()
+                raise
+
+    async def _release(self, error: BaseException | None, *, quota_probe: bool) -> None:
+        async with self._condition:
+            self.inflight = max(0, self.inflight - 1)
+            now = time.monotonic()
+            rate_detail = (
+                rate_limit_diagnostic(error) if isinstance(error, RateLimitError) else None
+            )
+
+            if quota_probe:
+                self._quota_probe_active = False
+                if not rate_detail or rate_detail["category"] != "account_quota":
+                    self._quota_blocked_until = 0.0
+                    self.inflight_limit = max(1, min(self.max_inflight, self._quota_resume_limit))
+
+            if rate_detail and rate_detail["category"] == "account_quota":
+                self._quota_resume_limit = max(self._quota_resume_limit, self.inflight_limit)
+                self.inflight_limit = 1
+                retry_after = int(rate_detail.get("retry_after_seconds", 0))
+                cooldown = max(_ACCOUNT_QUOTA_COOLDOWN_SECONDS, float(retry_after))
+                self._quota_blocked_until = max(self._quota_blocked_until, now + cooldown)
+                self._successes = 0
+            elif rate_detail:
+                self._rate_limit_failures += 1
+                self._transient_failures = 0
+                self.inflight_limit = max(1, self.inflight_limit // 2)
+                retry_after = rate_detail.get("retry_after_seconds")
+                if retry_after is not None:
+                    cooldown = float(retry_after)
+                else:
+                    base = min(60.0, 2.0 ** min(self._rate_limit_failures, 6))
+                    cooldown = base * random.uniform(0.8, 1.2)
+                self._cooldown_until = max(self._cooldown_until, now + cooldown)
+                self._successes = 0
+            elif isinstance(
+                error,
+                (
+                    APIConnectionError,
+                    APITimeoutError,
+                    InternalServerError,
+                    TimeoutError,
+                    ConnectionError,
+                ),
+            ):
+                self._transient_failures += 1
+                self._rate_limit_failures = 0
+                self.inflight_limit = max(1, self.inflight_limit // 2)
+                base = min(30.0, 2.0 ** min(self._transient_failures, 5))
+                self._cooldown_until = max(
+                    self._cooldown_until, now + base * random.uniform(0.8, 1.2)
+                )
+                self._successes = 0
+            elif error is None and not self._quota_blocked_until:
+                self._transient_failures = 0
+                self._rate_limit_failures = 0
+                self._cooldown_until = 0.0
+                self._successes += 1
+                if (
+                    self.inflight_limit < self.max_inflight
+                    and self._successes >= self.inflight_limit
+                ):
+                    self.inflight_limit += 1
+                    self._successes = 0
+
+            self._condition.notify_all()
+
+    @asynccontextmanager
+    async def slot(self):
+        quota_probe = await self._acquire()
+        try:
+            yield
+        except BaseException as exc:
+            await self._release(exc, quota_probe=quota_probe)
+            raise
+        else:
+            await self._release(None, quota_probe=quota_probe)
+
+
+def _model_slot(config: Any) -> _AdaptiveEndpointGate:
+    """Share an adaptive queue per endpoint and credential across task gateways."""
     try:
-        limit = min(16, max(1, int(os.getenv("YUQING_LLM_MAX_INFLIGHT", "2"))))
+        ceiling = min(
+            _MAX_ENDPOINT_INFLIGHT_CEILING,
+            max(
+                1,
+                int(os.getenv("YUQING_LLM_MAX_INFLIGHT", str(_DEFAULT_ENDPOINT_INFLIGHT_CEILING))),
+            ),
+        )
     except ValueError:
-        limit = 2
+        ceiling = _DEFAULT_ENDPOINT_INFLIGHT_CEILING
     loop = asyncio.get_running_loop()
-    slots = _MODEL_SLOTS.setdefault(loop, {})
+    gates = _ENDPOINT_GATES.setdefault(loop, {})
     fingerprint = hashlib.sha256(config.api_key.encode("utf-8")).hexdigest()
-    key = (config.base_url.rstrip("/").lower(), fingerprint, limit)
-    return slots.setdefault(key, asyncio.Semaphore(limit))
+    key = (config.base_url.rstrip("/").lower(), fingerprint, ceiling)
+    return gates.setdefault(key, _AdaptiveEndpointGate(ceiling))
 
 
 # 推理模型会在可见正文前消耗 max_tokens 输出思考内容；预算过小时正文为空或截断。
@@ -54,6 +206,15 @@ class LLMOutputTruncated(RuntimeError):
 
 class LLMServiceUnavailable(RuntimeError):
     """Stop a task branch while the same model endpoint is repeatedly unavailable."""
+
+
+class LLMRateLimitBlocked(LLMServiceUnavailable):
+    """Fail queued calls fast while an endpoint is known to have no account quota."""
+
+    def __init__(self, category: str, retry_after_seconds: int):
+        self.category = category
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("模型服务账户额度受限，已暂停该端点的排队请求")
 
 
 class LLMBudgetExhausted(RuntimeError):
@@ -215,6 +376,8 @@ def upstream_diagnostic(exc: BaseException, *, stage: str = "", batch: str = "")
         category = "request_parameter"
     elif status == 429:
         category = rate_limit_diagnostic(exc)["category"]
+    elif isinstance(exc, LLMRateLimitBlocked):
+        category = exc.category
     elif isinstance(exc, LLMServiceUnavailable):
         category = "upstream_unavailable"
     elif status in {401, 403}:
@@ -239,6 +402,7 @@ def upstream_diagnostic(exc: BaseException, *, stage: str = "", batch: str = "")
         "request_length": "请求超过模型长度限制",
         "content_restriction": "上游拒绝该内容",
         "request_parameter": "上游不接受请求参数或输出格式",
+        "account_quota": "供应商账户额度受限，排队请求已暂停",
         "connection": "上游连接失败",
         "upstream_unavailable": "上游服务暂时不可用",
         "invalid_output": "返回内容未通过结构校验",
@@ -471,6 +635,7 @@ class LLMGateway:
                 "attempt": attempt,
                 "role": role,
                 "model": config.model,
+                "protocol": getattr(config, "protocol", "openai"),
                 "max_output_tokens": budget,
                 "reasoning_effort": reasoning_effort,
                 "temperature_override": temperature,
@@ -494,7 +659,7 @@ class LLMGateway:
             try:
                 if self.record_call is not None:
                     await self.record_call({**record, "status": "queued"})
-                async with _model_slot(config):
+                async with _model_slot(config).slot():
                     requested_at = time.monotonic()
                     record["requested_at"] = datetime.now(UTC).isoformat()
                     record["queue_ms"] = round((requested_at - queued_at) * 1000, 2)

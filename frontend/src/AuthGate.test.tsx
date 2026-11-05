@@ -30,17 +30,17 @@ describe('email account gate', () => {
     vi.stubGlobal('fetch', fetch)
 
     render(<AuthGate>{({ user, deleteAccount }) => <><main>欢迎 {user?.email}</main><button onClick={() => void deleteAccount()}>删除账号与数据</button></>}</AuthGate>)
-    expect(await screen.findByRole('heading', { name: '注册 / 登录' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '邮箱登录 / 注册' })).toBeInTheDocument()
     expect(screen.getByText('首次验证邮箱会自动创建账号。验证码 10 分钟内有效。')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('邮箱地址'), {
       target: { value: 'reader@example.com' },
     })
-    fireEvent.click(screen.getByRole('button', { name: '发送验证码' }))
+    fireEvent.click(screen.getByRole('button', { name: '获取验证码' }))
     expect(await screen.findByText('验证码已发送，请检查收件箱和垃圾邮件。')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('邮箱验证码'), { target: { value: '123456' } })
-    fireEvent.click(screen.getByRole('button', { name: '验证并进入' }))
+    fireEvent.click(screen.getByRole('button', { name: '验证邮箱并继续' }))
     await waitFor(() => expect(screen.getByText('欢迎 reader@example.com')).toBeInTheDocument())
     expect(fetch).toHaveBeenCalledWith('/api/auth/verify-code', expect.objectContaining({ method: 'POST' }))
     fireEvent.click(screen.getByRole('button', { name: '删除账号与数据' }))

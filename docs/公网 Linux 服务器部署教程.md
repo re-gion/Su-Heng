@@ -105,6 +105,7 @@ cd ~/opc-agent
 - `YUQING_DOMAIN`：只填域名，例如 `opinion.example.com`。
 - `YUQING_PUBLIC_ORIGIN`：填对应的完整 HTTPS 地址，例如 `https://opinion.example.com`。
 - `YUQING_ADMIN_EMAILS`：填你本人能收验证码的邮箱；该邮箱首次验证登录后会成为管理员。
+- `YUQING_AUTH_ALLOWED_EMAILS`：填允许注册的邮箱列表，多个邮箱用英文逗号分隔；管理员首次注册也必须列入。留空会暂停新注册，但不影响已存在账号登录。
 - `YUQING_AUTH_SESSION_SECRET`：填至少 32 字节的随机值，可在服务器运行 `openssl rand -hex 32` 生成。不要复用 API Key 或提交到 Git。
 - `YUQING_SMTP_*`：按邮件服务商给出的主机、端口、安全方式、账号、密码和发件人填写。优先使用 STARTTLS 或 SSL。
 - `YUQING_APP_IMAGE`：用 SCP/`docker load` 时保留 `opc-agent-app:production`；用镜像仓库时改成仓库地址与固定版本标签，例如 `docker.io/你的账号/yuqing-agent:0.3.0`。
@@ -127,7 +128,7 @@ sudo docker compose --env-file .env.production -f compose.production.yml logs --
 
 检查 `ps` 中 `app` 为 healthy、`gateway` 为 running，然后访问 `https://你的域名/api/health`。启用账号模式后，健康接口只返回最小状态和版本信息。
 
-首次打开网站时，用 `YUQING_ADMIN_EMAILS` 中的邮箱收验证码并登录。管理员在配置页填写模型和搜索服务配置，再用快速模式完成一项真实任务；验证码邮件、外部模型与搜索服务都需要在实际服务器上分别验收。
+首次打开网站时，用同时列入 `YUQING_ADMIN_EMAILS` 和 `YUQING_AUTH_ALLOWED_EMAILS` 的邮箱收验证码并登录。管理员在配置页填写模型和搜索服务配置，再用快速模式完成一项真实任务；验证码邮件、外部模型与搜索服务都需要在实际服务器上分别验收。
 
 ## 更新与数据保护
 

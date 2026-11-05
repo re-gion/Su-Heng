@@ -21,6 +21,10 @@ class IdleOrchestrator:
 def _auth_environment(monkeypatch):
     monkeypatch.setenv("YUQING_AUTH_SESSION_SECRET", "test-session-secret-with-at-least-32-bytes")
     monkeypatch.setenv("YUQING_ADMIN_EMAILS", "admin@example.com")
+    monkeypatch.setenv(
+        "YUQING_AUTH_ALLOWED_EMAILS",
+        "admin@example.com,reader@example.com,person@example.com,forwarded@example.com,delete-me@example.com",
+    )
     monkeypatch.setenv("YUQING_SMTP_HOST", "smtp.example.com")
     monkeypatch.setenv("YUQING_SMTP_FROM", "noreply@example.com")
     monkeypatch.setenv("YUQING_PUBLIC_ORIGIN", "https://testserver")

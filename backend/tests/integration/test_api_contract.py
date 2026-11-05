@@ -6,9 +6,14 @@ from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from httpx import Request, Response
+from openai import InternalServerError
 
 from yuqing.app.main import create_app
-from yuqing.services.public_interest import PublicInterestDecision
+from yuqing.services.public_interest import (
+    PublicInterestCheckUnavailable,
+    PublicInterestDecision,
+)
 from yuqing.storage.models import EvidenceCreate
 from yuqing.storage.snapshots import SnapshotStore
 
@@ -80,6 +85,60 @@ def test_public_event_is_automatically_scoped_and_diagnostics_missing_is_unknown
         assert diagnostics["model_calls"]["recorded_requests"] == 0
         assert diagnostics["usage"] == {}
         assert client.get("/api/tasks/unknown/diagnostics").status_code == 404
+
+
+def test_invalid_policy_output_returns_actionable_safe_diagnostic(runtime_dir):
+    async def invalid_policy(_db, _query, _note):
+        raise PublicInterestCheckUnavailable("unknown_category")
+
+    with TestClient(
+        create_app(
+            runtime_dir=runtime_dir,
+            orchestrator_factory=ImmediateOrchestrator,
+            policy_checker=invalid_policy,
+        )
+    ) as client:
+        response = client.post("/api/tasks", json={"event_query": "公共性门禁格式测试"})
+
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "code": "POLICY_CHECK_INVALID_OUTPUT",
+        "message": (
+            "公共性门禁未能得到有效判定（模型返回了未支持的公共性类别）。"
+            "请重试；若重复出现，请检查 utility 模型的 JSON 输出能力。"
+        ),
+        "recoverable": True,
+        "details": {"reason_code": "unknown_category", "attempts": 2},
+    }
+
+
+def test_policy_upstream_500_is_classified_without_exposing_body(runtime_dir):
+    async def failed_policy(_db, _query, _note):
+        response = Response(
+            500,
+            request=Request("POST", "https://relay.example/v1/chat/completions"),
+            json={"error": {"message": "private upstream diagnostic"}},
+        )
+        raise InternalServerError("relay failed", response=response, body=response.json())
+
+    with TestClient(
+        create_app(
+            runtime_dir=runtime_dir,
+            orchestrator_factory=ImmediateOrchestrator,
+            policy_checker=failed_policy,
+        )
+    ) as client:
+        response = client.post("/api/tasks", json={"event_query": "上游服务测试"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "POLICY_CHECK_UNAVAILABLE"
+    assert response.json()["error"]["details"] == {
+        "category": "upstream_unavailable",
+        "status": 500,
+        "error_type": "InternalServerError",
+    }
+    assert "HTTP 500" in response.json()["error"]["message"]
+    assert "private upstream diagnostic" not in response.text
 
 
 def test_health_loads_v15_history_tools_without_definition_warnings(runtime_dir: Path):

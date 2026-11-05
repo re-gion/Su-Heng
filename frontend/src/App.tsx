@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   createTask,
   TaskCreationError,
@@ -42,6 +42,63 @@ import brandLockup from './assets/brand/suheng-lockup.svg'
 import brandSymbol from './assets/brand/suheng-symbol.svg'
 
 const localAuth: AuthView = { enabled: false, user: null, signOut: async () => undefined, deleteAccount: async () => undefined }
+
+function AccountControls({ auth }: { auth: AuthView }) {
+  const [open, setOpen] = useState(false)
+  const [confirmation, setConfirmation] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
+  const [error, setError] = useState('')
+  const dialogRef = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (open && dialog && !dialog.open) dialog.showModal()
+    return () => { if (dialog?.open) dialog.close() }
+  }, [open])
+
+  async function deleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (confirmation !== '删除' || deleting) return
+    setDeleting(true)
+    setError('')
+    try {
+      await auth.deleteAccount()
+      setOpen(false)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '删除账号失败，请稍后重试。')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  async function signOut() {
+    if (signingOut) return
+    setSigningOut(true)
+    setError('')
+    try {
+      await auth.signOut()
+      setOpen(false)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '退出登录失败，请稍后重试。')
+    } finally {
+      setSigningOut(false)
+    }
+  }
+
+  return <>
+    <div className="auth-user-menu"><button className="account-trigger" type="button" onClick={() => { setConfirmation(''); setError(''); setOpen(true) }} aria-haspopup="dialog"><span>账号</span><small>{auth.user?.email}</small><span className="account-chevron" aria-hidden="true">⌄</span></button></div>
+    {open && auth.user && <dialog className="account-dialog" ref={dialogRef} aria-labelledby="account-dialog-title" onCancel={(event) => { event.preventDefault(); setOpen(false) }}>
+      <header className="account-dialog-head"><div><span className="section-kicker">账户 / ACCOUNT</span><h2 id="account-dialog-title">账号管理</h2></div><button className="account-close" type="button" onClick={() => setOpen(false)} aria-label="关闭账号面板">×</button></header>
+      <section className="account-identity"><span className="account-avatar" aria-hidden="true">{auth.user.email.slice(0, 1).toUpperCase()}</span><div><small>当前登录邮箱</small><strong>{auth.user.email}</strong></div></section>
+      <div className="account-actions"><button className="account-signout" type="button" disabled={signingOut} onClick={() => void signOut()}>{signingOut ? '正在退出…' : '退出登录'}<span aria-hidden="true">↗</span></button>{error && <p className="account-error" role="alert">{error}</p>}</div>
+      <section className="account-danger"><span className="section-kicker">不可撤销操作</span><h3>删除账号与数据</h3><p>将永久删除账号及其调查任务、报告和本地快照。正在运行的任务或最后一个管理员账号无法删除。</p>
+        <form onSubmit={(event) => void deleteAccount(event)}><label>输入“删除”以确认<input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label><button className="account-delete" type="submit" disabled={confirmation !== '删除' || deleting}>{deleting ? '正在删除…' : '永久删除账号'}</button></form>
+      </section>
+      <p className="account-dialog-foot">删除后将退出登录，已删除的数据无法恢复。</p>
+    </dialog>}
+  </>
+}
 
 const roleLabels: Record<string, string> = { analyst_a: '事实调查', analyst_b: '媒体传播', analyst_c: '历史洞察', moderator: '协作主持', verifier: '证据核验', reporter: '报告撰写', utility: '通用辅助' }
 const originLabels: Record<string, string> = { inherit: '继承默认配置', config: '配置页', env: '环境变量', default: '系统默认' }
@@ -186,7 +243,7 @@ function Settings({ onClose }: { onClose: () => void }) {
     event.preventDefault(); setNotice('正在保存…')
     const rolePayload: Record<string, Record<string, string>> = {}
     for (const [role] of roles) {
-      const values = Object.fromEntries(['api_key', 'base_url', 'model'].flatMap((field) => draft[`${role}.${field}`] ? [[field, draft[`${role}.${field}`]]] : []))
+      const values = Object.fromEntries(['api_key', 'base_url', 'model', 'protocol'].flatMap((field) => draft[`${role}.${field}`] ? [[field, draft[`${role}.${field}`]]] : []))
       if (Object.keys(values).length) rolePayload[role] = values
     }
     const searchKeys = Object.fromEntries(Object.keys(currentConfig.search.keys).flatMap((name) => draft[`search.${name}`] ? [[name, draft[`search.${name}`]]] : []))
@@ -206,7 +263,8 @@ function Settings({ onClose }: { onClose: () => void }) {
     setNotice(`正在测试 ${name}…`)
     try {
       const result = await testConfig(kind === 'llm' ? { kind, role: name } : { kind, provider: name })
-      setNotice(result.ok ? `${name} 连接成功 · ${result.latency_ms}ms · ${result.sample ?? 'OK'}` : `${name} 连接失败：${result.error?.message ?? '未知错误'}`)
+      const protocol = kind === 'llm' ? (result.resolved?.protocol === 'anthropic' ? 'Anthropic Messages' : 'OpenAI 兼容') : null
+      setNotice(result.ok ? `${name} 连接成功${protocol ? ` · ${protocol}` : ''} · ${result.latency_ms}ms · ${result.sample ?? 'OK'}` : `${name} 连接失败：${result.error?.message ?? '未知错误'}`)
     } catch (error) {
       setNotice(`${name} 连接失败：${error instanceof Error ? error.message : '网络异常'}`)
     }
@@ -214,13 +272,14 @@ function Settings({ onClose }: { onClose: () => void }) {
   return <main className="settings-page">
     <div className="settings-head"><div><img className="settings-brand" src={brandLockup} alt="溯衡" width="138" height="64" /><span className="section-kicker">系统配置</span><h1>配置调查服务</h1><p>设置页覆盖 `.env`，密钥只显示脱敏值，不写回文件。</p></div><button type="button" onClick={onClose}>返回调查台</button></div>
     <form className="settings-form" onSubmit={save}>
-      <section><h2>模型角色配置</h2><p className="muted">留空继续继承当前有效值；核验器与生成模型异构时，交叉核验更有意义。</p>
+      <section><h2>模型角色配置</h2><p className="muted">选择供应商实际提供的接口协议。Anthropic Messages 用于 Claude 原生协议或兼容中转；OpenAI 兼容用于 Chat Completions 中转。留空继续继承当前有效值；核验器与生成模型异构时，交叉核验更有意义。</p>
         <div className="role-config-grid">{roles.map(([role, value]) => <article key={role}>
           <header><div><strong>{roleLabels[role] ?? role}</strong><small className="role-key">{role}</small></div><button type="button" onClick={() => void test('llm', role)}>测试</button></header>
           <label>接口密钥 · API Key<input type="password" value={draft[`${role}.api_key`] ?? ''} onChange={(event) => set(`${role}.api_key`, event.target.value)} placeholder={value.effective.api_key ?? '未配置'} /></label>
           <label>接口地址 · Base URL<input value={draft[`${role}.base_url`] ?? ''} onChange={(event) => set(`${role}.base_url`, event.target.value)} placeholder={value.effective.base_url} /></label>
           <label>模型名称 · Model<input value={draft[`${role}.model`] ?? ''} onChange={(event) => set(`${role}.model`, event.target.value)} placeholder={value.effective.model} /></label>
-          <small>配置来源：{Object.entries(value.source).map(([key, source]) => `${({ api_key: '密钥', base_url: '地址', model: '模型' } as Record<string, string>)[key] ?? key}：${originLabels[source] ?? source}`).join('；')}{role === 'analyst_b' && <span className="role-usage">评论逐条分类也使用此角色；主题综合使用报告撰写，审查使用证据核验。</span>}</small>
+          <label>接口协议<select aria-label={`${roleLabels[role] ?? role} 接口协议`} value={draft[`${role}.protocol`] ?? value.effective.protocol ?? 'openai'} onChange={(event) => set(`${role}.protocol`, event.target.value)}><option value="openai">OpenAI 兼容 · Chat Completions</option><option value="anthropic">Anthropic Messages</option></select></label>
+          <small>配置来源：{Object.entries(value.source).map(([key, source]) => `${({ api_key: '密钥', base_url: '地址', model: '模型', protocol: '协议' } as Record<string, string>)[key] ?? key}：${originLabels[source] ?? source}`).join('；')}{role === 'analyst_b' && <span className="role-usage">评论逐条分类也使用此角色；主题综合使用报告撰写，审查使用证据核验。</span>}</small>
         </article>)}</div>
       </section>
       <section><h2>搜索路由与本地额度</h2><p className="muted">中文查询依次尝试 元宝搜索 → Exa → 千帆 → 博查，其他语言依次尝试 Exa → Tavily → Serper。结果为空或与事件不相关时会继续换源；中文主调查若元宝搜索只找到同一发布主体的材料，还会用 Exa 补充并去重。千帆与 Tavily 每任务最多 20 次，博查与 Serper 每任务最多 10 次。本机计数从此版本启用后开始记录，包含已预留但上游失败的调用；元宝只返回搜索摘要，暂不支持微信公众号；本地保护线不是腾讯余额，实际计费以控制台为准。</p><div className="search-config-grid">{Object.entries(currentConfig.search.keys).map(([name, masked]) => <div className="provider-config" key={name}><label><span>{providerLabels[name] ?? name}<button type="button" onClick={() => void test('search', name)}>测试</button></span><input type="password" value={draft[`search.${name}`] ?? ''} onChange={(event) => set(`search.${name}`, event.target.value)} placeholder={masked ?? '未配置'} /></label><QuotaDetails provider={name} status={currentConfig.search.quota?.[name]} /></div>)}</div></section>
@@ -385,7 +444,7 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
   const qualityRecoveryMessages = stream.forum.filter((item) => item.phase === 'quality_recovery')
 
   return <>
-    <header className="masthead"><div className="brand-line"><a className="brand-home" href="/" aria-label="溯衡首页"><img src={brandLockup} alt="溯衡" width="138" height="64" /></a><span>公开材料 · 证据回查 · 审慎研判</span>{(!auth.enabled || auth.user?.is_admin) && <button className="text-button" disabled={appCapabilities?.demo_mode} onClick={() => setScreen('settings')}>{appCapabilities?.demo_mode ? '演示站只读' : '系统配置 ↗'}</button>}{auth.user && <span className="auth-user-menu"><span title={auth.user.email}>{auth.user.email}</span><button className="text-button" onClick={() => void auth.signOut()}>退出</button><button className="text-button auth-delete-button" onClick={() => { if (window.confirm('删除账号将永久移除该账号的调查任务、报告和本地快照。此操作无法撤销。')) void action(auth.deleteAccount) }}>删除账号与数据</button></span>}</div>
+    <header className="masthead"><div className="brand-line"><a className="brand-home" href="/" aria-label="溯衡首页"><img src={brandLockup} alt="溯衡" width="138" height="64" /></a><span>公开材料 · 证据回查 · 审慎研判</span><div className="masthead-actions">{(!auth.enabled || auth.user?.is_admin) && <button className="text-button" disabled={appCapabilities?.demo_mode} onClick={() => setScreen('settings')}>{appCapabilities?.demo_mode ? '演示站只读' : '系统配置 ↗'}</button>}{auth.user && <AccountControls auth={auth} />}</div></div>
       <div className="hero-copy"><h1>舆情调查与研判</h1><p className="hero-note">从事件事实、媒体报道到评论样本，逐项核对来源，保留判断依据。</p></div>
     </header>
     <main>

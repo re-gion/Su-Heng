@@ -24,6 +24,7 @@ class LLMRoleConfig(BaseModel):
     api_key: str = Field(min_length=1)
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
+    protocol: Literal["openai", "anthropic"] = "openai"
     temperature: float = 0.3
     max_tokens: int | None = None
     timeout: float = 300
@@ -47,5 +48,6 @@ def load_role_config(role: LLMRole, environ: Mapping[str, str] | None = None) ->
         api_key=api_key,
         base_url=inherited("BASE_URL", "https://api.deepseek.com/v1"),
         model=inherited("MODEL", "deepseek-chat"),
+        protocol=inherited("PROTOCOL", "openai").lower(),
         temperature=0 if role == "verifier" else 0.3,
     )

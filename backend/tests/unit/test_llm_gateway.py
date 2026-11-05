@@ -9,6 +9,8 @@ from openai import InternalServerError, RateLimitError
 from yuqing.core.llm.gateway import (
     LLMGateway,
     LLMOutputTruncated,
+    LLMRateLimitBlocked,
+    _model_slot,
     rate_limit_diagnostic,
     sanitize_upstream_message,
 )
@@ -398,15 +400,69 @@ def test_429_without_provider_detail_stays_unclassified():
 
 
 @pytest.mark.asyncio
-async def test_gate_limits_inflight_calls_across_gateway_instances(monkeypatch):
-    monkeypatch.setenv("YUQING_LLM_MAX_INFLIGHT", "2")
+async def test_gate_adapts_inflight_calls_across_gateway_instances(monkeypatch):
+    monkeypatch.setenv("YUQING_LLM_MAX_INFLIGHT", "8")
     factory = FakeFactory()
     concurrent = ConcurrentCompletions()
     factory.client.chat.completions = concurrent
-    gateways = [LLMGateway(factory) for _ in range(3)]
+    gateways = [LLMGateway(factory) for _ in range(8)]
 
     await asyncio.gather(
         *(gateway.complete_json("analyst_a", "system", "user") for gateway in gateways)
     )
 
-    assert concurrent.peak == 2
+    assert 2 < concurrent.peak <= 8
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_cools_down_shared_endpoint_queue():
+    factory = FakeFactory()
+    gate = _model_slot(factory.config("analyst_a"))
+    response = Response(
+        429,
+        headers={"Retry-After": "0.05"},
+        request=Request("POST", "https://relay.example/v1/chat/completions"),
+        json={"error": {"code": "concurrency_limit", "message": "busy"}},
+    )
+    error = RateLimitError("limited", response=response, body=response.json())
+
+    with pytest.raises(RateLimitError):
+        async with gate.slot():
+            raise error
+
+    admitted = asyncio.Event()
+
+    async def queued_request():
+        async with gate.slot():
+            admitted.set()
+
+    queued = asyncio.create_task(queued_request())
+    try:
+        await asyncio.sleep(0.01)
+        assert not admitted.is_set()
+        await asyncio.wait_for(admitted.wait(), timeout=2.0)
+    finally:
+        await queued
+
+
+@pytest.mark.asyncio
+async def test_account_quota_opens_endpoint_circuit_for_queued_calls():
+    factory = FakeFactory()
+    gate = _model_slot(factory.config("analyst_a"))
+    response = Response(
+        429,
+        request=Request("POST", "https://relay.example/v1/chat/completions"),
+        json={"error": {"code": "insufficient_quota", "message": "quota exhausted"}},
+    )
+    error = RateLimitError("limited", response=response, body=response.json())
+
+    with pytest.raises(RateLimitError):
+        async with gate.slot():
+            raise error
+
+    with pytest.raises(LLMRateLimitBlocked) as exc_info:
+        async with gate.slot():
+            pytest.fail("account quota circuit should reject without another upstream request")
+
+    assert exc_info.value.category == "account_quota"
+    assert "额度受限" in str(exc_info.value)

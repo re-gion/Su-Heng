@@ -120,6 +120,10 @@ def valid_media_analysis(data: object, evidence_by_id: Mapping[str, object]) -> 
     return True
 
 
+class _ClaimBudgetReached(RuntimeError):
+    """Internal signal to stop investigation when the task claim cap is reached."""
+
+
 class V1Orchestrator:
     def __init__(
         self,
@@ -739,6 +743,12 @@ class V1Orchestrator:
                 break
             current = await self.database.get_task(task_id)
             if not current or current.status != "running":
+                break
+            claim_count = await self.database.fetch_one(
+                "SELECT COUNT(*) AS total FROM claim WHERE task_id=?", (task_id,)
+            )
+            if claim_count and claim_count["total"] >= budget.max_claims:
+                self._limitations.append("陈述数量已达到当前深度上限，跳过章节补查并转入报告收口。")
                 break
             # Reserve before calling: a crash cannot silently spend the same recovery again.
             await self.database.save_checkpoint(
@@ -1839,13 +1849,19 @@ class V1Orchestrator:
         search_phase: str = "primary",
         inner_limit: int | None = None,
         summary_phase: str | None = None,
+        claim_budget_stop: asyncio.Event | None = None,
     ) -> dict[str, object]:
+        claim_budget_stop = claim_budget_stop or asyncio.Event()
+
         digest = (
             board.digest_for(agent_name, outer_round - 1)
             if outer_round > 1 and summary_phase != "quality_recovery"
             else ""
         )
         scoped_query = event_query + (f"\n主持人/论坛补充：{digest}" if digest else "")
+
+        def claim_budget_stopped() -> bool:
+            return claim_budget_stop is not None and claim_budget_stop.is_set()
 
         async def warn_rate_limit(stage: str, exc: RateLimitError) -> str:
             label = {"plan": "规划", "summarize": "陈述生成", "reflect": "反思"}[stage]
@@ -1906,6 +1922,9 @@ class V1Orchestrator:
                 },
             )
             return message
+
+        if claim_budget_stopped():
+            return {"agent": agent_name, "status": "partial"}
 
         if agent_name == "history_insight":
             try:
@@ -1976,6 +1995,8 @@ class V1Orchestrator:
                 "agent.status",
                 {"agent": agent_name, "phase": "blocked", "inner_round": 1},
             )
+            return {"agent": agent_name, "status": "partial"}
+        if claim_budget_stopped():
             return {"agent": agent_name, "status": "partial"}
         task = await self.database.get_task(task_id)
         requested_languages = task.source_languages if task else ["zh", "en"]
@@ -2065,6 +2086,9 @@ class V1Orchestrator:
         last_reason = "达到小 Loop 上限"
         model_limited = False
         for inner_round in range(1, (inner_limit or self.max_inner_rounds) + 1):
+            if claim_budget_stopped():
+                last_reason = "陈述预算已耗尽，停止后续调查。"
+                break
             query_limit = self.budget_for(self._budget_depth).queries_per_round
             queries = plan.queries[: max(query_limit, len(search_languages))]
             if (
@@ -2078,6 +2102,8 @@ class V1Orchestrator:
                 # one search outside the user's preferred event window.
                 queries[-1] = queries[-1].model_copy(update={"scope": "context"})
             for query_item in queries:
+                if claim_budget_stopped():
+                    break
                 query = (
                     query_item
                     if isinstance(query_item, SearchQuery)
@@ -2143,6 +2169,8 @@ class V1Orchestrator:
                         return self.evidence.classifier.entity_for(host) or registrable_domain(host)
 
                     async def reserve_provider_call() -> bool:
+                        if claim_budget_stopped():
+                            return False
                         allowed = await self._reserve_tool(
                             "search", investigation=summary_phase != "quality_recovery"
                         )
@@ -2184,9 +2212,11 @@ class V1Orchestrator:
                         source_group=source_group_for_result,
                     )
                 else:
-                    if not await self._reserve_tool(
+                    if claim_budget_stopped() or not await self._reserve_tool(
                         "search", investigation=summary_phase != "quality_recovery"
                     ):
+                        if claim_budget_stopped():
+                            break
                         self._limitations.append(
                             self._tool_budget_message(
                                 "search", investigation=summary_phase != "quality_recovery"
@@ -2197,6 +2227,8 @@ class V1Orchestrator:
                     raw_results = [
                         item for item in provider_results if classify_for_scope(item).accepted
                     ]
+                if claim_budget_stopped():
+                    break
                 results = []
                 for result in raw_results:
                     decision = result_scopes.get(
@@ -2256,6 +2288,8 @@ class V1Orchestrator:
                     ),
                 )
                 for record in ordered_records:
+                    if claim_budget_stopped():
+                        break
                     updated = record
                     if self.evidence.needs_direct_fetch(record):
                         updated = await self._fetch_once(
@@ -2357,11 +2391,15 @@ class V1Orchestrator:
             async def persist_generated(
                 generated, inventory=inventory, new_claim_ids=new_claim_ids
             ):
+                if claim_budget_stop.is_set():
+                    raise _ClaimBudgetReached
                 evidence_by_id = {item.local_id: item for item in inventory}
                 agent_budget = self.budget_for(self._budget_depth)
                 generated, review_incomplete = await self._review_generated(task_id, generated)
                 accepted_claims = [True] * len(generated)
                 for item, scope_allowed in zip(generated, accepted_claims, strict=True):
+                    if claim_budget_stop.is_set():
+                        raise _ClaimBudgetReached
                     if not scope_allowed:
                         continue
                     if item.text in claims_before:
@@ -2412,16 +2450,18 @@ class V1Orchestrator:
                         )
                     except ValueError as exc:
                         if "claim 总数已达" in str(exc):
-                            await self.events.emit(
-                                task_id,
-                                "warning",
-                                {
-                                    "code": "CLAIM_BUDGET_REACHED",
-                                    "message": str(exc),
-                                    "agent": agent_name,
-                                },
-                            )
-                            break
+                            if not claim_budget_stop.is_set():
+                                claim_budget_stop.set()
+                                await self.events.emit(
+                                    task_id,
+                                    "warning",
+                                    {
+                                        "code": "CLAIM_BUDGET_REACHED",
+                                        "message": str(exc) + "；已停止并行调查席后续模型调用。",
+                                        "agent": agent_name,
+                                    },
+                                )
+                            raise _ClaimBudgetReached from exc
                         raise
                     claims_before.add(claim.text)
                     new_claim_ids.append(claim.local_id)
@@ -2436,6 +2476,22 @@ class V1Orchestrator:
                             "agent": agent_name,
                         },
                     )
+                    claim_count = await self.database.fetch_one(
+                        "SELECT COUNT(*) AS total FROM claim WHERE task_id=?", (task_id,)
+                    )
+                    if claim_count and claim_count["total"] >= agent_budget.max_claims:
+                        if not claim_budget_stop.is_set():
+                            claim_budget_stop.set()
+                            await self.events.emit(
+                                task_id,
+                                "warning",
+                                {
+                                    "code": "CLAIM_BUDGET_REACHED",
+                                    "message": f"任务 claim 总数已达当前深度上限 {agent_budget.max_claims}；已停止并行调查席后续模型调用。",
+                                    "agent": agent_name,
+                                },
+                            )
+                        raise _ClaimBudgetReached
                 return review_incomplete
 
             analysis_goal = (
@@ -2478,7 +2534,16 @@ class V1Orchestrator:
                         "goal": analysis_goal,
                     },
                 )
-                incomplete = await persist_generated(batch_claims)
+                try:
+                    incomplete = await persist_generated(batch_claims)
+                except _ClaimBudgetReached:
+                    await self.database.save_analysis_batch(
+                        task_id,
+                        agent_name,
+                        fingerprint,
+                        {"complete": True, "skipped": "claim_budget_reached"},
+                    )
+                    raise
                 await self.database.save_analysis_batch(
                     task_id,
                     agent_name,
@@ -2512,6 +2577,9 @@ class V1Orchestrator:
                     task_id, agent_name, fingerprint, {"complete": True}
                 )
 
+            if claim_budget_stop.is_set():
+                last_reason = "陈述预算已耗尽，停止后续调查。"
+                break
             try:
                 if hasattr(agent, "_summarize_uncached"):
                     generated = await agent.summarize(
@@ -2541,6 +2609,10 @@ class V1Orchestrator:
                 else:
                     generated = await agent.summarize(summarize_query, inventory)
                     await persist_generated(generated)
+            except _ClaimBudgetReached:
+                model_limited = True
+                last_reason = "陈述预算已耗尽，停止后续调查。"
+                break
             except LLMBudgetExhausted as exc:
                 model_limited = True
                 last_reason = await warn_phase_budget("summarize", exc)
@@ -2550,6 +2622,9 @@ class V1Orchestrator:
                 last_reason = await warn_rate_limit("summarize", exc)
                 break
             if model_limited:
+                break
+            if claim_budget_stop.is_set():
+                last_reason = "陈述预算已耗尽，停止后续调查。"
                 break
             if getattr(agent, "summary_no_new_material", False) and not new_claim_ids:
                 last_reason = "材料已处理，本轮没有新增可分析输入"
@@ -2670,7 +2745,16 @@ class V1Orchestrator:
         top_k: int,
         agent_names: Sequence[str],
         search_phase: str = "primary",
+        claim_budget_stop: asyncio.Event | None = None,
     ) -> list[dict[str, object]]:
+        if claim_budget_stop is not None and claim_budget_stop.is_set():
+            for name in agent_names:
+                await self.events.emit(
+                    task_id,
+                    "agent.status",
+                    {"agent": name, "phase": "budget_stopped", "inner_round": 0},
+                )
+            return [{"agent": name, "status": "partial"} for name in agent_names]
         tasks = {
             name: asyncio.create_task(
                 self._run_agent(
@@ -2682,6 +2766,7 @@ class V1Orchestrator:
                     outer_round=outer_round,
                     top_k=top_k,
                     search_phase=search_phase,
+                    claim_budget_stop=claim_budget_stop,
                 ),
                 name=f"agent:{name}",
             )
@@ -3098,6 +3183,12 @@ class V1Orchestrator:
                 )
             depth_budget = self.budget_for(task.depth)
             effective_outer_rounds = min(self.max_outer_rounds, depth_budget.outer_rounds)
+            claim_budget_stop = asyncio.Event()
+            claim_count = await self.database.fetch_one(
+                "SELECT COUNT(*) AS total FROM claim WHERE task_id=?", (task_id,)
+            )
+            if claim_count and claim_count["total"] >= depth_budget.max_claims:
+                claim_budget_stop.set()
             active_agents = ("fact_investigator",) if task.depth == "quick" else tuple(self.agents)
             no_gain_rounds = int((checkpoint or {}).get("no_gain_rounds", 0))
             search_phase = "primary"
@@ -3130,11 +3221,13 @@ class V1Orchestrator:
                     depth_budget.top_k,
                     active_agents,
                     search_phase,
+                    claim_budget_stop,
                 )
                 after_items = await self.database.list_claims(task_id)
                 after_claims = (len(after_items), sum(len(c.evidence_ids) for c in after_items))
                 no_gain_rounds = no_gain_rounds + 1 if after_claims <= before_claims else 0
                 budget_exhausted = await self._emit_budget(task_id, task.depth)
+                claim_budget_reached = claim_budget_stop.is_set()
                 investigation_reserved = (
                     not budget_exhausted
                     and self.usage is not None
@@ -3175,6 +3268,7 @@ class V1Orchestrator:
                         and not budget_exhausted
                         and not investigation_reserved
                         and not saturated
+                        and not claim_budget_reached
                     ),
                 )
                 high_gaps = [gap.desc for gap in review.gaps if gap.priority == "high"]
@@ -3184,6 +3278,7 @@ class V1Orchestrator:
                     or budget_exhausted
                     or investigation_reserved
                     or saturated
+                    or claim_budget_reached
                 )
                 if release or forced:
                     end_reason = (
@@ -3195,6 +3290,8 @@ class V1Orchestrator:
                         if investigation_reserved
                         else "no_progress"
                         if saturated
+                        else "claim_budget_reached"
+                        if claim_budget_reached
                         else "round_limit"
                     )
                     outcome = {
@@ -3218,6 +3315,10 @@ class V1Orchestrator:
                         self._limitations.append(
                             "主调查达到阶段预算上限，剩余 token 留给独立核验与报告；"
                             "未解决的缺口仍在报告中披露。"
+                        )
+                    elif claim_budget_reached:
+                        self._limitations.append(
+                            "达到陈述数量上限，已停止后续调查；未解决的缺口仍在报告中披露。"
                         )
                     await self.events.emit(
                         task_id,

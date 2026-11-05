@@ -66,14 +66,10 @@ export function AuthGate({ children }: { children: (auth: AuthView) => ReactNode
   }
 
   const signOut = async () => {
-    try {
-      await logout()
-      setStatus({ auth_required: true, user: null })
-      setCode('')
-      setNotice('已退出登录。')
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '退出登录失败。')
-    }
+    await logout()
+    setStatus({ auth_required: true, user: null })
+    setCode('')
+    setNotice('已退出登录。')
   }
 
   const deleteAccount = async () => {
@@ -87,23 +83,31 @@ export function AuthGate({ children }: { children: (auth: AuthView) => ReactNode
   }
 
   if (!status) {
-    return <main className="auth-shell"><section className="auth-card"><img src={brandLockup} alt="溯衡" width="138" height="64" /><p>{error || '正在检查登录状态…'}</p>{error && <button type="button" onClick={() => window.location.reload()}>重新连接</button>}</section></main>
+    return <main className="auth-shell"><div className="auth-layout"><section className="auth-intro"><img src={brandLockup} alt="溯衡" width="138" height="64" /><h1>让每个判断<br />都能回到证据。</h1><p>围绕公开材料开展调查，逐项核对来源，清晰呈现结论与边界。</p><div className="auth-intro-meta">来源与核验状态会随报告一同呈现。</div></section><section className="auth-card"><h2>欢迎使用溯衡</h2><p>{error || '正在检查登录状态…'}</p>{error && <button type="button" onClick={() => window.location.reload()}>重新连接</button>}</section></div></main>
   }
 
   if (status.auth_required && !status.user) {
-    return <main className="auth-shell"><section className="auth-card">
-      <img src={brandLockup} alt="溯衡" width="138" height="64" />
-      <span className="section-kicker">账号验证</span>
-      <h1>注册 / 登录</h1>
-      <p>首次验证邮箱会自动创建账号。验证码 10 分钟内有效。</p>
+    return <main className="auth-shell"><div className="auth-layout">
+      <section className="auth-intro">
+        <img src={brandLockup} alt="溯衡" width="138" height="64" />
+        <h1>让每个判断<br />都能回到证据。</h1>
+        <p>从公开材料出发，核验事件、报道与观点；每份报告都保留来源与判断边界。</p>
+        <div className="auth-intro-meta">来源与核验状态会随报告一同呈现。</div>
+        <div className="auth-index">舆情调查与研判</div>
+      </section>
+      <section className="auth-card">
+      <h2>邮箱登录 / 注册</h2>
+      <p className="auth-description">首次验证邮箱会自动创建账号。验证码 10 分钟内有效。</p>
       <form onSubmit={(event) => void submit(event)}>
         <label>邮箱地址<input type="email" autoComplete="email" required maxLength={254} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@example.com" /></label>
-        <div className="auth-code-row"><label>邮箱验证码<input inputMode="numeric" autoComplete="one-time-code" required pattern="[0-9]{6}" maxLength={6} value={code} onChange={(event) => setCode(event.target.value)} placeholder="6 位验证码" /></label><button className="auth-send" type="button" disabled={!email.trim() || busy || cooldown > 0} onClick={() => void sendCode()}>{cooldown > 0 ? `${cooldown} 秒后重发` : '发送验证码'}</button></div>
-        <button className="auth-submit" type="submit" disabled={busy || code.length !== 6}>{busy ? '请稍候…' : '验证并进入'}</button>
+        <div className="auth-code-row"><label>邮箱验证码<input inputMode="numeric" autoComplete="one-time-code" required pattern="[0-9]{6}" maxLength={6} value={code} onChange={(event) => setCode(event.target.value)} placeholder="输入 6 位验证码" /></label><button className="auth-send" type="button" disabled={!email.trim() || busy || cooldown > 0} onClick={() => void sendCode()}>{cooldown > 0 ? `${cooldown} 秒后重发` : '获取验证码'}</button></div>
+        <button className="auth-submit" type="submit" disabled={busy || code.length !== 6}>{busy ? '正在验证…' : '验证并进入溯衡'}</button>
       </form>
-      {notice && <p className="auth-notice">{notice}</p>}
+      {notice && <p className="auth-notice" role="status">{notice}</p>}
       {error && <p className="auth-error" role="alert">{error}</p>}
-    </section></main>
+      <div className="auth-card-foot"><span>安全验证码</span><span>只用于验证邮箱所有权</span></div>
+      </section>
+    </div></main>
   }
 
   return <>{children({ enabled: status.auth_required, user: status.user, signOut, deleteAccount })}</>

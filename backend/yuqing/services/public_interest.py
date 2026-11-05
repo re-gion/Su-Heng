@@ -18,6 +18,15 @@ class PublicInterestDecision(BaseModel):
     category: str
 
 
+class PublicInterestCheckUnavailable(RuntimeError):
+    """The policy model did not return a decision that satisfies the gate contract."""
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        self.attempts = 2
+        super().__init__("公共性门禁模型连续两次未返回符合要求的判定结果")
+
+
 INSTITUTION_SCOPE_CATEGORY = "institution_scope"
 PRIVATE_PERSON_CATEGORY = "private_person"
 PUBLIC_EVENT_CATEGORY = "public_event"
@@ -57,7 +66,8 @@ async def assess_public_interest(
     )
     try:
         decision: PublicInterestDecision | None = None
-        error: str = "未获得响应"
+        error_code = "invalid_output"
+        last_error: Exception | None = None
         context = (
             gateway.logical_call(stage="public_interest")
             if hasattr(gateway, "logical_call")
@@ -71,7 +81,11 @@ async def assess_public_interest(
                         "你是任务公共性门禁。只判断是否可开展公开材料舆情调查，不调查事实。",
                         prompt_user
                         + (
-                            "\n上一次输出不是合法 JSON 对象，请重新只输出完整 JSON。"
+                            "\n上一次输出不是合法 JSON 对象，或没有通过字段/类别校验。"
+                            "请重新输出完整 JSON，必须包含 allowed(boolean)、reason(string)、"
+                            "category(string)；category 只能是 public、public_event、"
+                            "institution_scope、private_person，且 allowed=true 只能搭配前两类，"
+                            "allowed=false 只能搭配后两类。"
                             if attempt
                             else ""
                         ),
@@ -84,17 +98,23 @@ async def assess_public_interest(
                         INSTITUTION_SCOPE_CATEGORY,
                         PRIVATE_PERSON_CATEGORY,
                     }:
+                        error_code = "unknown_category"
                         raise ValueError("公共性门禁返回未知类别")
                     if candidate.allowed != (
                         candidate.category in {"public", PUBLIC_EVENT_CATEGORY}
                     ):
+                        error_code = "inconsistent_decision"
                         raise ValueError("公共性门禁类别与放行结论不一致")
                     decision = candidate
                     break
                 except (json.JSONDecodeError, ValueError, TypeError, ValidationError) as exc:
-                    error = f"{type(exc).__name__}: {exc}"
+                    last_error = exc
+                    if isinstance(exc, ValidationError):
+                        error_code = "invalid_fields"
+                    elif isinstance(exc, json.JSONDecodeError):
+                        error_code = "invalid_json"
         if decision is None:
-            raise ValueError(f"公共性门禁输出不合格：{error}")
+            raise PublicInterestCheckUnavailable(error_code) from last_error
         return decision
     finally:
         if factory is not None:
