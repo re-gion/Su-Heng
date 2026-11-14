@@ -16,6 +16,68 @@ class IdleOrchestrator:
         return None
 
 
+def test_comment_model_has_independent_overrides_and_legacy_inheritance(runtime_dir, monkeypatch):
+    from yuqing.core.llm.roles import load_role_config
+
+    monkeypatch.setenv("DEFAULT_API_KEY", "sk-default-test")
+    monkeypatch.setenv("LLM_ANALYST_B_MODEL", "media-model")
+    monkeypatch.setenv("LLM_ANALYST_B_PROTOCOL", "anthropic")
+    for field in ("API_KEY", "BASE_URL", "MODEL", "PROTOCOL"):
+        monkeypatch.delenv(f"LLM_COMMENT_ANALYST_{field}", raising=False)
+    app = create_app(runtime_dir=runtime_dir, orchestrator_factory=lambda *_: IdleOrchestrator())
+    with TestClient(app) as client:
+        initial = client.get("/api/config").json()
+        assert len(initial["llm"]["roles"]) == 8
+        role = initial["llm"]["roles"]["comment_analyst"]
+        assert role["effective"]["model"] == "media-model"
+        assert role["source"]["model"] == "inherit_analyst_b"
+        changed = client.put(
+            "/api/config",
+            json={
+                "llm": {
+                    "roles": {
+                        "comment_analyst": {
+                            "model": "comment-model",
+                            "protocol": "openai",
+                            "api_key": "sk-comment-secret",
+                        }
+                    }
+                }
+            },
+        )
+        assert changed.status_code == 200
+        assert "comment-secret" not in changed.text
+        assert changed.json()["llm"]["roles"]["analyst_b"]["effective"]["model"] == "media-model"
+        from yuqing.services.configuration import ConfigService
+
+        resolved = client.portal.call(ConfigService(app.state.database).resolved_environ)
+        assert load_role_config("comment_analyst", resolved).model == "comment-model"
+        assert load_role_config("comment_analyst", resolved).protocol == "openai"
+        # The public effective values must agree with runtime field inheritance.
+        assert (
+            changed.json()["llm"]["roles"]["comment_analyst"]["effective"]["model"]
+            == "comment-model"
+        )
+        client.put("/api/config", json={"llm": {"roles": {"comment_analyst": {"model": None}}}})
+        assert (
+            client.get("/api/config").json()["llm"]["roles"]["comment_analyst"]["effective"][
+                "model"
+            ]
+            == "media-model"
+        )
+    runtime = load_role_config(
+        "comment_analyst",
+        {
+            "DEFAULT_API_KEY": "test",
+            "LLM_ANALYST_B_MODEL": "media-model",
+            "LLM_ANALYST_B_PROTOCOL": "anthropic",
+            "LLM_COMMENT_ANALYST_MODEL": "comment-model",
+        },
+    )
+    assert runtime.model == "comment-model"
+    assert runtime.protocol == "anthropic"
+
+
 def test_config_api_masks_secrets_supports_partial_override_and_clear(
     runtime_dir: Path, monkeypatch
 ):

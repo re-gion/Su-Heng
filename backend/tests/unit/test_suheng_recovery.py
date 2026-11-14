@@ -51,7 +51,7 @@ async def test_comment_review_failure_does_not_block_other_themes():
 
         async def complete_json(self, role, system, prompt, **kwargs):
             data = json.loads(prompt.split("\n", 1)[1])
-            if role == "analyst_b":
+            if role == "comment_analyst":
                 return {
                     "assignments": [
                         {

@@ -945,6 +945,13 @@ class FullReportBuilder:
         historical_claims = {
             claim.local_id: claim for claim in claims if claim.agent == "history_insight"
         }
+        historical_candidates = [
+            item
+            for item in by_type["fact_check_table"]["items"]
+            if item.get("origin_agent") == "history_insight"
+            and item.get("verification_state") == "complete"
+            and item.get("badge") not in {"refuted", "disputed"}
+        ]
         historical_facts = [
             item
             for item in by_type["fact_check_table"]["items"]
@@ -1508,7 +1515,7 @@ class FullReportBuilder:
                     "case_type": case.get("case_type", "analogous"),
                     "event_time": f"资料发布：{str(source.published_at)[:10]}",
                     "summary": f"{status}：{item['text']}",
-                    "outcome": case["outcome"],
+                    "outcome": case.get("outcome") or "截至调查时，本次材料未见最终处理结果",
                     "comparison": (
                         (
                             f"可核查关联：{case.get('connection', '')}。"
@@ -1520,7 +1527,8 @@ class FullReportBuilder:
                         "该案例不能预测当前事件走向。"
                     ),
                     "dimensions": {
-                        "公开结果（来源记载）": case["outcome"],
+                        "公开结果（来源记载）": case.get("outcome")
+                        or "截至调查时，本次材料未见最终处理结果",
                         "核验状态": status,
                     },
                     "provenance": source.source_name or source.source_domain or "来源待核",
@@ -1529,11 +1537,47 @@ class FullReportBuilder:
                 }
             )
         local_cards = unique_history_cards(local_cards)
+        # Date-uncertain, otherwise supported cases are useful leads. Keep them
+        # separate from formal comparisons and all downstream analysis inputs.
+        reference_candidates = []
+        for item in historical_candidates:
+            claim = historical_claims.get(item["claim_ref"])
+            if claim is None:
+                continue
+            eligible = independent_case_evidence(
+                claim,
+                evidence_by_id,
+                task.resolved_event_query or task.event_query,
+                task.created_at,
+                require_confirmed_date=False,
+            ) - independent_case_evidence(
+                claim,
+                evidence_by_id,
+                task.resolved_event_query or task.event_query,
+                task.created_at,
+            )
+            refs = [
+                c["evidence_ref"]
+                for c in item.get("citations", [])
+                if c.get("relation") == "support" and c["evidence_ref"] in eligible
+            ]
+            if refs:
+                case = claim.analysis_data["historical_case"]
+                reference_candidates.append(
+                    {
+                        "event_name": case["name"],
+                        "case_type": case.get("case_type", "analogous"),
+                        "summary": item["text"],
+                        "reason": "待核实参考案例：来源公开日期尚未从原网页确认，不能确认其在任务启动时已公开；不作为历史结论或建议依据。",
+                        "comparison": f"候选相似机制：{case['similarity']}。关键差异：{case['difference']}。",
+                        "evidence_refs": refs,
+                    }
+                )
         accepted_history_refs = {
             citation["evidence_ref"]
             for item in historical_facts
             for citation in item.get("citations", [])
-        }
+        } | {ref for item in reference_candidates for ref in item["evidence_refs"]}
         considered_history_refs = {
             item.local_id
             for item in evidence
@@ -1570,7 +1614,9 @@ class FullReportBuilder:
             }:
                 reason = "已取得来源，但尚未形成通过核验的独立案例陈述"
             else:
-                reason = "尚未建立独立案例身份、相似机制和公开结果的完整依据"
+                reason = (
+                    "尚未建立独立案例身份、相似机制、关键差异或获支持陈述的依据（不要求最终结局）"
+                )
             excluded_history.append(
                 {
                     "title": source.title,
@@ -1600,6 +1646,7 @@ class FullReportBuilder:
             "in_brief": False,
             "title": "历史对照",
             "cards": local_cards,
+            "reference_candidates": unique_history_cards(reference_candidates),
             "excluded_candidates": excluded_history[:8],
             "fallback_text": (
                 f"已复查 {len(excluded_history)} 份历史席位引用材料，尚无通过独立事件、时间与可比机制审查的案例；"

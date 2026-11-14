@@ -15,7 +15,7 @@ async def test_classification_overlaps_two_batches_and_preserves_every_member():
             self.two_started = asyncio.Event()
 
         async def complete_json(self, role, system, prompt, **kwargs):
-            if role != "analyst_b":
+            if role != "comment_analyst":
                 return await super().complete_json(role, system, prompt, **kwargs)
             self.active += 1
             self.peak = max(self.peak, self.active)
@@ -56,7 +56,7 @@ class Gateway:
 
     async def complete_json(self, role, system, prompt, **kwargs):
         data = json.loads(prompt.split("\n", 1)[1])
-        if role == "analyst_b":
+        if role == "comment_analyst":
             self.seen.extend(s["id"] for s in data["comments"])
             assignments = [
                 {"id": s["id"], "relevant": True, "issue": "校纪处分与复核", "stance": "质疑"}
@@ -267,7 +267,10 @@ async def test_budget_stop_preserves_unclassified_count():
 async def test_failed_large_batch_is_retried_as_smaller_batches():
     class SplittingGateway(Gateway):
         async def complete_json(self, role, system, prompt, **kwargs):
-            if role == "analyst_b" and len(json.loads(prompt.split("\n", 1)[1])["comments"]) > 4:
+            if (
+                role == "comment_analyst"
+                and len(json.loads(prompt.split("\n", 1)[1])["comments"]) > 4
+            ):
                 raise ValueError("provider request rejected")
             return await super().complete_json(role, system, prompt, **kwargs)
 
@@ -308,7 +311,7 @@ async def test_invalid_assignment_never_enters_checkpoint():
     class Invalid(Gateway):
         async def complete_json(self, role, system, prompt, **kwargs):
             result = await super().complete_json(role, system, prompt, **kwargs)
-            if role == "analyst_b":
+            if role == "comment_analyst":
                 result["assignments"][-1]["relevant"] = "true"
             return result
 

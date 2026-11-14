@@ -40,7 +40,7 @@ describe('email account gate', () => {
     expect(await screen.findByText('验证码已发送，请检查收件箱和垃圾邮件。')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('邮箱验证码'), { target: { value: '123456' } })
-    fireEvent.click(screen.getByRole('button', { name: '验证邮箱并继续' }))
+    fireEvent.click(screen.getByRole('button', { name: '验证并进入溯衡' }))
     await waitFor(() => expect(screen.getByText('欢迎 reader@example.com')).toBeInTheDocument())
     expect(fetch).toHaveBeenCalledWith('/api/auth/verify-code', expect.objectContaining({ method: 'POST' }))
     fireEvent.click(screen.getByRole('button', { name: '删除账号与数据' }))

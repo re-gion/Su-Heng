@@ -233,10 +233,15 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
             for card in block.get("cards", []):
                 if not card.get("evidence_refs"):
                     errors.append(f"R8: 历史卡片 {card.get('event_name')} 缺少证据")
-            for candidate in block.get("excluded_candidates", []):
-                if not candidate.get("reason") or not set(
-                    candidate.get("evidence_refs", [])
-                ).issubset(evidence_ids):
+            for candidate in [
+                *block.get("excluded_candidates", []),
+                *block.get("reference_candidates", []),
+            ]:
+                if (
+                    not candidate.get("reason")
+                    or not set(candidate.get("evidence_refs", []))
+                    or not set(candidate.get("evidence_refs", [])).issubset(evidence_ids)
+                ):
                     errors.append("R8: 历史候选材料排除说明缺少有效依据")
         if block.get("type") == "executive_summary":
             for key in ("what", "why", "so_what"):

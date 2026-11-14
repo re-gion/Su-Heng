@@ -94,9 +94,20 @@ class ConfigService:
                 key = prefix + field.upper()
                 raw = values.get(key, "").strip() or None
                 explicit[field] = mask_secret(raw) if field == "api_key" else raw
-                inherited = raw or default_values[field]
+                legacy = (
+                    values.get(f"LLM_ANALYST_B_{field.upper()}", "").strip()
+                    if role == "comment_analyst"
+                    else ""
+                )
+                inherited = raw or legacy or default_values[field]
                 effective[field] = mask_secret(inherited) if field == "api_key" else inherited
-                source[field] = self._origin(key, stored, self.environ) if raw else "inherit"
+                source[field] = (
+                    self._origin(key, stored, self.environ)
+                    if raw
+                    else "inherit_analyst_b"
+                    if legacy
+                    else "inherit"
+                )
             roles[role] = {**explicit, "effective": effective, "source": source}
         fetch_order = [
             name.strip()

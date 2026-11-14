@@ -165,7 +165,7 @@ async def analyze_quick_read(
         extracted = await _call(
             agent,
             "comment_quick_index",
-            "analyst_b",
+            "comment_analyst",
             "逐条建立简短语义索引：只保留与本事件公共处理有关的关切、理由、诉求或追问，不证明事实，不推断个人身份。"
             "保留否定、条件、相反与少数观点；通常只给一个索引，只有不同观点或诉求并存才拆成多个，避免同义拆分。每项text不超过96字，禁止长篇改写。"
             "广告、纯玩梗或离题可relevant=false；无法判断的保留具体说法，不猜测。每条样本index恰好一次。"

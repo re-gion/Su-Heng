@@ -7,7 +7,12 @@ from typing import Any
 
 
 def independent_case_evidence(
-    claim: Any, evidence_by_id: Mapping[str, Any], event_query: str, cutoff: str | None
+    claim: Any,
+    evidence_by_id: Mapping[str, Any],
+    event_query: str,
+    cutoff: str | None,
+    *,
+    require_confirmed_date: bool = True,
 ) -> set[str]:
     """Return eligible sources only for an explicitly identified, distinct case.
 
@@ -22,8 +27,9 @@ def independent_case_evidence(
     institution = str(case.get("institution") or "").strip()
     similarity = str(case.get("similarity") or "").strip()
     difference = str(case.get("difference") or "").strip()
-    outcome = str(case.get("outcome") or "").strip()
-    if not all((name, institution, similarity, difference, outcome)):
+    # An unresolved case can still document a comparable response mechanism.
+    # A missing outcome is disclosed by the renderer, never inferred.
+    if not all((name, institution, similarity, difference)):
         return set()
     normal_query = "".join(event_query.lower().split())
     normal_name = "".join(name.lower().split())
@@ -40,14 +46,15 @@ def independent_case_evidence(
         source = evidence_by_id.get(ref)
         if source is None or (source.extra or {}).get("scope_status") != "history":
             continue
-        if (source.extra or {}).get("date_provenance") not in {
+        trusted_date = (source.extra or {}).get("date_provenance") in {
             "page_metadata",
             "page_visible",
             "trusted_structured",
             "user_provided",
-        }:
+        }
+        if require_confirmed_date and (not trusted_date or not source.published_at):
             continue
-        if not source.published_at or (cutoff and str(source.published_at)[:10] > cutoff[:10]):
+        if source.published_at and cutoff and str(source.published_at)[:10] > cutoff[:10]:
             continue
         source_text = f"{source.title or ''} {source.content_text or source.snippet or ''}"
         if institution.lower() not in source_text.lower():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import html
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
@@ -18,6 +18,18 @@ from yuqing.render.brand import FAVICON_DATA_URI, LOGO_DATA_URI
 from yuqing.render.navigation import NAVIGATION_CSS, NAVIGATION_SCRIPT
 
 BADGE_LABELS = LABELS
+
+
+def _beijing_time(value: Any) -> str:
+    if not value:
+        return "未记录"
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            return "未记录时区"
+        return stamp.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return "未记录"
 
 
 def _display_badge(item: dict[str, Any]) -> str:
@@ -731,6 +743,22 @@ def _generic_block(block: dict[str, Any]) -> str:
             if block.get("fallback_text")
             else ""
         )
+        references = "".join(
+            '<article class="narrative-card history-reference">'
+            f"<h3>{_escape(item.get('event_name'))}</h3>"
+            f'<p class="fallback-note">{_escape(item.get("reason"))}</p>'
+            f"<p>{_escape(item.get('summary'))}</p><p>{_escape(item.get('comparison'))}</p>"
+            + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
+            + "</article>"
+            for item in block.get("reference_candidates", [])
+        )
+        reference_html = (
+            '<aside class="history-references"><h3>待核实参考案例（不计入正式历史对照）</h3>'
+            + references
+            + "</aside>"
+            if references
+            else ""
+        )
         excluded = block.get("excluded_candidates", [])
         excluded_html = (
             '<details class="analysis-basis"><summary>待核实或未采用的候选材料与原因</summary><ul>'
@@ -747,7 +775,7 @@ def _generic_block(block: dict[str, Any]) -> str:
         )
         return (
             f'<section id="{_escape(block.get("block_id"))}"><h2>{title}</h2>'
-            f"{''.join(cards)}{fallback}{excluded_html}</section>"
+            f"{''.join(cards)}{fallback}{reference_html}{excluded_html}</section>"
         )
     if block_type == "comment_insight":
         coverage = block.get("coverage", {})
@@ -1441,7 +1469,10 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
         f'<div class="report-workspace">{toc}<div class="report-document"><header><div class="report-brand"><img src="{LOGO_DATA_URI}" '
         'alt="溯衡" width="172" height="80"><span>舆情调查与研判</span></div>'
         f"<h1>{title}</h1>"
-        f"<p>{_escape(header.get('subtitle'))}</p></header>"
+        f"<p>{_escape(header.get('subtitle'))}</p>"
+        '<p class="report-timestamps">'
+        f"调查开始：{_beijing_time(report.get('task', {}).get('created_at'))} · "
+        f"报告生成：{_beijing_time(report.get('task', {}).get('generated_at'))}（北京时间 UTC+8）</p></header>"
         f"{quality_html}"
         f'<div class="report-shell"><main id="report-main">{"".join(sections)}</main></div></div></div>'
         '<button class="back-to-top" type="button" aria-label="返回顶部"><span aria-hidden="true">↑</span>返回顶部</button>'

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -319,7 +321,16 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
             for name in ("fact_investigator", "media_propagation", "history_insight")
         }
         model_names = {}
-        for role in ("analyst_a", "analyst_b", "analyst_c", "moderator", "verifier", "reporter"):
+        for role in (
+            "analyst_a",
+            "analyst_b",
+            "analyst_c",
+            "comment_analyst",
+            "moderator",
+            "verifier",
+            "reporter",
+            "utility",
+        ):
             role_config = llm_factory.config(role)
             model_names[role] = f"{role_config.protocol}|{role_config.base_url}|{role_config.model}"
         return V1Orchestrator(
@@ -968,6 +979,7 @@ def create_app(
                     "analyst_a",
                     "analyst_b",
                     "analyst_c",
+                    "comment_analyst",
                     "moderator",
                     "verifier",
                     "reporter",
@@ -1593,21 +1605,44 @@ def create_app(
 
     @app.get("/api/tasks")
     async def list_tasks(
-        request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 20
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        cursor: Annotated[str | None, Query(max_length=2048)] = None,
     ) -> dict[str, Any]:
         database, _ = services(request)
         auth_user = getattr(request.state, "auth_user", None)
+        before = None
+        if cursor is not None:
+            try:
+                value = json.loads(base64.urlsafe_b64decode(cursor).decode("utf-8"))
+                if (
+                    not isinstance(value, list)
+                    or len(value) != 2
+                    or not all(isinstance(item, str) and item for item in value)
+                ):
+                    raise ValueError("invalid cursor")
+                datetime.fromisoformat(value[0])
+                before = (value[0], value[1])
+            except (ValueError, TypeError, UnicodeError, binascii.Error):
+                return error_response("INVALID_CURSOR", "任务分页游标无效，请刷新列表。", 422)
+        owner_hash = demo_owner_hash(request) if is_demo else None
+        if is_demo and not owner_hash:
+            return {"items": [], "next_cursor": None}
         tasks = await database.list_tasks(
-            limit,
+            limit + 1,
             owner_user_id=str(auth_user["id"]) if requires_auth and auth_user else None,
+            demo_owner_hash=owner_hash,
+            before=before,
         )
-        if is_demo:
-            owner_hash = demo_owner_hash(request)
-            tasks = [
-                task
-                for task in tasks
-                if owner_hash and await database.demo_task_owned_by(task.id, owner_hash)
-            ]
+        has_more = len(tasks) > limit
+        tasks = tasks[:limit]
+        next_cursor = (
+            base64.urlsafe_b64encode(
+                json.dumps([tasks[-1].created_at, tasks[-1].id]).encode("utf-8")
+            ).decode("ascii")
+            if has_more
+            else None
+        )
         items = []
         for task in tasks:
             report = await database.get_report_for_task(task.id)
@@ -1635,9 +1670,10 @@ def create_app(
                     "report_id": report["id"] if report else None,
                     "created_at": task.created_at,
                     "updated_at": task.updated_at,
+                    "completed_at": task.completed_at if task.status == "done" else None,
                 }
             )
-        return {"items": items, "next_cursor": None}
+        return {"items": items, "next_cursor": next_cursor}
 
     @app.get("/api/tasks/{task_id}")
     async def task_detail(task_id: str, request: Request):

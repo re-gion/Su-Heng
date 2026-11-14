@@ -322,18 +322,35 @@ class Database:
         )
 
     async def list_tasks(
-        self, limit: int = 20, *, owner_user_id: str | None = None
+        self,
+        limit: int = 20,
+        *,
+        owner_user_id: str | None = None,
+        demo_owner_hash: str | None = None,
+        before: tuple[str, str] | None = None,
     ) -> list[TaskRecord]:
-        if owner_user_id is None:
-            rows = await self.fetch_all(
-                "SELECT * FROM task ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+        conditions = []
+        params: list[Any] = []
+        if owner_user_id is not None:
+            conditions.append("t.owner_user_id=?")
+            params.append(owner_user_id)
+        if demo_owner_hash is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM demo_task_owner d WHERE d.task_id=t.id AND d.owner_hash=?)"
             )
-        else:
-            rows = await self.fetch_all(
-                """SELECT * FROM task WHERE owner_user_id=?
-                   ORDER BY created_at DESC,id DESC LIMIT ?""",
-                (owner_user_id, limit),
-            )
+            params.append(demo_owner_hash)
+        if before is not None:
+            conditions.append("(t.created_at,t.id)<(?,?)")
+            params.extend(before)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        rows = await self.fetch_all(
+            """SELECT t.*,(SELECT e.ts FROM event_log e WHERE e.task_id=t.id
+               AND e.event_type='task.status' AND json_extract(e.payload,'$.data.status')='done'
+               ORDER BY e.seq DESC LIMIT 1) AS completed_at FROM task t"""
+            + where
+            + " ORDER BY t.created_at DESC,t.id DESC LIMIT ?",
+            (*params, limit),
+        )
         return [self._task_record(row) for row in rows]
 
     async def task_owned_by(self, task_id: str, owner_user_id: str) -> bool:

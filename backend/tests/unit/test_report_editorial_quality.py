@@ -146,12 +146,12 @@ async def test_comment_classification_reserves_room_for_reviewed_theme():
         tokens_used = 0
 
         async def complete_json(self, role, _system, prompt, **_kwargs):
-            cost = 20_000 if role == "analyst_b" else 12_000
+            cost = 20_000 if role == "comment_analyst" else 12_000
             if self.tokens_used + cost > self.token_limit:
                 raise LLMBudgetExhausted("本地阶段额度不足")
             self.tokens_used += cost
             data = json.loads(prompt.split("\n", 1)[1])
-            if role == "analyst_b":
+            if role == "comment_analyst":
                 return {
                     "assignments": [
                         {"id": s["id"], "relevant": True, "issue": "机构回应", "stance": "质疑"}

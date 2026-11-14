@@ -1,7 +1,7 @@
 ---
 name: comment_insight
 label: 评论洞察 Agent
-model_role: analyst_b
+model_role: comment_analyst
 tools: [evidence_search, claim_write, forum_post, forum_read, read_skill]
 skills: [source-tiering]
 max_inner_rounds: 1

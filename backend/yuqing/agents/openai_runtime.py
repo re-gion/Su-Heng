@@ -43,7 +43,7 @@ ROLE_PLAN_GUIDANCE = {
     ),
     "analyst_c": (
         "围绕独立事件规划查询：先找与本事件有可核查直接联系的另一件前事，"
-        "再找处理机制相似的类比案例；同一事件的早期和后续仍归事实席。"
+        "再找本领域优先、必要时跨行业的机制相似案例；不要求最终结局，可靠公开进展亦可对照。同一事件的早期和后续仍归事实席。"
         "两类分开标注，均不得据此预测本事件。"
     ),
 }
@@ -51,7 +51,7 @@ ROLE_PLAN_GUIDANCE = {
 ROLE_FALLBACK_QUERY = {
     "analyst_a": "official statement response timeline verified facts",
     "analyst_b": "first report official response syndication timeline",
-    "analyst_c": "similar case institutional response final outcome",
+    "analyst_c": "similar case response investigation recall review progress",
 }
 
 

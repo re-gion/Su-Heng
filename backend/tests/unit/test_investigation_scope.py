@@ -13,6 +13,35 @@ from yuqing.services.investigation_scope import (
 from yuqing.services.v1_orchestrator import ensure_requested_languages, valid_media_analysis
 
 
+def test_history_accepts_cross_industry_mechanism_without_institution_suffix():
+    scope = InvestigationScope(event_query="某品牌制动踏板断裂事件", languages=("zh",))
+    decision = scope.classify_result(
+        result(
+            title="某品牌因制动踏板故障启动召回，监管部门要求整改",
+            url="https://example.cn/previous-recall",
+            published_at="2020-01-01",
+        ),
+        agent="history_insight",
+        search_query="汽车 制动踏板 断裂 召回 历史案例",
+    )
+    assert decision.accepted is True
+    assert decision.bucket == "history"
+
+
+def test_history_accepts_one_specific_query_concept_without_exact_phrase_match():
+    scope = InvestigationScope(event_query="高校学生处分事件", languages=("zh",))
+    decision = scope.classify_result(
+        result(
+            title="某高校公布调查结果，复核后撤销处分",
+            url="https://example.cn/previous-review",
+            published_at="2020-01-01",
+        ),
+        agent="history_insight",
+        search_query="高校 学生处分 撤销处分 类似案例",
+    )
+    assert decision.accepted is True
+
+
 def test_chinese_publication_date_beside_source_in_article_header():
     page = (
         '<h1>公开通报</h1><div class="info"><span id="author"></span>'

@@ -263,7 +263,7 @@ async def analyze_questions(
                 *[
                     call(
                         "comment_observation_extract",
-                        "analyst_b",
+                        "comment_analyst",
                         "逐条提取与公共事件有关的具体观点、理由、诉求和追问；保留少数及复合表达，一条评论可有多个原子观察。"
                         "不得把原话断言改成事件事实，不推断身份；机构范围只分析机构处理与公共程序。广告玩梗离题为relevant=false。"
                         "每个样本id恰好一次，相关样本必须有具体观察。kind取viewpoint/reason/request/question，stance取认可/质疑/审慎/其他。"

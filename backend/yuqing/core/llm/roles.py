@@ -7,12 +7,20 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 LLMRole = Literal[
-    "analyst_a", "analyst_b", "analyst_c", "moderator", "verifier", "reporter", "utility"
+    "analyst_a",
+    "analyst_b",
+    "analyst_c",
+    "comment_analyst",
+    "moderator",
+    "verifier",
+    "reporter",
+    "utility",
 ]
 ROLES: tuple[LLMRole, ...] = (
     "analyst_a",
     "analyst_b",
     "analyst_c",
+    "comment_analyst",
     "moderator",
     "verifier",
     "reporter",
@@ -37,6 +45,11 @@ def load_role_config(role: LLMRole, environ: Mapping[str, str] | None = None) ->
     def inherited(field: str, fallback: str = "") -> str:
         return (
             values.get(prefix + field, "").strip()
+            or (
+                values.get("LLM_ANALYST_B_" + field, "").strip()
+                if role == "comment_analyst"
+                else ""
+            )
             or values.get("DEFAULT_" + field, "").strip()
             or fallback
         )

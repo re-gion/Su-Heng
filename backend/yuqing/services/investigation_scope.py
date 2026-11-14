@@ -65,13 +65,25 @@ _HISTORY_ACTION_ZH = (
     "复核",
     "问责",
     "性骚扰",
+    "召回",
+    "故障",
+    "缺陷",
+    "整改",
+    "事故",
+    "泄露",
+    "停产",
+    "处罚",
 )
-_HISTORY_INSTITUTION_ZH = ("大学", "高校", "学院", "学校", "中学", "医院", "公司", "集团")
 _HISTORY_QUERY_STOPWORDS = {
     "高校",
     "大学",
     "案例",
     "历史案例",
+    "类似案例",
+    "类比案例",
+    "历史",
+    "类似",
+    "同类",
     "舆情",
     "舆情事件",
     "university",
@@ -272,11 +284,8 @@ def _event_context_anchors(event_query: str, subject_anchors: Sequence[str]) -> 
 
 def _history_relevant(text: str, search_query: str | None) -> bool:
     folded = text.casefold()
-    if not (
-        any(marker in text for marker in _HISTORY_INSTITUTION_ZH)
-        or re.search(r"\b(?:university|college|school|campus)\b", folded)
-    ):
-        return False
+    # This is a discovery filter, not a case-identity verdict. Brands and
+    # regulators need not contain a school/company suffix to be comparable.
     if not (
         any(marker in text for marker in _HISTORY_ACTION_ZH) or _ENGLISH_EVENT_ACTION.search(text)
     ):
@@ -288,7 +297,7 @@ def _history_relevant(text: str, search_query: str | None) -> bool:
         for term in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z]{4,}", search_query)
         if term.casefold() not in _HISTORY_QUERY_STOPWORDS
     ]
-    return sum(term in folded for term in dict.fromkeys(terms)) >= 2
+    return not terms or any(term in folded for term in terms)
 
 
 def _english_query_context(search_query: str | None, subjects: Sequence[str]) -> tuple[str, ...]:

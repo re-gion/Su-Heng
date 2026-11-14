@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
@@ -59,6 +59,39 @@ function baseFetch(input: RequestInfo | URL, init?: RequestInit) {
 }
 
 describe('V2 task desk', () => {
+  it('places the independent comment model fourth and explains all eight roles', async () => {
+    const config = await (await baseFetch('/api/config')).json() as Record<string, any>
+    const names = ['utility', 'reporter', 'verifier', 'moderator', 'comment_analyst', 'analyst_c', 'analyst_b', 'analyst_a']
+    config.llm.roles = Object.fromEntries(names.map(name => [name, {
+      effective: { api_key: null, base_url: 'https://example.test', model: 'fixture', protocol: 'openai' },
+      source: { model: 'inherit' },
+    }]))
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === '/api/config' ? Promise.resolve(json(config)) : baseFetch(input, init)))
+    const { container } = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '系统配置 ↗' }))
+    await screen.findByLabelText('评论洞察 接口协议')
+    const cards = container.querySelectorAll('.role-config-grid article')
+    expect(cards).toHaveLength(8)
+    expect([...cards].map(card => card.querySelector('strong')?.textContent)).toEqual(['事实调查', '媒体传播', '历史洞察', '评论洞察', '协作主持', '证据核验', '报告撰写', '通用辅助'])
+    cards.forEach(card => expect(card.querySelector('.role-description')?.textContent).toBeTruthy())
+  })
+
+  it('shows investigation timestamps and reaches earlier saved tasks', async () => {
+    const item = (id: string) => ({ task_id: id, event_query: id, status: 'done', created_at: '2026-11-14T01:00:00Z', completed_at: '2026-11-14T02:00:00Z' })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/tasks?')) return Promise.resolve(json(path.includes('cursor=') ? { items: [item('以前的调查')], next_cursor: null } : { items: Array.from({ length: 20 }, (_, i) => item(`记录${i}`)), next_cursor: 'older' }))
+      return baseFetch(input, init)
+    }))
+    render(<App />)
+    const ledger = await screen.findByRole('region', { name: '全部调查记录' })
+    expect(within(ledger).getAllByText(/调查开始：2026\/11\/14 09:00:00/)).toHaveLength(20)
+    expect(within(ledger).getAllByText(/完成：2026\/11\/14 10:00:00/)).toHaveLength(20)
+    fireEvent.click(within(ledger).getByRole('button', { name: '加载更早记录' }))
+    expect(await within(ledger).findByText('以前的调查')).toBeInTheDocument()
+    expect(within(ledger).getByText('已显示全部 21 条记录')).toBeInTheDocument()
+  })
+
   beforeEach(() => {
     history.replaceState(null, '', '/')
     FakeEventSource.instances = []

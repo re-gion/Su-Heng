@@ -315,6 +315,7 @@ class BriefReportBuilder:
                 "time_range_to": task.time_range_to,
                 "user_note": None if institution_scope else task.user_note,
                 "generated_at": stamp,
+                "created_at": task.created_at,
             },
             "metrics": metrics,
             "blocks": [

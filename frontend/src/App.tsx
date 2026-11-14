@@ -14,7 +14,6 @@ import {
   submitCommentSelection,
   submitTopicSelection,
   stopCommentCollection,
-  listTasks,
   pauseTask,
   resumeTask,
   stopTask,
@@ -23,12 +22,12 @@ import {
   type BudgetTable,
   type PublicConfig,
   type ProviderQuotaStatus,
-  type TaskListItem,
   type CommentPluginStatus,
   type CommentCandidates,
   type TopicCandidates,
   type TaskDetail,
 } from './api/client'
+import { useTaskLedger } from './useTaskLedger'
 import { useTaskStream } from './events/useTaskStream'
 import { TaskProgress } from './events/TaskProgress'
 import { CommentQuickRead } from './CommentQuickRead'
@@ -100,8 +99,27 @@ function AccountControls({ auth }: { auth: AuthView }) {
   </>
 }
 
-const roleLabels: Record<string, string> = { analyst_a: '事实调查', analyst_b: '媒体传播', analyst_c: '历史洞察', moderator: '协作主持', verifier: '证据核验', reporter: '报告撰写', utility: '通用辅助' }
-const originLabels: Record<string, string> = { inherit: '继承默认配置', config: '配置页', env: '环境变量', default: '系统默认' }
+const roleLabels: Record<string, string> = { analyst_a: '事实调查', analyst_b: '媒体传播', analyst_c: '历史洞察', comment_analyst: '评论洞察', moderator: '协作主持', verifier: '证据核验', reporter: '报告撰写', utility: '通用辅助' }
+const roleOrder = ['analyst_a', 'analyst_b', 'analyst_c', 'comment_analyst', 'moderator', 'verifier', 'reporter', 'utility']
+const roleDescriptions: Record<string, string> = {
+  analyst_a: '查清事件经过、通报与回应，形成有来源的事实陈述。',
+  analyst_b: '梳理发布、转载和回应关系，比较媒体报道口径。',
+  analyst_c: '寻找独立类比案例，比较处理机制、差异及公开进展。',
+  comment_analyst: '整理已确认帖子的脱敏评论，归纳问题、理由和诉求。',
+  moderator: '审阅调查成果与证据缺口，安排补查并判断能否结束讨论。',
+  verifier: '逐条检查证据与陈述的支持关系，审查摘要和评论分析。',
+  reporter: '组织专报内容、综合分析与建议，事实和徽章由数据库回填。',
+  utility: '执行公共性门禁、翻译及其他辅助任务。',
+}
+
+function beijingTime(value?: string | null) {
+  if (!value) return '未记录'
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(value)) return '未记录时区'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '未记录'
+  return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(date)
+}
+const originLabels: Record<string, string> = { inherit_analyst_b: '继承媒体传播配置', inherit: '继承默认配置', config: '配置页', env: '环境变量', default: '系统默认' }
 const budgetLabels: Record<string, string> = { token_limit: '总 token 上限', search_calls: '搜索调用上限', fetch_calls: '原文抓取上限', max_claims: '陈述数量上限', max_evidence_per_claim: '每条陈述最多证据数', max_verify_calls: '证据关系核验上限', outer_rounds: '协作讨论轮数', top_k: '每次搜索结果数', queries_per_round: '每轮查询数', comment_posts: '评论帖子上限', comments_per_post: '每帖评论上限' }
 const providerLabels: Record<string, string> = { yuanbao: '元宝搜索', exa: 'Exa 搜索', qianfan: '百度千帆', bocha: '博查搜索', tavily: 'Tavily 搜索', serper: 'Serper 搜索' }
 const platformLabels: Record<string, string> = { weibo: '微博', bilibili: '哔哩哔哩', zhihu: '知乎', xiaohongshu: '小红书', douyin: '抖音', kuaishou: '快手', tieba: '百度贴吧' }
@@ -237,7 +255,7 @@ function Settings({ onClose }: { onClose: () => void }) {
   useEffect(() => { void getCommentPluginStatus().then(setCommentStatus).catch(() => setCommentStatus(null)) }, [])
   if (!config) return <main className="settings-page"><p>{notice || '正在读取配置…'}</p></main>
   const currentConfig = config
-  const roles = Object.entries(currentConfig.llm.roles)
+  const roles = Object.entries(currentConfig.llm.roles).sort(([a], [b]) => roleOrder.indexOf(a) - roleOrder.indexOf(b))
   const set = (key: string, value: string) => setDraft((valueBefore) => ({ ...valueBefore, [key]: value }))
   async function save(event: FormEvent) {
     event.preventDefault(); setNotice('正在保存…')
@@ -275,11 +293,12 @@ function Settings({ onClose }: { onClose: () => void }) {
       <section><h2>模型角色配置</h2><p className="muted">选择供应商实际提供的接口协议。Anthropic Messages 用于 Claude 原生协议或兼容中转；OpenAI 兼容用于 Chat Completions 中转。留空继续继承当前有效值；核验器与生成模型异构时，交叉核验更有意义。</p>
         <div className="role-config-grid">{roles.map(([role, value]) => <article key={role}>
           <header><div><strong>{roleLabels[role] ?? role}</strong><small className="role-key">{role}</small></div><button type="button" onClick={() => void test('llm', role)}>测试</button></header>
+          <p className="role-description">{roleDescriptions[role]}</p>
           <label>接口密钥 · API Key<input type="password" value={draft[`${role}.api_key`] ?? ''} onChange={(event) => set(`${role}.api_key`, event.target.value)} placeholder={value.effective.api_key ?? '未配置'} /></label>
           <label>接口地址 · Base URL<input value={draft[`${role}.base_url`] ?? ''} onChange={(event) => set(`${role}.base_url`, event.target.value)} placeholder={value.effective.base_url} /></label>
           <label>模型名称 · Model<input value={draft[`${role}.model`] ?? ''} onChange={(event) => set(`${role}.model`, event.target.value)} placeholder={value.effective.model} /></label>
           <label>接口协议<select aria-label={`${roleLabels[role] ?? role} 接口协议`} value={draft[`${role}.protocol`] ?? value.effective.protocol ?? 'openai'} onChange={(event) => set(`${role}.protocol`, event.target.value)}><option value="openai">OpenAI 兼容 · Chat Completions</option><option value="anthropic">Anthropic Messages</option></select></label>
-          <small>配置来源：{Object.entries(value.source).map(([key, source]) => `${({ api_key: '密钥', base_url: '地址', model: '模型', protocol: '协议' } as Record<string, string>)[key] ?? key}：${originLabels[source] ?? source}`).join('；')}{role === 'analyst_b' && <span className="role-usage">评论逐条分类也使用此角色；主题综合使用报告撰写，审查使用证据核验。</span>}</small>
+          <small>配置来源：{Object.entries(value.source).map(([key, source]) => `${({ api_key: '密钥', base_url: '地址', model: '模型', protocol: '协议' } as Record<string, string>)[key] ?? key}：${originLabels[source] ?? source}`).join('；')}{role === 'comment_analyst' && <span className="role-usage">未单独配置的字段沿用媒体传播配置；主题综合使用报告撰写，审查使用证据核验。</span>}</small>
         </article>)}</div>
       </section>
       <section><h2>搜索路由与本地额度</h2><p className="muted">中文查询依次尝试 元宝搜索 → Exa → 千帆 → 博查，其他语言依次尝试 Exa → Tavily → Serper。结果为空或与事件不相关时会继续换源；中文主调查若元宝搜索只找到同一发布主体的材料，还会用 Exa 补充并去重。千帆与 Tavily 每任务最多 20 次，博查与 Serper 每任务最多 10 次。本机计数从此版本启用后开始记录，包含已预留但上游失败的调用；元宝只返回搜索摘要，暂不支持微信公众号；本地保护线不是腾讯余额，实际计费以控制台为准。</p><div className="search-config-grid">{Object.entries(currentConfig.search.keys).map(([name, masked]) => <div className="provider-config" key={name}><label><span>{providerLabels[name] ?? name}<button type="button" onClick={() => void test('search', name)}>测试</button></span><input type="password" value={draft[`search.${name}`] ?? ''} onChange={(event) => set(`search.${name}`, event.target.value)} placeholder={masked ?? '未配置'} /></label><QuotaDetails provider={name} status={currentConfig.search.quota?.[name]} /></div>)}</div></section>
@@ -367,25 +386,11 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
   const [pendingScope, setPendingScope] = useState<{ key: string; label: string } | null>(null)
-  const [tasks, setTasks] = useState<TaskListItem[]>([])
-  const [taskListLoading, setTaskListLoading] = useState(true)
-  const [taskListError, setTaskListError] = useState('')
   const [taskListRevision, setTaskListRevision] = useState(0)
   const [appCapabilities, setAppCapabilities] = useState<CommentPluginStatus | null>(null)
   const stream = useTaskStream(taskId, streamRevision)
   const draftKey = JSON.stringify([query, note, timeFrom, timeTo, depth, sourceScope, sourceLanguages, commentMode, commentUrls])
-  useEffect(() => {
-    let active = true
-    setTaskListLoading(true)
-    setTaskListError('')
-    void listTasks()
-      .then((value) => { if (active) setTasks(value) })
-      .catch((error: unknown) => {
-        if (active) setTaskListError(error instanceof Error ? error.message : '无法读取任务记录。')
-      })
-      .finally(() => { if (active) setTaskListLoading(false) })
-    return () => { active = false }
-  }, [taskId, stream.status, taskListRevision])
+  const { tasks, nextCursor, loading: taskListLoading, error: taskListError, loadMore, refresh: refreshTasks } = useTaskLedger(`${taskId}:${stream.status}:${taskListRevision}`)
   useEffect(() => { void getCommentPluginStatus().then(setAppCapabilities).catch(() => setAppCapabilities(null)) }, [])
   useEffect(() => {
     if (!taskId) {
@@ -460,7 +465,8 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
         {taskListError && <p className="task-list-feedback" role="alert">任务记录读取失败：{taskListError}<button type="button" className="quiet" onClick={() => setTaskListRevision((value) => value + 1)}>重试</button></p>}
         {!taskListError && taskListLoading && tasks.length === 0 && <p className="task-list-feedback muted" aria-live="polite">正在读取任务记录…</p>}
         {!taskListError && !taskListLoading && tasks.length === 0 && <p className="task-list-feedback muted">当前账号暂无调查记录。</p>}
-        {tasks.length > 0 && <div className="task-list">{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.resolved_event_query ?? item.event_query}</strong><small>{taskStatusLabels[item.status] ?? item.status} · {item.task_id}</small></button><div className="task-actions">{item.topic_selection_required && <button onClick={() => selectTask(item.task_id)}>选择事件</button>}{item.comment_selection_required && <button onClick={() => selectTask(item.task_id)}>确认评论</button>}{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); setTasks(await listTasks()) })}>删除</button>}</div></article>)}</div>}
+        {tasks.length > 0 && <div className="task-list" role="region" aria-label="全部调查记录" tabIndex={0} onScroll={(event) => { const element = event.currentTarget; if (!taskListError && element.scrollHeight - element.scrollTop - element.clientHeight < 80) void loadMore() }}>{tasks.map((item) => <article key={item.task_id} className={item.task_id === taskId ? 'active' : ''}><button className="task-title" onClick={() => selectTask(item.task_id)}><strong>{item.resolved_event_query ?? item.event_query}</strong><small>{taskStatusLabels[item.status] ?? item.status} · {item.task_id}</small><small>调查开始：{beijingTime(item.created_at)}（北京时间）{item.status === 'done' && <> · 完成：{beijingTime(item.completed_at)}</>}</small></button><div className="task-actions">{item.topic_selection_required && <button onClick={() => selectTask(item.task_id)}>选择事件</button>}{item.comment_selection_required && <button onClick={() => selectTask(item.task_id)}>确认评论</button>}{item.resumable && <button onClick={() => void action(async () => { await resumeTask(item.task_id); selectTask(item.task_id) })}>续跑</button>}{!['running', 'pausing', 'stopping'].includes(item.status) && <button className="quiet" onClick={() => void action(async () => { await deleteTask(item.task_id); if (item.task_id === taskId) clearTask(); refreshTasks() })}>删除</button>}</div></article>)}<div className="task-list-footer">{nextCursor ? <button type="button" className="quiet" disabled={taskListLoading} onClick={() => void loadMore()}>{taskListLoading ? '正在读取…' : '加载更早记录'}</button> : <span className="muted">已显示全部 {tasks.length} 条记录</span>}</div></div>}
+        <p className="task-ledger-note muted">{appCapabilities?.demo_mode ? '演示站按保留期限自动清理过期记录。' : '按时间倒序显示全部已保存记录，向下滚动可加载更早任务。'}</p>
       </section>
 
       {taskId && <>

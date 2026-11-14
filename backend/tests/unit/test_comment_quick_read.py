@@ -18,12 +18,14 @@ from yuqing.services.institution_scope import ScopeReview
 class Gateway:
     def __init__(self, *, reject_index=False, reject_summary=False, stringify=False):
         self.calls = []
+        self.roles = []
         self.reject_index = reject_index
         self.reject_summary = reject_summary
         self.stringify = stringify
 
     async def complete_json(self, role, system, prompt, **kwargs):
         self.calls.append(prompt)
+        self.roles.append(role)
         data = json.loads(prompt.split("\n", 1)[1])
         if "comments" in data and "indices" not in data:
             return {
@@ -106,6 +108,10 @@ async def test_short_indices_split_compound_comments_without_automatic_deepening
     follow_up.assert_not_called()
     assert not validate_questions(result, {"E001"})
     assert not any("public_evidence" in p for p in gateway.calls)
+    assert "comment_analyst" in gateway.roles
+    assert "analyst_b" not in gateway.roles
+    assert "reporter" in gateway.roles
+    assert "verifier" in gateway.roles
     html = _render_block(
         {"type": "comment_insight", "analysis_version": 5, "analysis_mode": "quick_read", **result},
         {},

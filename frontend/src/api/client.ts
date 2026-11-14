@@ -65,6 +65,8 @@ export type TaskListItem = {
   comment_selection_required: boolean
   topic_selection_required: boolean
   report_id: string | null
+  created_at?: string
+  completed_at?: string | null
 }
 
 export type DataStatus = {
@@ -244,10 +246,15 @@ export async function testConfig(payload: { kind: 'llm'; role: string } | { kind
   return mutation('/api/config/test', 'POST', payload) as Promise<{ ok: boolean; sample?: string; error?: { message?: string }; latency_ms: number; resolved?: { base_url: string; model: string; protocol?: 'openai' | 'anthropic' } }>
 }
 
-export async function listTasks(): Promise<TaskListItem[]> {
-  const response = await fetch('/api/tasks?limit=8')
+export type TaskPage = { items: TaskListItem[]; next_cursor: string | null }
+
+export async function listTasks(cursor?: string | null, signal?: AbortSignal): Promise<TaskPage> {
+  const params = new URLSearchParams({ limit: '20' })
+  if (cursor) params.set('cursor', cursor)
+  const response = await fetch(`/api/tasks?${params}`, { signal })
   if (!response.ok) throw new Error('无法读取任务列表')
-  return ((await response.json()) as { items: TaskListItem[] }).items
+  const page = await response.json() as TaskPage
+  return { items: page.items, next_cursor: page.next_cursor ?? null }
 }
 
 export type TaskDetail = {

@@ -75,6 +75,8 @@ class TaskRecord(BaseModel):
     config_snapshot: str | None = None
     created_at: str
     updated_at: str
+    # Read from persisted completion events when listing tasks; unknown for legacy records.
+    completed_at: str | None = None
 
     @property
     def effective_source_scope(self) -> SourceScope:

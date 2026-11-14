@@ -163,7 +163,7 @@ FETCH_PROVIDER_ORDER=builtin,firecrawl
 FIRECRAWL_API_KEY=
 ```
 
-七个模型角色分别是 `ANALYST_A`、`ANALYST_B`、`ANALYST_C`、`MODERATOR`、`VERIFIER`、`REPORTER` 和 `UTILITY`。某个角色需要独立模型时，使用 `LLM_<ROLE>_API_KEY`、`LLM_<ROLE>_BASE_URL`、`LLM_<ROLE>_MODEL` 覆盖默认值。
+八个模型角色分别是 `ANALYST_A`（事实调查）、`ANALYST_B`（媒体传播）、`ANALYST_C`（历史洞察）、`COMMENT_ANALYST`（评论洞察）、`MODERATOR`（协作主持）、`VERIFIER`（证据核验）、`REPORTER`（报告撰写）和 `UTILITY`（公共性门禁等辅助任务）。配置台在宽屏按四行、每行两张卡展示，评论洞察排第四；窄屏自动改为单列。独立配置使用 `LLM_<ROLE>_API_KEY`、`LLM_<ROLE>_BASE_URL`、`LLM_<ROLE>_MODEL`、`LLM_<ROLE>_PROTOCOL`。评论洞察未配置的字段先沿用 `LLM_ANALYST_B_*`，再回退 `DEFAULT_*`；评论主题综合和审查分别使用报告、核验角色。
 
 硅基流动 `zai-org/GLM-5.3-Flash` 使用 `DEFAULT_BASE_URL=https://api.siliconflow.cn/v1`、`DEFAULT_MODEL=zai-org/GLM-5.3-Flash` 和硅基流动账户的 `DEFAULT_API_KEY`。接口继续使用 JSON 对象模式；不要照搬智谱直连接口的思考参数。切换时同时检查默认配置与角色覆盖项，并在重启后测试有效配置。官方接口核对及验收边界见 [硅基流动接入核对](docs/硅基流动GLM-5.3-Flash接入核对.md)。
 
@@ -281,3 +281,7 @@ npm run build
 “模型耗时明细”显示各阶段累计请求与排队时间；并行调用有重叠，不能相加当作总运行时间。同一服务地址和 API Key 的所有任务共享 `YUQING_LLM_MAX_INFLIGHT`（默认 2），两个任务并行会竞争名额。确认服务商允许后可逐步调整该环境变量并重启服务，同时观察排队、429、重试与单任务完成时间；提高上限不保证加速。运行中的任务结束后再重启。
 
 系统会从近期成功调用的推理用量预估首次输出额度，减少从小额度开始反复截断；仍遵守原 token 预算与核验发布门。同任务多调查席抓取同一材料会合并为一次请求，已有分批摘要和范围审查缓存继续复用。详见 [运行进度与效率验证](docs/报告质量与验收.md#运行进度与效率验证)。
+
+任务台账按时间倒序分页加载全部已保存记录，支持上下滚动及手动加载更早记录；调查开始与完成时间按北京时间显示，缺失的旧记录时间标为未记录。新生成的专报显示调查开始及报告生成时间，旧导出文件不自动重写。普通自部署模式没有因列表数量而清理历史记录；数据库仍需自行备份，Demo 模式保持原有到期清理策略。
+
+历史洞察按当前事件的领域与处置机制寻找独立案例，不要求高校或特定机构名称后缀。允许处理尚未结束的案例，未取得最终结果时明确说明；原网页日期未确认的来源保留为待核实线索，不进入正式历史结论。相似案例不能用于预测本事件，也不能用本事件旧报道凑数。

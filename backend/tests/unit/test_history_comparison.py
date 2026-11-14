@@ -35,6 +35,39 @@ def claim(case):
     return SimpleNamespace(analysis_data={"historical_case": case}, evidence_ids=["E001"])
 
 
+def test_unresolved_case_can_be_compared_without_inventing_an_outcome():
+    case = {
+        "name": "另一品牌制动系统召回事件",
+        "institution": "另一品牌",
+        "independent": True,
+        "similarity": "安全缺陷调查与召回机制",
+        "difference": "车型和故障部件不同",
+    }
+    assert independent_case_evidence(
+        claim(case), {"E001": source("另一品牌启动制动系统召回")}, "本品牌安全事件", "2026-01-01"
+    ) == {"E001"}
+    unconfirmed = source("另一品牌启动制动系统召回")
+    unconfirmed.extra["date_provenance"] = "search_provider"
+    assert not independent_case_evidence(
+        claim(case), {"E001": unconfirmed}, "本品牌安全事件", "2026-01-01"
+    )
+    assert independent_case_evidence(
+        claim(case),
+        {"E001": unconfirmed},
+        "本品牌安全事件",
+        "2026-01-01",
+        require_confirmed_date=False,
+    ) == {"E001"}
+    unconfirmed.published_at = "2026-02-01"
+    assert not independent_case_evidence(
+        claim(case),
+        {"E001": unconfirmed},
+        "本品牌安全事件",
+        "2026-01-01",
+        require_confirmed_date=False,
+    )
+
+
 def source(title, date="2025-05-01", scope="history", fetched=False):
     return SimpleNamespace(
         title=title,
