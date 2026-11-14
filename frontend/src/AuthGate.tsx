@@ -18,16 +18,29 @@ export function AuthGate({ children }: { children: (auth: AuthView) => ReactNode
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [cooldown, setCooldown] = useState(0)
+  const [checkAttempt, setCheckAttempt] = useState(0)
 
   useEffect(() => {
     let active = true
-    void getAuthStatus().then((value) => {
-      if (active) setStatus(value)
+    const controller = new AbortController()
+    setError('')
+    const timer = window.setTimeout(() => {
+      controller.abort()
+      if (active) setError('登录状态检查超时，请检查网络或稍后重试。')
+    }, 10_000)
+    void getAuthStatus(controller.signal).then((value) => {
+      if (active && !controller.signal.aborted) setStatus(value)
     }).catch((reason: unknown) => {
-      if (active) setError(reason instanceof Error ? reason.message : '无法连接服务')
+      if (active && !controller.signal.aborted) setError(reason instanceof Error ? reason.message : '无法连接服务')
+    }).finally(() => {
+      window.clearTimeout(timer)
     })
-    return () => { active = false }
-  }, [])
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [checkAttempt])
 
   useEffect(() => {
     if (cooldown <= 0) return
@@ -83,7 +96,19 @@ export function AuthGate({ children }: { children: (auth: AuthView) => ReactNode
   }
 
   if (!status) {
-    return <main className="auth-shell"><div className="auth-layout"><section className="auth-intro"><img src={brandLockup} alt="溯衡" width="138" height="64" /><h1>让每个判断<br />都能回到证据。</h1><p>围绕公开材料开展调查，逐项核对来源，清晰呈现结论与边界。</p><div className="auth-intro-meta">来源与核验状态会随报告一同呈现。</div></section><section className="auth-card"><h2>欢迎使用溯衡</h2><p>{error || '正在检查登录状态…'}</p>{error && <button type="button" onClick={() => window.location.reload()}>重新连接</button>}</section></div></main>
+    return <main className="auth-shell"><div className="auth-layout">
+      <section className="auth-intro">
+        <img src={brandLockup} alt="溯衡" width="138" height="64" />
+        <h1>让每个判断<br />都能回到证据。</h1>
+        <p>围绕公开材料开展调查，逐项核对来源，清晰呈现结论与边界。</p>
+        <div className="auth-intro-meta">来源与核验状态会随报告一同呈现。</div>
+      </section>
+      <section className="auth-card" aria-busy={!error}>
+        <h2>欢迎使用溯衡</h2>
+        {error ? <><p className="auth-error" role="alert">{error}</p><button type="button" onClick={() => setCheckAttempt((value) => value + 1)}>重新连接</button></>
+          : <p role="status">正在检查登录状态…</p>}
+      </section>
+    </div></main>
   }
 
   if (status.auth_required && !status.user) {

@@ -11,8 +11,8 @@ type ErrorEnvelope = { error?: { code?: string; message?: string; details?: { sc
 export type AuthUser = { id: string; email: string; is_admin: boolean }
 export type AuthStatus = { auth_required: boolean; user: AuthUser | null }
 
-export async function getAuthStatus(): Promise<AuthStatus> {
-  const response = await fetch('/api/auth/me')
+export async function getAuthStatus(signal?: AbortSignal): Promise<AuthStatus> {
+  const response = await fetch('/api/auth/me', { signal })
   if (response.status === 401) return { auth_required: true, user: null }
   if (!response.ok) throw new Error('无法检查登录状态')
   return response.json() as Promise<AuthStatus>
