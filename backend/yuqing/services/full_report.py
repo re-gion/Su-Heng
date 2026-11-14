@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from yuqing.core.comment_contract import reconcile_questions
+from yuqing.core.event_chronology import CHRONOLOGY_NOTE, earlier_event_candidates
 from yuqing.core.history_cards import unique_history_cards
 from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
@@ -1779,12 +1780,25 @@ class FullReportBuilder:
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
-        if len(event_nodes) >= 2:
+        chronology_gaps = earlier_event_candidates(primary_fact_items, main_evidence)
+        quality["event_chronology"] = {"earlier_candidates": chronology_gaps}
+        if event_nodes:
             timeline.update(
-                title="关键事件与机构回应时点",
+                title="事件经过与各方回应",
                 items=event_nodes,
                 fallback_text=None,
-                note="时点仅取自陈述正文明确写出的年月日；窗口外前史与后续进展单独标明。徽章保留陈述核验状态，不以网页发布日期替代事件日期。同日最多展示两个节点。",
+                note=CHRONOLOGY_NOTE,
+            )
+        if chronology_gaps:
+            timeline["note"] += (
+                "现有材料提及事件起始经过，但尚未形成可展示的独立陈述，事件起点仍待补齐。"
+            )
+            by_type["limitations"]["items"].append(
+                {
+                    "id": "L_CHRONOLOGY",
+                    "category": "事件脉络缺口",
+                    "text": "现有材料提及事件起始经过，但尚未形成具有引用的独立陈述。当前时间线未覆盖事件起点，不能视为完整事件始末。",
+                }
             )
         if not summary["what"]:
             # A diagnostic still explains which attributed records were obtained.
@@ -1817,6 +1831,7 @@ class FullReportBuilder:
             main_evidence=len(main_evidence),
             verifiable_key_claims=definitive_claims,
             event_timeline_nodes=len(event_nodes),
+            event_chronology_complete=not chronology_gaps,
             publication_nodes=publication_nodes,
             propagation_edges=propagation_edges,
             summary_has_what=bool(summary["what"]),

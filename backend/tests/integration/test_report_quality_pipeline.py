@@ -70,6 +70,49 @@ async def add_fact(db, task, text, *, history=False, date="2025-09-20", scope_st
 
 
 @pytest.mark.asyncio
+async def test_earlier_admitted_passage_is_a_recovery_gap_until_it_has_a_claim(runtime_dir):
+    db = Database(runtime_dir / "chronology.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(TaskCreate(event_query="甲校公开事件"))
+        await add_fact(db, task, "2025年9月17日，甲校公布复核进展。", date="2025-09-17")
+        await add_fact(db, task, "2025年9月20日，甲校公布处置结论。")
+        early = "2023年10月11日，当事人发帖披露事件。"
+        source = await db.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://example.edu/retrospective",
+                title="甲校事件回顾",
+                snippet=early,
+                content_text=early,
+                fetch_status="fetched",
+                fetched_at="2026-09-24",
+                snapshot_path="fixture.html",
+                content_sha256=hashlib.sha256(early.encode()).hexdigest(),
+                extra={"scope_status": "main"},
+            )
+        )
+        builder = FullReportBuilder(db, runtime_dir / "reports")
+        _, incomplete, _ = await builder.build(task.id)
+        assert "event_chronology" in incomplete["quality"]["release_gate_missing"]
+        assert incomplete["quality"]["event_chronology"]["earlier_candidates"] == [
+            {"date": "2023-10-11", "evidence_ref": source.local_id}
+        ]
+        timeline = next(b for b in incomplete["blocks"] if b.get("chart_kind") == "timeline")
+        assert timeline["items"][0]["date"] == "2025-09-17"
+        assert "事件起点仍待补齐" in timeline["note"]
+
+        await add_fact(db, task, early, date="2023-10-11", scope_status="event_context")
+        _, recovered, _ = await builder.build(task.id)
+        assert "event_chronology" not in recovered["quality"]["release_gate_missing"]
+        timeline = next(b for b in recovered["blocks"] if b.get("chart_kind") == "timeline")
+        assert timeline["items"][0]["date"] == "2023-10-11"
+        assert timeline["items"][0]["text"] == early
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_unverified_diagnostic_keeps_attributed_summary(runtime_dir):
     db = Database(runtime_dir / "diagnostic.db")
     await db.initialize()

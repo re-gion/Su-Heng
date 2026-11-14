@@ -600,10 +600,7 @@ def test_event_timeline_requires_explicit_valid_start_date_and_excludes_history(
         ]
     )
     timeline = event_timeline(facts)
-    assert [item["date"] for item in timeline] == [
-        *(f"2026-09-{day:02d}" for day in range(1, 5)),
-        *(f"2026-09-{day:02d}" for day in range(8, 16)),
-    ]
+    assert [item["date"] for item in timeline] == [f"2026-09-{day:02d}" for day in range(1, 16)]
     assert timeline[0]["claim_refs"] == ["C001"]
     assert timeline[-1]["evidence_refs"] == ["E015"]
 

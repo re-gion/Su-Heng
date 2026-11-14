@@ -14,6 +14,7 @@ from openai import RateLimitError
 
 from yuqing.agents.comment_observations import fingerprint
 from yuqing.agents.runtime import GeneratedClaim, InvestigationAgent, Reflection, SearchQuery
+from yuqing.core.event_chronology import earlier_event_candidates
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
 from yuqing.core.llm.gateway import (
@@ -643,6 +644,18 @@ class V1Orchestrator:
                     },
                 )
 
+    @staticmethod
+    def _chronology_facts(claims) -> list[dict]:
+        return [
+            {
+                "claim_ref": claim.local_id,
+                "text": claim.text,
+                "origin_agent": claim.agent,
+                "citations": [{"evidence_ref": ref} for ref in claim.evidence_ids],
+            }
+            for claim in claims
+        ]
+
     async def _recover_report_gaps(
         self,
         task_id: str,
@@ -679,13 +692,25 @@ class V1Orchestrator:
             "main_evidence",
             "verifiable_key_claim",
             "event_timeline",
+            "event_chronology",
             "in_window_timeline",
         }:
             goals["fact_investigator"] = (
-                "补齐核心事实与机构处置结论：优先重新阅读已经取得的通报全文中间段落，"
-                "再补查原始来源。拆成短的归属性陈述，分别说明谁发布什么结论、何时作出什么处置；"
+                "补齐本事件从起点到当前进展的事实链：先找首次公开披露、原始测试或发帖，"
+                "再找首轮回应、调查或诉讼启动、关键转折及最新处置。"
+                "优先重新阅读已取得正文中的前史段落，再按缺失日期补查原始来源；不要只摘最新通报。"
+                "拆成短的归属性陈述，每条写明该动作的完整年月日（含年份，以来源为准，不从网页日期推定），"
+                "分别说明谁发布什么结论、何时作出什么处置；"
                 "不能重复只谈取证工作量或把单方说法改成已证实事实。"
             )
+            if "event_chronology" in missing:
+                candidates = earlier_event_candidates(self._chronology_facts(claims), evidence)
+                goals["fact_investigator"] += (
+                    "待核对的既有正文线索（不是已证实事实）："
+                    + "、".join(
+                        f"{item['evidence_ref']} 的 {item['date']} 时点" for item in candidates[:8]
+                    )
+                )
         relation_state = await self.database.checkpoint(task_id, "report:relations") or {}
         if "media_propagation" in missing or not relation_state.get("edges"):
             await self._recover_publication_sources(task, evidence)
@@ -2374,6 +2399,14 @@ class V1Orchestrator:
                         task.created_at,
                     )
                 ]
+            if agent_name == "fact_investigator" and summary_phase == "quality_recovery":
+                earlier_refs = {
+                    item["evidence_ref"]
+                    for item in earlier_event_candidates(
+                        self._chronology_facts(existing_claims), inventory
+                    )
+                }
+                inventory.sort(key=lambda item: item.local_id not in earlier_refs)
             if len(existing_claims) > 40:
                 existing_claims = [*existing_claims[:20], *existing_claims[-20:]]
             existing_context = "\n".join(

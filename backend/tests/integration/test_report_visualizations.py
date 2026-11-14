@@ -163,7 +163,7 @@ def test_analysis_missing_qualified_material_uses_existing_text_fallback():
     assert "相关职能" in analysis_visual(block)
 
 
-def test_timeline_prioritizes_decisions_over_same_day_inventory_details():
+def test_timeline_keeps_decisions_and_other_same_day_records_without_truncation():
     facts = [
         {
             "claim_ref": f"C00{index}",
@@ -181,9 +181,9 @@ def test_timeline_prioritizes_decisions_over_same_day_inventory_details():
         )
     ]
     chosen = event_timeline(facts)
-    assert len(chosen) == 2
-    assert chosen[0]["claim_refs"] == ["C003"]
-    assert chosen[0]["text"] == facts[2]["text"]
+    assert len(chosen) == 3
+    assert chosen[-1]["claim_refs"] == ["C003"]
+    assert chosen[-1]["text"] == facts[2]["text"]
 
 
 @pytest.fixture

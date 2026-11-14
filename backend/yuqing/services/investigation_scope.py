@@ -605,6 +605,7 @@ class ReportReleaseAssessment:
         summary_has_why: bool,
         summary_has_action: bool,
         evidence_bound_recommendations: int,
+        event_chronology_complete: bool = True,
     ) -> ReportReleaseAssessment:
         retrieval_missing = []
         if not concrete_event:
@@ -616,6 +617,8 @@ class ReportReleaseAssessment:
         missing = list(retrieval_missing)
         if event_timeline_nodes < 2:
             missing.append("event_timeline")
+        if not event_chronology_complete:
+            missing.append("event_chronology")
         if publication_nodes < 2 or propagation_edges < 1:
             missing.append("media_propagation")
         if not (summary_has_what and summary_has_why and summary_has_action):

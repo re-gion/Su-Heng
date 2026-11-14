@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Sequence
-from datetime import date
 from typing import Any
 
+from yuqing.core.event_chronology import event_timeline as event_timeline
 from yuqing.core.measurements import MEASUREMENT, measurement_values
 
 NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:%|％)?")
@@ -20,76 +20,6 @@ ANALYSIS_FIELDS = (
     "trigger",
     "uncertainty",
 )
-
-
-def event_timeline(
-    facts: list[dict], *, date_from: str | None = None, date_to: str | None = None
-) -> list[dict]:
-    """Use an explicit action date at the start or just after its named actor."""
-    candidates = []
-    for fact in distinct_facts(facts, limit=len(facts) or 1):
-        if fact.get("origin_agent") == "history_insight":
-            continue
-        match = re.match(r"^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", fact["text"])
-        if not match:
-            match = re.match(
-                r"^[^\d，。；;：:]{2,24}?(?:于|在)?\s*"
-                r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
-                r"(?=\s*(?:发布|公布|通报|回应|宣布|召开|作出|启动|提交|披露))",
-                fact["text"],
-            )
-        if not match:
-            match = re.match(
-                r"^[^\d，。；;：:]{2,24}?(?:于|在)\s*"
-                r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
-                r"(?=[^。；;]{0,40}(?:发布|公布|通报|回应|宣布|召开|作出|启动|提交|披露|判决|裁定|维持|撤销))",
-                fact["text"],
-            )
-        if not match:
-            continue
-        try:
-            stamp = date(*(int(part) for part in match.groups())).isoformat()
-        except ValueError:
-            continue
-        window_label = (
-            "重点窗口前的本事件经过"
-            if date_from and stamp < date_from[:10]
-            else "重点窗口后的本事件进展"
-            if date_to and stamp > date_to[:10]
-            else None
-        )
-        candidates.append(
-            {
-                "date": stamp,
-                "text": fact["text"],
-                "window_label": window_label,
-                "claim_refs": [fact["claim_ref"]],
-                "evidence_refs": [c["evidence_ref"] for c in fact.get("citations", [])],
-                "badge": fact.get("badge", "unverified"),
-                "source_name": "时点取自陈述正文",
-            }
-        )
-
-    # 先保留决定、程序启动等转折，再选一般描述，避免审阅材料数量或媒体回顾
-    # 挤掉同日的撤销处分、调查启动等节点。完整陈述及核验关系不受选材影响。
-    def priority(item: dict) -> int:
-        text = item["text"]
-        if re.search(r"撤销|驳回|维持原判|判决|裁定|召回|终止", text):
-            return 0
-        if re.search(r"成立.{0,8}(?:调查|工作|专班)|启动|决定|升级|情况说明", text):
-            return 1
-        if re.search(r"审阅.{0,20}(?:套|份)|访谈.{0,10}人|复述|回顾|转载", text):
-            return 3
-        return 2
-
-    per_day: Counter[str] = Counter()
-    chosen = []
-    for item in sorted(candidates, key=priority):
-        if per_day[item["date"]] < 2:
-            chosen.append(item)
-            per_day[item["date"]] += 1
-    chosen.sort(key=lambda item: item["date"])
-    return select_priority_timeline_nodes(chosen)
 
 
 def select_priority_timeline_nodes(items: list[dict], limit: int = 12) -> list[dict]:

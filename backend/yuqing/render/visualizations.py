@@ -117,6 +117,11 @@ def timeline_visual(block: dict) -> str:
         f'<section class="chart correction-timeline report-visual visual-chronology" id="{_escape(block.get("block_id"))}" data-visual data-layout="chronology" style="--lane-count:{min(len(categories), 3)}">'
         f"<h2>{_escape(block.get('title') or '事件与回应脉络')}</h2>"
         '<p class="visual-guide">沿时间查看关键记录；展开节点可回查依据。类别仅用于阅读分组，不表示因果关系。</p>'
+        + (
+            '<p class="fallback-note">' + _escape(block["chronology_warning"]) + "</p>"
+            if block.get("chronology_warning")
+            else ""
+        )
         + controls
         + '<ol class="visual-timeline">'
         + "".join(events)

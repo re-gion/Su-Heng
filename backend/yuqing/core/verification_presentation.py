@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from yuqing.core.claim_semantics import publication_actor
+from yuqing.core.event_chronology import restore_report_chronology
 
 SOURCE_SUPPORT_STATUSES = {
     "single_source_supported",
@@ -144,6 +145,7 @@ def enrich_report_sources(report: dict[str, Any]) -> dict[str, Any]:
                     if key in source:
                         citation.setdefault(key, source[key])
             facts[fact.get("claim_ref")] = fact
+    restore_report_chronology(value)
     for block in value.get("blocks", []):
         if block.get("chart_kind") not in {"timeline", "matrix"}:
             continue

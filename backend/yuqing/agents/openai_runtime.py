@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection, SearchQuery
 from yuqing.core.claim_semantics import compound_publication_details
+from yuqing.core.event_chronology import dated_action
 from yuqing.core.llm.gateway import (
     LLMBudgetExhausted,
     LLMGateway,
@@ -35,6 +36,7 @@ ROLE_PLAN_GUIDANCE = {
         "围绕可核验事实规划查询：拆分事件、定位权威通报、当事方回应及其明确日期，"
         "补查材料中的数字、对象、范围和统计口径。用户日期是优先窗口；"
         "若起因或处置结果跨出窗口，应另查同一事件前史或后续。"
+        "必须覆盖最初公开披露或测试发布、首次回应、关键转折和当前进展，不能仅查询最新处置。"
     ),
     "analyst_b": (
         "围绕传播链规划查询：覆盖可公开核查的新闻报道、原帖和视频，区分首发、"
@@ -115,13 +117,21 @@ def _evidence_excerpt(value: object, limit: int) -> str:
             pair[0],
         ),
     )
-    selected = {0, len(paragraphs) - 1}
-    used = sum(len(paragraphs[i]) + 1 for i in selected)
+    # Reserve room for the dated endpoints of the event inside retrospective reports.
+    # Decision-heavy passages otherwise crowd out the original disclosure.
+    piece_limit = max(24, (limit - 30) // 4)
+    selected = {i: _clip_excerpt(paragraphs[i], piece_limit) for i in (0, len(paragraphs) - 1)}
+    dated = sorted(
+        (stamp, i) for i, paragraph in enumerate(paragraphs) if (stamp := dated_action(paragraph))
+    )
+    for _, index in [dated[0], dated[-1]] if dated else []:
+        selected[index] = _clip_excerpt(paragraphs[index], piece_limit)
+    used = sum(len(p) + 1 for p in selected.values())
     for index, paragraph in ranked:
         if index not in selected and used + len(paragraph) + 1 <= limit - 30:
-            selected.add(index)
+            selected[index] = paragraph
             used += len(paragraph) + 1
-    return _clip_excerpt("\n".join(paragraphs[i] for i in sorted(selected)), limit)
+    return _clip_excerpt("\n".join(selected[i] for i in sorted(selected)), limit)
 
 
 def build_evidence_digest(evidence: Sequence[EvidenceRecord]) -> str:
@@ -438,7 +448,15 @@ class OpenAIInvestigationAgent:
                     "新日期/回应时点、新主体、新矛盾或新的可核验事件维度时才新增 claim；"
                     "含新数字、否定关系或主体差异的陈述不得因主题相近而省略。"
                     f"每条 claim 必须绑定直接支持它的证据，本批最多 {limit_per_batch} 条 claim。"
-                    "一条 claim 只写一个主体在一个时间点的一项可核验动作或结论；"
+                    + (
+                        "先提取材料中本事件最初披露、测试视频或公开发帖，再按日期补首次回应、关键转折和当前进展；"
+                        "不要用最新通报中的多项问责细节挤掉起点。同一事件前史仍属本席事实。"
+                        "每条只写一个时点的一项动作，保留来源归属；材料给出完整年月日时必须写明年份和日期，"
+                        "不能用网页发布日期替代事件日期，不足以确定日期则明确保留缺口。"
+                        if self.role == "analyst_a"
+                        else ""
+                    )
+                    + "一条 claim 只写一个主体在一个时间点的一项可核验动作或结论；"
                     "不把不同年份、机构、处置和报道串成一条时间线。"
                     f"text 不超过 {ATOMIC_CLAIM_MAX_CHARS} 个汉字且不含分号；"
                     "同一来源只有部分内容支持时，拆成各自可独立核验的短陈述。"
