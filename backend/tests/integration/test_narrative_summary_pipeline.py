@@ -8,7 +8,13 @@ from playwright.sync_api import Error, expect, sync_playwright
 from pypdf import PdfReader
 
 from yuqing.agents.reporter import OpenAIReportAgent
-from yuqing.core.executive_summary import COVERAGE_FIELDS, sentence_ids
+from yuqing.core.executive_summary import (
+    COVERAGE_FIELDS,
+    PARAGRAPH_REVIEW_FIELDS,
+    SUMMARY_HEADINGS,
+    SUMMARY_ROLES,
+    sentence_ids,
+)
 from yuqing.render.html import render_html
 from yuqing.render.validator import validate_report
 from yuqing.services.executive_summary import attach_executive_summary
@@ -20,6 +26,20 @@ from yuqing.storage.models import ClaimCreate, EvidenceCreate, QuoteCreate, Task
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "executive-summary.json"
 
 
+def approve(paragraphs):
+    return {
+        "sentences": dict.fromkeys(sentence_ids(paragraphs), True),
+        "coverage": dict.fromkeys(COVERAGE_FIELDS, True),
+        "coherent": True,
+        "non_redundant": True,
+        "no_material_omission": True,
+        "paragraphs": {
+            role: dict.fromkeys(PARAGRAPH_REVIEW_FIELDS, True) for role in SUMMARY_ROLES
+        },
+        "no_background_rewind": True,
+    }
+
+
 class SummaryGateway:
     def __init__(self):
         self.calls = []
@@ -27,15 +47,11 @@ class SummaryGateway:
     async def complete_json(self, role, system, prompt, **_kwargs):
         self.calls.append((role, prompt))
         paragraphs = json.loads(FIXTURE.read_text(encoding="utf-8"))["paragraphs"]
+        if role == "reporter" and "阶段：四段摘要规划。" in prompt:
+            return {"outline": json.loads(FIXTURE.read_text(encoding="utf-8"))["outline"]}
         if role == "reporter":
             return {"paragraphs": paragraphs}
-        return {
-            "sentences": dict.fromkeys(sentence_ids(paragraphs), True),
-            "coverage": dict.fromkeys(COVERAGE_FIELDS, True),
-            "coherent": True,
-            "non_redundant": True,
-            "no_material_omission": True,
-        }
+        return approve(paragraphs)
 
 
 @pytest.fixture
@@ -100,44 +116,64 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
                 assert context["limitations"]
                 assert context["facts"]["C001"]["text"] == text
                 ref = next(iter(context["limitations"]))
-                paragraphs = [
-                    {
-                        "heading": "事件进展",
-                        "sentences": [
-                            {
-                                "text": "校方通报称，已收到120条诉求，并交由工作组核查。",
-                                "kind": "fact",
-                                "claim_refs": ["C001"],
-                                "analysis_refs": [],
-                                "limitation_refs": [],
-                            }
-                        ],
-                    },
-                    {
-                        "heading": "材料边界",
-                        "sentences": [
-                            {
-                                "text": context["limitations"][ref]["text"],
-                                "kind": "limitation",
-                                "claim_refs": [],
-                                "analysis_refs": [],
-                                "limitation_refs": [ref],
-                            }
-                        ],
-                    },
-                ]
+                fact_sentence = {
+                    "text": "校方通报称，已收到120条诉求，并交由工作组核查。",
+                    "kind": "fact",
+                    "claim_refs": ["C001"],
+                    "analysis_refs": [],
+                    "limitation_refs": [],
+                }
+                paragraphs = []
+                outline = []
+                for role in SUMMARY_ROLES:
+                    sentence = (
+                        fact_sentence
+                        if role == "event"
+                        else {
+                            "text": (
+                                {
+                                    "dispute": "争议材料边界：",
+                                    "findings": "研判依据边界：",
+                                    "limits": "",
+                                }[role]
+                                + context["limitations"][ref]["text"]
+                            ),
+                            "kind": "limitation",
+                            "claim_refs": [],
+                            "analysis_refs": [],
+                            "limitation_refs": [ref],
+                        }
+                    )
+                    availability = (
+                        "insufficient" if role in {"dispute", "findings"} else "supported"
+                    )
+                    paragraphs.append(
+                        {
+                            "role": role,
+                            "heading": SUMMARY_HEADINGS[role],
+                            "availability": availability,
+                            "sentences": [sentence],
+                        }
+                    )
+                    outline.append(
+                        {
+                            "role": role,
+                            "focus": sentence["text"][:160],
+                            "availability": availability,
+                            **{
+                                key: sentence[key]
+                                for key in ("claim_refs", "analysis_refs", "limitation_refs")
+                            },
+                        }
+                    )
 
                 class Gateway:
-                    async def complete_json(self, role, *_args, **_kwargs):
+                    async def complete_json(self, role, system, prompt, **_kwargs):
+                        if role == "reporter" and "阶段：四段摘要规划。" in prompt:
+                            return {"outline": outline}
                         if role == "reporter":
                             return {"paragraphs": paragraphs}
-                        return {
-                            "sentences": dict.fromkeys(sentence_ids(paragraphs), True),
-                            "coverage": dict.fromkeys(COVERAGE_FIELDS, True),
-                            "coherent": True,
-                            "non_redundant": True,
-                            "no_material_omission": True,
-                        }
+                        return approve(paragraphs)
 
                 return await OpenAIReportAgent(Gateway(), "fixture").summarize(context)
 
@@ -169,8 +205,8 @@ def test_narrative_layout_and_citation_navigation(narrative_report, tmp_path, wi
             page = browser.new_page(viewport={"width": width, "height": 1000})
             page.emulate_media(reduced_motion="reduce")
             page.goto(path.as_uri())
-            expect(page.locator("#summary > p")).to_have_count(3)
-            expect(page.locator("#summary > h3.summary-heading")).to_have_count(3)
+            expect(page.locator("#summary > p")).to_have_count(4)
+            expect(page.locator("#summary > h3.summary-heading")).to_have_count(4)
             expect(page.locator("#summary .badge")).to_have_count(0)
             assert page.locator("#summary").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
             page.locator('#summary a[href="#claim-C001"]').click()

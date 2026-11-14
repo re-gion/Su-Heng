@@ -26,6 +26,7 @@ def safe_summary_diagnostics(value) -> list[dict]:
             or item.get("stage")
             not in {
                 "generation",
+                "outline",
                 "structure",
                 "semantic",
                 "scope",
@@ -48,7 +49,7 @@ def safe_summary_diagnostics(value) -> list[dict]:
                 not isinstance(issue, dict)
                 or not isinstance(issue.get("path"), str)
                 or not re.fullmatch(
-                    r"paragraphs(?:\[\d+\]\.sentences\[\d+\])?|review|sentences(?:\.S\d{2})?|coverage(?:\.(?:event|current_state|dispute|findings|boundaries|follow_up))?|coherent|non_redundant|no_material_omission",
+                    r"paragraphs(?:\[\d+\]\.sentences\[\d+\]|\.(?:event|dispute|findings|limits)(?:\.(?:role_match|focused|gap_disclosed))?)?|review|sentences(?:\.S\d{2})?|coverage(?:\.(?:event|current_state|dispute|findings|boundaries|follow_up))?|coherent|non_redundant|no_material_omission|no_background_rewind",
                     issue["path"],
                 )
             ):

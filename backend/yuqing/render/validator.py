@@ -285,6 +285,12 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
                 paragraphs = block.get("paragraphs")
                 if (
                     isinstance(paragraphs, list)
+                    and any(isinstance(p, dict) and "role" in p for p in paragraphs)
+                    and value.get("min_reader_minor", 0) < 12
+                ):
+                    errors.append("R25: 四段职责摘要要求 reader 12")
+                if (
+                    isinstance(paragraphs, list)
                     and any(isinstance(p, dict) and "heading" in p for p in paragraphs)
                     and value.get("min_reader_minor", 0) < 11
                 ):

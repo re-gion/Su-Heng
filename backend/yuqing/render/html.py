@@ -6,7 +6,12 @@ from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
 
-from yuqing.core.executive_summary import SUMMARY_ERROR_LABELS, narrative_errors, summary_context
+from yuqing.core.executive_summary import (
+    SUMMARY_ERROR_LABELS,
+    SUMMARY_HEADINGS,
+    narrative_errors,
+    summary_context,
+)
 from yuqing.core.verification_presentation import (
     LABELS,
     NOTES,
@@ -145,10 +150,9 @@ def _summary(
                     f'<span class="summary-sentence" data-kind="{_escape(sentence["kind"])}">'
                     f'{_escape(sentence["text"])}<sup class="summary-citations">{refs}</sup></span>'
                 )
+            heading_text = SUMMARY_HEADINGS.get(paragraph.get("role"), paragraph.get("heading"))
             heading = (
-                f'<h3 class="summary-heading">{_escape(paragraph["heading"])}</h3>'
-                if paragraph.get("heading")
-                else ""
+                f'<h3 class="summary-heading">{_escape(heading_text)}</h3>' if heading_text else ""
             )
             paragraphs.append(f"{heading}<p>{''.join(sentences)}</p>")
         return (

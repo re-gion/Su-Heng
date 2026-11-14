@@ -9,8 +9,16 @@ from typing import Any
 
 from yuqing.core.measurements import measurement_values
 
-SUMMARY_VERSION = "narrative-v2"
-SUPPORTED_SUMMARY_VERSIONS = {"narrative-v1", SUMMARY_VERSION}
+SUMMARY_VERSION = "narrative-v3"
+SUPPORTED_SUMMARY_VERSIONS = {"narrative-v1", "narrative-v2", SUMMARY_VERSION}
+SUMMARY_HEADINGS = {
+    "event": "事件概况与当前进展",
+    "dispute": "核心争议与已知回应",
+    "findings": "主要研判与依据",
+    "limits": "局限与后续关注",
+}
+SUMMARY_ROLES = tuple(SUMMARY_HEADINGS)
+PARAGRAPH_REVIEW_FIELDS = ("role_match", "focused", "gap_disclosed")
 COVERAGE_FIELDS = ("event", "current_state", "dispute", "findings", "boundaries", "follow_up")
 SUMMARY_LIMITS = {
     "max_paragraphs": 4,
@@ -45,6 +53,15 @@ SUMMARY_ERROR_LABELS = {
     "summary_material_omission": "摘要遗漏会影响整体判断的材料或边界",
     "heading_text": "摘要段落小标题缺失、过长或格式无效",
     "duplicate_heading": "摘要段落小标题重复",
+    "summary_outline_invalid": "摘要规划的主旨、角色或依据不完整",
+    "event_outline_insufficient": "现有材料不足以可靠交代事件主线",
+    "paragraph_roles": "摘要未按四段职责及固定顺序组织",
+    "paragraph_availability": "摘要段落未如实保留规划中的材料缺口",
+    "paragraph_review_missing": "摘要逐段职责审查不完整",
+    "paragraph_role_mismatch": "摘要段落内容与指定职责不符",
+    "paragraph_unfocused": "摘要段落混杂多种职责或次要细节过多",
+    "paragraph_gap_undisclosed": "摘要段落未说明材料不足的具体边界",
+    "summary_background_rewind": "摘要末段首次堆入背景或处置细节",
 }
 NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:%|％)?")
 
@@ -180,7 +197,84 @@ def summary_context(report: dict, *, version: str = SUMMARY_VERSION) -> dict:
         for ref, item in value["limitations"].items()
         if item.get("category") != "协作编排"
     }
+    if version == SUMMARY_VERSION:
+        value["paragraph_roles"] = SUMMARY_HEADINGS
+        # This audit notice stays visible in the report's limitations chapter.
+        # It describes the writer/reviewer setup, not an event evidence gap.
+        value["limitations"] = {
+            ref: item
+            for ref, item in value["limitations"].items()
+            if item.get("category") != "摘要审查独立性"
+        }
     return value
+
+
+def check_outline(outline: Any, context: dict) -> list[str]:
+    """Plan each information task before drafting, with task-local evidence only."""
+    if not isinstance(outline, list) or len(outline) != len(SUMMARY_ROLES):
+        return ["summary_outline_invalid"]
+    errors = []
+    for role, item in zip(SUMMARY_ROLES, outline, strict=True):
+        if not isinstance(item, dict) or set(item) != {
+            "role",
+            "focus",
+            "availability",
+            "claim_refs",
+            "analysis_refs",
+            "limitation_refs",
+        }:
+            errors.append("summary_outline_invalid")
+            continue
+        if (
+            item["role"] != role
+            or not isinstance(item["focus"], str)
+            or not 1 <= len(item["focus"].strip()) <= 180
+        ):
+            errors.append("summary_outline_invalid")
+        if item["availability"] not in ("supported", "insufficient"):
+            errors.append("summary_outline_invalid")
+        if not all(
+            _refs(item[key], context[collection])
+            for key, collection in (
+                ("claim_refs", "facts"),
+                ("analysis_refs", "analyses"),
+                ("limitation_refs", "limitations"),
+            )
+        ):
+            errors.append("summary_outline_invalid")
+            continue
+        if not any(item[key] for key in ("claim_refs", "analysis_refs", "limitation_refs")):
+            errors.append("summary_outline_invalid")
+        if role == "event" and (
+            item["availability"] != "supported"
+            or not item["claim_refs"]
+            or all(
+                context["facts"][r].get("origin_agent") == "history_insight"
+                for r in item["claim_refs"]
+            )
+        ):
+            errors.append("event_outline_insufficient")
+        if item["availability"] == "insufficient" and not item["limitation_refs"]:
+            errors.append("summary_outline_invalid")
+    return list(dict.fromkeys(errors))
+
+
+def structured_paragraphs(paragraphs: Any, outline: list[dict]) -> Any:
+    """Headings and material availability belong to the contract, not draft prose."""
+    if not isinstance(paragraphs, list):
+        return paragraphs
+    availability = {item["role"]: item["availability"] for item in outline}
+    result = []
+    for paragraph in paragraphs:
+        if not isinstance(paragraph, dict):
+            result.append(paragraph)
+            continue
+        item = {k: v for k, v in paragraph.items() if k not in {"heading", "availability"}}
+        role = item.get("role")
+        if isinstance(role, str) and role in SUMMARY_HEADINGS:
+            item.update(heading=SUMMARY_HEADINGS[role], availability=availability[role])
+        result.append(item)
+    return result
 
 
 def _refs(value: Any, allowed: dict) -> bool:
@@ -213,7 +307,11 @@ def _prose(value: Any) -> str:
 
 
 def check_paragraphs(
-    paragraphs: Any, context: dict, *, require_headings: bool = False
+    paragraphs: Any,
+    context: dict,
+    *,
+    require_headings: bool = False,
+    require_roles: bool | None = None,
 ) -> list[str]:
     """Structural, binding, number and repetition guards; NOT semantic entailment."""
     if (
@@ -221,6 +319,15 @@ def check_paragraphs(
         or not 1 <= len(paragraphs) <= SUMMARY_LIMITS["max_paragraphs"]
     ):
         return ["paragraph_shape"]
+    structured = (
+        context.get("version") == SUMMARY_VERSION if require_roles is None else require_roles
+    )
+    if structured and (
+        len(paragraphs) != len(SUMMARY_ROLES)
+        or [p.get("role") if isinstance(p, dict) else None for p in paragraphs]
+        != list(SUMMARY_ROLES)
+    ):
+        return ["paragraph_roles"]
     facts, analyses, limits = (context[k] for k in ("facts", "analyses", "limitations"))
     errors, seen, total, count = [], set(), 0, 0
     headings = set()
@@ -228,11 +335,24 @@ def check_paragraphs(
         if (
             not isinstance(paragraph, dict)
             or "sentences" not in paragraph
-            or set(paragraph) - {"heading", "sentences"}
+            or set(paragraph)
+            - (
+                {"role", "availability", "heading", "sentences"}
+                if structured
+                else {"heading", "sentences"}
+            )
         ):
             errors.append("paragraph_shape")
             continue
         heading = paragraph.get("heading")
+        if structured:
+            if heading != SUMMARY_HEADINGS[paragraph["role"]]:
+                errors.append("heading_text")
+            availability = paragraph.get("availability")
+            if availability not in ("supported", "insufficient"):
+                errors.append("paragraph_availability")
+            if paragraph["role"] == "event" and availability != "supported":
+                errors.append("event_outline_insufficient")
         if "heading" in paragraph or require_headings:
             if (
                 not isinstance(heading, str)
@@ -255,6 +375,32 @@ def check_paragraphs(
         ):
             errors.append("sentence_shape")
             continue
+        if (
+            structured
+            and paragraph.get("availability") == "insufficient"
+            and not any(
+                isinstance(s, dict) and s.get("kind") == "limitation" and s.get("limitation_refs")
+                for s in sentences
+            )
+        ):
+            errors.append("paragraph_availability")
+        if (
+            structured
+            and paragraph["role"] == "event"
+            and not any(
+                isinstance(s, dict)
+                and s.get("kind") == "fact"
+                and isinstance(s.get("claim_refs"), list)
+                and any(
+                    isinstance(ref, str)
+                    and ref in facts
+                    and facts[ref].get("origin_agent") != "history_insight"
+                    for ref in s["claim_refs"]
+                )
+                for s in sentences
+            )
+        ):
+            errors.append("event_outline_insufficient")
         for sentence in sentences:
             count += 1
             if not isinstance(sentence, dict) or set(sentence) != {
@@ -361,7 +507,7 @@ def paragraph_issues(
                 count += 1
                 if isinstance(sentence, dict) and isinstance(sentence.get("text"), str):
                     total += len(sentence["text"])
-                codes = check_paragraphs([{"sentences": [sentence]}], context)
+                codes = check_paragraphs([{"sentences": [sentence]}], context, require_roles=False)
                 if codes:
                     issues.append({"path": f"paragraphs[{pi}].sentences[{si}]", "codes": codes})
                     located.update(codes)
@@ -412,6 +558,43 @@ def review_issues(review: Any, paragraphs: list[dict]) -> list[dict]:
         if review.get(field) is not True:
             issues.append(
                 {"path": field, "codes": [code if review.get(field) is False else "invalid_review"]}
+            )
+    if any(isinstance(p, dict) and "role" in p for p in paragraphs):
+        paragraph_reviews = review.get("paragraphs")
+        if not isinstance(paragraph_reviews, dict) or set(paragraph_reviews) != set(SUMMARY_ROLES):
+            issues.append({"path": "paragraphs", "codes": ["paragraph_review_missing"]})
+        else:
+            for role in SUMMARY_ROLES:
+                decision = paragraph_reviews[role]
+                if not isinstance(decision, dict) or set(decision) != set(PARAGRAPH_REVIEW_FIELDS):
+                    issues.append(
+                        {"path": f"paragraphs.{role}", "codes": ["paragraph_review_missing"]}
+                    )
+                    continue
+                for field, code in (
+                    ("role_match", "paragraph_role_mismatch"),
+                    ("focused", "paragraph_unfocused"),
+                    ("gap_disclosed", "paragraph_gap_undisclosed"),
+                ):
+                    if decision[field] is not True:
+                        issues.append(
+                            {
+                                "path": f"paragraphs.{role}.{field}",
+                                "codes": [
+                                    code if decision[field] is False else "paragraph_review_missing"
+                                ],
+                            }
+                        )
+        if review.get("no_background_rewind") is not True:
+            issues.append(
+                {
+                    "path": "no_background_rewind",
+                    "codes": [
+                        "summary_background_rewind"
+                        if review.get("no_background_rewind") is False
+                        else "invalid_review"
+                    ],
+                }
             )
     return issues
 
