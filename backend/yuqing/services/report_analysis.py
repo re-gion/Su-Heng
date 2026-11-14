@@ -69,10 +69,22 @@ def event_timeline(
                 "source_name": "时点取自陈述正文",
             }
         )
-    # 每天不重复铺陈多家转载，但完整陈述及对应来源仍保留在核查记录。
+
+    # 先保留决定、程序启动等转折，再选一般描述，避免审阅材料数量或媒体回顾
+    # 挤掉同日的撤销处分、调查启动等节点。完整陈述及核验关系不受选材影响。
+    def priority(item: dict) -> int:
+        text = item["text"]
+        if re.search(r"撤销|驳回|维持原判|判决|裁定|召回|终止", text):
+            return 0
+        if re.search(r"成立.{0,8}(?:调查|工作|专班)|启动|决定|升级|情况说明", text):
+            return 1
+        if re.search(r"审阅.{0,20}(?:套|份)|访谈.{0,10}人|复述|回顾|转载", text):
+            return 3
+        return 2
+
     per_day: Counter[str] = Counter()
     chosen = []
-    for item in candidates:
+    for item in sorted(candidates, key=priority):
         if per_day[item["date"]] < 2:
             chosen.append(item)
             per_day[item["date"]] += 1

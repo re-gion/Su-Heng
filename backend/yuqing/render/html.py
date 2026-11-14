@@ -17,6 +17,14 @@ from yuqing.core.verification_presentation import (
 )
 from yuqing.render.brand import FAVICON_DATA_URI, LOGO_DATA_URI
 from yuqing.render.navigation import NAVIGATION_CSS, NAVIGATION_SCRIPT
+from yuqing.render.visualizations import (
+    VISUAL_CSS,
+    VISUAL_SCRIPT,
+    action_visual,
+    analysis_visual,
+    publication_visual,
+    timeline_visual,
+)
 
 BADGE_LABELS = LABELS
 
@@ -482,6 +490,9 @@ def _chart(block: dict[str, Any]) -> str:
             f"{_escape(_basis_label(block.get('data_basis')))}</small></section>"
         )
     if kind == "timeline":
+        visual = timeline_visual(block)
+        if visual:
+            return visual
         nodes = []
         for item in items:
             relations = item.get("relations") or {}
@@ -592,6 +603,9 @@ def _optional_field(label: str, value: Any, class_name: str = "") -> str:
 
 
 def _analysis(block: dict[str, Any]) -> str:
+    visual = analysis_visual(block)
+    if visual:
+        return visual
     cards = []
     for item in block.get("items", []):
         refs = "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
@@ -603,6 +617,7 @@ def _analysis(block: dict[str, Any]) -> str:
                 _optional_field("触发条件", item.get("trigger")),
             )
         )
+        actions = action_visual(item) or actions
         if actions and block.get("section") != "07":
             actions = f'<details class="analysis-related-action"><summary>对应行动条件</summary>{actions}</details>'
         body = "".join(
@@ -695,10 +710,15 @@ def _generic_block(block: dict[str, Any]) -> str:
         cards = "".join(
             '<article class="narrative-card action-card">'
             f"<h3>{_escape(item.get('title'))}</h3>"
-            f"<p><strong>行动：</strong>{_escape(item.get('action'))}</p>"
-            f"<p><strong>建议负责：</strong>{_escape(item.get('owner'))}</p>"
-            f"<p><strong>触发条件：</strong>{_escape(item.get('trigger'))}</p>"
-            f'<p class="uncertainty"><strong>成立边界：</strong>{_escape(item.get("uncertainty"))}</p>'
+            + (
+                action_visual(item)
+                or (
+                    f"<p><strong>行动：</strong>{_escape(item.get('action'))}</p>"
+                    f"<p><strong>建议负责：</strong>{_escape(item.get('owner'))}</p>"
+                    f"<p><strong>触发条件：</strong>{_escape(item.get('trigger'))}</p>"
+                )
+            )
+            + f'<p class="uncertainty"><strong>成立边界：</strong>{_escape(item.get("uncertainty"))}</p>'
             + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
             + "</article>"
             for item in block.get("items", [])
@@ -710,6 +730,7 @@ def _generic_block(block: dict[str, Any]) -> str:
     if block_type == "metric_cards":
         return _metric_cards(block)
     if block_type == "propagation_network":
+        graph, connected = publication_visual(block)
         node_labels = {
             "independent": "独立采编",
             "original": "原始发布",
@@ -727,6 +748,7 @@ def _generic_block(block: dict[str, Any]) -> str:
             + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
             + "</article>"
             for item in block.get("nodes", [])
+            if not graph or item.get("evidence_id") not in connected
         )
         relation_labels = {"repost": "转载", "response": "回应", "follow_up": "跟进"}
         edges = "".join(
@@ -742,8 +764,15 @@ def _generic_block(block: dict[str, Any]) -> str:
         )
         return (
             f'<section id="{_escape(block.get("block_id"))}" class="propagation-network">'
-            f'<h2>{title}</h2>{fallback}<div class="publication-grid">{nodes}</div>'
-            f'<ol class="propagation-edges">{edges}</ol></section>'
+            f"<h2>{title}</h2>{fallback}{graph}"
+            + (
+                '<details class="visual-publication-extra"><summary>其他发布记录（未建立已审连线）</summary>'
+                f'<div class="publication-grid">{nodes}</div></details>'
+                if graph and nodes
+                else f'<div class="publication-grid">{nodes}</div>'
+            )
+            + (f'<ol class="propagation-edges">{edges}</ol>' if not graph else "")
+            + "</section>"
         )
     if block_type == "historical_facts":
         return (
@@ -1267,7 +1296,12 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
         section = str(block.get("section") or "09")
         if _block_heading(block) == SECTION_LABELS.get(section):
             rendered = rendered.replace("<h2>", '<h2 class="sr-only">', 1)
-        in_brief = bool(block.get("in_brief"))
+        # A usable event overview belongs in the quick reading path too.
+        in_brief = bool(block.get("in_brief")) or (
+            block.get("section") == "02"
+            and block.get("chart_kind") == "timeline"
+            and len(block.get("items", [])) >= 2
+        )
         grouped.setdefault(section, []).append((in_brief, rendered))
 
     sections = []
@@ -1513,7 +1547,8 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
     @page{size:A4;margin:18mm 14mm}
     @media print{body>header,.report-quality,.report-shell,main{width:100%;max-width:none;margin-left:0;margin-right:0}body>header{padding:12px 0 20px}.report-quality{break-inside:avoid;background:#fff}.back-to-top{display:none!important}}
     """
-    css += NAVIGATION_CSS
+    css += NAVIGATION_CSS + VISUAL_CSS
+    script += VISUAL_SCRIPT
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width">'
