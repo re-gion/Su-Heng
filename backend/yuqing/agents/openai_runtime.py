@@ -418,11 +418,19 @@ class OpenAIInvestigationAgent:
             '"independent":true,"case_type":"analogous|related_prior",'
             '"similarity":"与当前事件相似的处置机制",'
             '"difference":"关键差异","outcome":"截至本任务启动时已公开的结果或未公开",'
+            '"background":{"subject":"本条text中逐字出现的事件主体",'
+            '"event":"本条text中逐字出现的核心事件或争议",'
+            '"progress":"本条text中逐字出现的关键经过或处置"},'
             '"connection":"关联前事与本事件的直接联系",'
             '"connection_quote":"原文中直接证明关联的连续原话"}。'
             "analogous 为无已证实直接联系的类比案例；related_prior 必须有直接抓取原文中的"
             "connection_quote，否则不能标为关联前事。"
             "只需一个关键处置机制可比，差异如有无司法审查须明确写出；"
+            "先提取能让不熟悉该事件的读者理解的案例背景，再分析与本案的关系。"
+            "围绕同一案例分别保留主体、发生何事、关键经过或处置的原子事实，不能只写可比机制。"
+            "background只标选本条text已有的连续原话，本条没有的项留空，由同案多条陈述共同补齐；"
+            "event与progress须分别标出事件本身与进展，不得填相同片段。"
+            "事件时间有据则写入事实正文，不能拿资料发布日期替代；未见最终结果不影响已知经过的介绍。"
             "已公开的处分可记为公开结果，不得据此假定未来不会变化。"
             "若旧陈述得到更早、更直接的新来源支持，仍需输出该陈述及新的evidence_id，"
             "不能因为文字近似而略过补证。"

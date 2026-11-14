@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from yuqing.core.executive_summary import narrative_errors
+from yuqing.core.history_cards import background_complete
 from yuqing.core.measurements import measurement_values
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR
 
@@ -234,6 +235,36 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
             for card in block.get("cards", []):
                 if not card.get("evidence_refs"):
                     errors.append(f"R8: 历史卡片 {card.get('event_name')} 缺少证据")
+                if "background_status" in card:
+                    if card.get("background_status") != "complete" or not background_complete(card):
+                        errors.append("R8: 正式历史案例缺少获支持的主体、核心事件或关键经过")
+                    background = card.get("background_facts", [])
+                    if not isinstance(background, list):
+                        errors.append("R8: 历史案例简介必须是陈述数组")
+                        background = []
+                    for fact in background:
+                        if not isinstance(fact, dict):
+                            errors.append("R8: 历史案例简介条目必须是对象")
+                            continue
+                        ref = fact.get("claim_ref")
+                        original = next(
+                            (item for item in fact_items if item.get("claim_ref") == ref), {}
+                        )
+                        supports = {
+                            c["evidence_ref"]
+                            for c in original.get("citations", [])
+                            if c.get("relation") == "support"
+                        }
+                        if (
+                            fact.get("text") != original.get("text")
+                            or fact.get("badge") != original.get("badge")
+                            or original.get("verification_state") != "complete"
+                            or original.get("badge") in {"disputed", "refuted"}
+                            or not fact.get("evidence_refs")
+                            or not set(fact.get("evidence_refs", [])).issubset(supports)
+                            or ref not in card.get("claim_refs", [])
+                        ):
+                            errors.append("R8: 历史案例简介未从对应获支持陈述回填")
             for candidate in [
                 *block.get("excluded_candidates", []),
                 *block.get("reference_candidates", []),

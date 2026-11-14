@@ -464,10 +464,14 @@ async def test_local_history_and_hotlist_are_bound_into_full_report(
         block for block in report["blocks"] if block.get("block_id") == "b_04_hot_chart"
     )
     assert "本地历史库命中" in prepared
-    assert history_block["cards"][0]["event_name"] == "乙品牌食品召回"
-    assert history_block["cards"][0]["provenance"] == "本地库命中"
-    assert history_block["cards"][0]["dimensions"]["最终结局"] == "完成召回"
-    assert history_block["cards"][0]["evidence_refs"] == [local_evidence.local_id]
+    # An imported summary is a useful lead; it cannot bypass supported background claims.
+    assert history_block["cards"] == []
+    candidate = history_block["reference_candidates"][0]
+    assert candidate["event_name"] == "乙品牌食品召回"
+    assert candidate["provenance"] == "本地库命中"
+    assert candidate["dimensions"]["最终结局"] == "完成召回"
+    assert candidate["evidence_refs"] == [local_evidence.local_id]
+    assert "案例背景待补充" in candidate["reason"]
     assert hot_chart["data_basis"] == "hot_snapshot_database"
     assert [item["value"] for item in hot_chart["items"]] == [810000, 1200000]
     assert "<polyline" in render_html(report, view="full")

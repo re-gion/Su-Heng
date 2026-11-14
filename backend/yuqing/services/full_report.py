@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.event_chronology import CHRONOLOGY_NOTE, earlier_event_candidates
-from yuqing.core.history_cards import unique_history_cards
+from yuqing.core.history_cards import background_complete, unique_history_cards
 from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
@@ -1539,6 +1539,26 @@ class FullReportBuilder:
                     "case_type": case.get("case_type", "analogous"),
                     "event_time": f"资料发布：{str(source.published_at)[:10]}",
                     "summary": f"{status}：{item['text']}",
+                    "background_facts": [
+                        {
+                            "text": item["text"],
+                            "claim_ref": item["claim_ref"],
+                            "badge": item.get("badge"),
+                            "evidence_refs": supported_refs,
+                        }
+                    ]
+                    if item.get("badge") not in {"disputed", "refuted"}
+                    else [],
+                    "background_anchors": {
+                        key: value
+                        for key, value in (case.get("background") or {}).items()
+                        if key in {"subject", "event", "progress"}
+                        and isinstance(value, str)
+                        and value.strip()
+                        and value in item["text"]
+                    }
+                    if isinstance(case.get("background"), dict)
+                    else {},
                     "outcome": case.get("outcome") or "截至调查时，本次材料未见最终处理结果",
                     "comparison": (
                         (
@@ -1561,9 +1581,30 @@ class FullReportBuilder:
                 }
             )
         local_cards = unique_history_cards(local_cards)
+        background_leads = []
+        ready_cards = []
+        for card in local_cards:
+            card["background_status"] = "complete" if background_complete(card) else "incomplete"
+            if card["background_status"] == "complete":
+                if not any(
+                    card.get("outcome") and card["outcome"] in fact["text"]
+                    for fact in card.get("background_facts", [])
+                ):
+                    card["outcome"] = "截至调查时，本次已获支持陈述未记载最终处理结果"
+                    card["dimensions"]["公开结果（来源记载）"] = card["outcome"]
+                ready_cards.append(card)
+            else:
+                background_leads.append(
+                    {
+                        **card,
+                        "reason": "案例背景待补充：现有已获支持陈述尚不能同时交代主体、核心事件和关键经过或处置；仅保留材料线索，不作为正式历史对照或建议依据。",
+                    }
+                )
+        local_cards = ready_cards
+        ready_history_refs = {ref for card in local_cards for ref in card.get("claim_refs", [])}
         # Date-uncertain, otherwise supported cases are useful leads. Keep them
         # separate from formal comparisons and all downstream analysis inputs.
-        reference_candidates = []
+        reference_candidates = background_leads
         for item in historical_candidates:
             claim = historical_claims.get(item["claim_ref"])
             if claim is None:
@@ -1702,7 +1743,9 @@ class FullReportBuilder:
                 )
             )
         ]
-        analysis_facts.extend(historical_facts)
+        analysis_facts.extend(
+            item for item in historical_facts if item["claim_ref"] in ready_history_refs
+        )
         analysis_source_ids = {
             citation["evidence_ref"]
             for item in analysis_facts

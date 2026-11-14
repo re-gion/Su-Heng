@@ -44,6 +44,11 @@ async def add_fact(db, task, text, *, history=False, date="2025-09-20", scope_st
                     "similarity": "处分后的复核与更正",
                     "difference": "不同机构和事实",
                     "outcome": "已公开更正",
+                    "background": {
+                        "subject": "乙校",
+                        "event": "先前处理决定",
+                        "progress": "公开更正",
+                    },
                 }
             }
             if history

@@ -7,7 +7,6 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from yuqing.core.executive_summary import SUMMARY_ERROR_LABELS, narrative_errors, summary_context
-from yuqing.core.history_cards import unique_history_cards
 from yuqing.core.verification_presentation import (
     LABELS,
     NOTES,
@@ -16,6 +15,7 @@ from yuqing.core.verification_presentation import (
     presentation_status,
 )
 from yuqing.render.brand import FAVICON_DATA_URI, LOGO_DATA_URI
+from yuqing.render.history import arrange_history, history_chapter
 from yuqing.render.navigation import NAVIGATION_CSS, NAVIGATION_SCRIPT
 from yuqing.render.visualizations import (
     VISUAL_CSS,
@@ -665,6 +665,134 @@ def _analysis(block: dict[str, Any]) -> str:
     )
 
 
+def _history_background(card: dict[str, Any]) -> str:
+    paragraphs = []
+    for fact in card.get("background_facts", []):
+        badge = _display_badge(fact)
+        refs = "".join(_citation_link(ref) for ref in fact.get("evidence_refs", []))
+        refs += "".join(
+            _citation_link(c["evidence_ref"])
+            for c in fact.get("citations", [])
+            if c.get("evidence_ref")
+        )
+        claim = _claim_link(fact["claim_ref"]) if fact.get("claim_ref") else ""
+        paragraphs.append(
+            f'<p><span class="badge {_escape(badge)}">{_escape(BADGE_LABELS.get(badge, badge))}</span>'
+            f"{_escape(fact.get('text'))}{claim}{refs}</p>"
+        )
+    if not paragraphs:
+        text = card.get("summary") or card.get("one_liner")
+        if text:
+            paragraphs.append(f"<p>{_escape(text)}</p>")
+    return "".join(paragraphs)
+
+
+def _history_analysis(block: dict[str, Any], *, level: int = 4) -> str:
+    rendered = _analysis(block)
+    return (
+        rendered.replace("<h3>", f"<h{level + 1}>")
+        .replace("</h3>", f"</h{level + 1}>")
+        .replace("<h2>", f"<h{level}>")
+        .replace("</h2>", f"</h{level}>")
+    )
+
+
+def _history_case(card: dict[str, Any]) -> str:
+    legacy = (
+        '<p class="source-boundary">旧报告仅保留既有案例材料，背景完整性未按新要求复核；以下对照须结合材料缺口阅读。</p>'
+        if card.get("background_status") != "complete"
+        else ""
+    )
+    analyses = "".join(_history_analysis(block) for block in card.get("analyses", []))
+    comparison = (
+        _optional_field("与本案的对照（条件性分析）", card.get("comparison"), "comparison")
+        if not analyses and card.get("comparison") != card.get("summary")
+        else ""
+    )
+    outcome = card.get("outcome") or (card.get("dimensions") or {}).get("公开结果（来源记载）")
+    outcome = outcome or (card.get("dimensions") or {}).get("最终结局")
+    dimensions = "".join(
+        f"<dt>{_escape(label)}</dt><dd>{_escape(value)}</dd>"
+        for label, value in (card.get("dimensions") or {}).items()
+        if label not in {"公开结果（来源记载）", "最终结局"}
+    )
+    return (
+        '<article class="narrative-card history-card">'
+        f'<div class="card-meta"><span>{_escape(card.get("provenance") or "来源未标注")}</span>'
+        f"<time>{_escape(card.get('event_time') or '事件时间未确认')}</time></div>"
+        f'<span class="strength">{_escape("关联前事" if card.get("case_type") == "related_prior" else "类比案例")}</span>'
+        f"<h3>{_escape(card.get('event_name') or '历史事件')}</h3>"
+        f'<div class="history-background"><h4>案例简介</h4>{_history_background(card)}'
+        + _optional_field("已知结果（来源记载）", outcome or "材料未记载最终结果")
+        + legacy
+        + "</div>"
+        + (f'<dl class="dimension-grid">{dimensions}</dl>' if dimensions else "")
+        + analyses
+        + comparison
+        + "".join(_claim_link(ref) for ref in card.get("claim_refs", []))
+        + "".join(_citation_link(ref) for ref in card.get("evidence_refs", []))
+        + "</article>"
+    )
+
+
+def _history_chapter(block: dict[str, Any]) -> str:
+    anchors = "".join(f'<span id="{_escape(ref)}"></span>' for ref in block.get("anchors", []))
+    cards = "".join(_history_case(card) for card in block.get("cards", []))
+    joint = "".join(
+        '<div class="history-joint">'
+        + _optional_field("涉及案例", "、".join(analysis.get("case_names", [])))
+        + _history_analysis(analysis, level=3)
+        + "</div>"
+        for analysis in block.get("joint_analyses", [])
+    )
+    references = "".join(
+        '<article class="narrative-card history-reference">'
+        f"<h3>{_escape(card.get('event_name') or '历史案例线索')}</h3>"
+        f'<p class="fallback-note">{_escape(card.get("reason"))}</p>'
+        + _history_background(card)
+        + "".join(_citation_link(ref) for ref in card.get("evidence_refs", []))
+        + "</article>"
+        for card in block.get("reference_candidates", [])
+    )
+    excluded = "".join(
+        f"<li>{_escape(item.get('title'))}：{_escape(item.get('reason'))}"
+        + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
+        + "</li>"
+        for item in block.get("excluded_candidates", [])
+    )
+    return (
+        f'<section class="history-chapter">{anchors}<h2>历史对照</h2>{cards}{joint}'
+        + (
+            '<p class="fallback-note">未形成可直接使用的正式历史对照。'
+            + _escape(block.get("fallback_text") or "需补充独立案例的背景与来源。")
+            + "</p>"
+            if not cards
+            else ""
+        )
+        + (
+            '<p class="fallback-note">部分历史分析未能对应到具备背景介绍的案例，暂不展示为正式对照；需补齐案例背景与引用关系。</p>'
+            if block.get("unbound_analyses")
+            else ""
+        )
+        + (
+            '<aside class="history-references"><h3>待核实参考案例（不计入正式历史对照）</h3>'
+            + references
+            + "</aside>"
+            if references
+            else ""
+        )
+        + (
+            '<details class="analysis-basis"><summary>待核实或未采用的候选材料与原因</summary><ul>'
+            + excluded
+            + "</ul></details>"
+            if excluded
+            else ""
+        )
+        + "".join(_generic_block(basis) for basis in block.get("basis_blocks", []))
+        + "</section>"
+    )
+
+
 def _metric_cards(block: dict[str, Any]) -> str:
     cards = []
     for item in block.get("items", []):
@@ -804,71 +932,8 @@ def _generic_block(block: dict[str, Any]) -> str:
             + "</details>"
         )
     if block_type == "history_compare":
-        cards = []
-        for item in unique_history_cards(block.get("cards", [])):
-            dimensions = "".join(
-                f"<dt>{_escape(label)}</dt><dd>{_escape(value)}</dd>"
-                for label, value in (item.get("dimensions") or {}).items()
-            )
-            summary = item.get("summary")
-            comparison = item.get("comparison")
-            summary_html = (
-                f'<p class="history-summary">{_escape(summary)}</p>'
-                if summary and summary != comparison
-                else ""
-            )
-            comparison_html = (
-                f'<p class="comparison">{_escape(comparison)}</p>' if comparison else ""
-            )
-            cards.append(
-                f'<article class="narrative-card history-card"><div class="card-meta"><span>{_escape(item.get("provenance") or "来源未标注")}</span><time>{_escape(item.get("event_time") or "时间未知")}</time></div>'
-                f'<span class="strength">{_escape("关联前事" if item.get("case_type") == "related_prior" else "类比案例")}</span>'
-                f"<h3>{_escape(item.get('event_name') or '历史事件')}</h3>"
-                f"{summary_html}{comparison_html}"
-                + (f'<dl class="dimension-grid">{dimensions}</dl>' if dimensions else "")
-                + "".join(_claim_link(ref) for ref in item.get("claim_refs", []))
-                + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
-                + "</article>"
-            )
-        fallback = (
-            f'<p class="fallback-note">{_escape(block.get("fallback_text"))}</p>'
-            if block.get("fallback_text")
-            else ""
-        )
-        references = "".join(
-            '<article class="narrative-card history-reference">'
-            f"<h3>{_escape(item.get('event_name'))}</h3>"
-            f'<p class="fallback-note">{_escape(item.get("reason"))}</p>'
-            f"<p>{_escape(item.get('summary'))}</p><p>{_escape(item.get('comparison'))}</p>"
-            + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
-            + "</article>"
-            for item in block.get("reference_candidates", [])
-        )
-        reference_html = (
-            '<aside class="history-references"><h3>待核实参考案例（不计入正式历史对照）</h3>'
-            + references
-            + "</aside>"
-            if references
-            else ""
-        )
-        excluded = block.get("excluded_candidates", [])
-        excluded_html = (
-            '<details class="analysis-basis"><summary>待核实或未采用的候选材料与原因</summary><ul>'
-            + "".join(
-                f"<li>{_escape(item.get('title'))} · {_escape(item.get('published_at') or '日期待确认')}"
-                f"：{_escape(item.get('reason'))}"
-                + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
-                + "</li>"
-                for item in excluded
-            )
-            + "</ul></details>"
-            if excluded
-            else ""
-        )
-        return (
-            f'<section id="{_escape(block.get("block_id"))}"><h2>{title}</h2>'
-            f"{''.join(cards)}{fallback}{reference_html}{excluded_html}</section>"
-        )
+        chapter = history_chapter([{**block, "section": "06"}])
+        return _history_chapter(chapter) if chapter else ""
     if block_type == "comment_insight":
         coverage = block.get("coverage", {})
         layered = block.get("analysis_version") == 5
@@ -1209,6 +1274,8 @@ def _render_block(
     analysis_targets: dict[str, str] | None = None,
 ) -> str:
     block_type = block.get("type")
+    if block_type == "history_chapter":
+        return _history_chapter(block)
     if block.get("section") == "09" and block_type in {"chart", "kpi_grid"}:
         return (
             '<details class="audit-module"><summary>'
@@ -1287,7 +1354,7 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
         if item.get("title")
     }
     analysis_targets.update({ref: item["target"] for ref, item in basis["analyses"].items()})
-    for block in blocks:
+    for block in arrange_history(blocks):
         if block.get("type") == "report_header":
             continue
         rendered = _render_block(block, claim_badges, analysis_targets)
@@ -1554,6 +1621,9 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
     .badge.reposted_source_supported,.badge.attributed_source_supported{background:#e6f0fb;color:#214b83}
     .badge.source_recorded,.badge.snippet_supported{background:#edf1f4;color:#435669}
     .badge.partially_supported,.badge.insufficient_evidence,.badge.verification_incomplete,.badge.source_conflict{background:#fff1cb;color:#856018}
+    .history-background{padding:0 0 14px;border-bottom:1px solid var(--line);margin-bottom:18px}.history-card h4,.history-reference h4{font-size:17px;color:var(--ink-2);margin:18px 0 10px}.history-card h5{font-size:17px;line-height:1.65;margin:8px 0}.history-card>.analysis-module{padding-top:8px}.history-joint{margin:24px 0;padding:18px;border:1px solid var(--line);background:#f5f9fa}.history-joint h4{font-size:17px;line-height:1.65}.history-card,.history-reference{overflow-wrap:anywhere}
+    @page{margin:12mm}
+    @media print{.history-chapter{font-size:10.5pt}.history-card{break-inside:auto;padding:14px;margin:10px 0}.history-card h3{font-size:14pt}.history-card h4,.history-card h5,.history-joint h3,.history-joint h4{font-size:11.5pt}.history-chapter .analysis-card{padding:12px;margin:10px 0}.history-chapter .analysis-notice{padding:8px 12px;font-size:10pt}.history-background,.history-card>.analysis-module,.history-card .analysis-card,.history-joint,.history-chapter>.analysis-basis{break-inside:avoid}.history-card h3,.history-card h4,.history-card h5,.history-joint h3,.history-chapter>.analysis-basis>summary{break-after:avoid}}
     .source-boundary{font-size:13px;color:var(--muted);margin:8px 0 0;line-height:1.6}
     .verification-legend{padding:10px 14px;border-left:3px solid #315bd7;background:#eef3fd;color:#314a70;font-size:13px}
     .summary-narrative>p{font-size:17px;line-height:2;text-align:justify;margin:0 0 1.15em;orphans:3;widows:3}
