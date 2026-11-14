@@ -316,6 +316,8 @@ class BriefReportBuilder:
                 "user_note": None if institution_scope else task.user_note,
                 "generated_at": stamp,
                 "created_at": task.created_at,
+                "completed_at": task.completed_at if task.status == "done" else None,
+                "status": task.status,
             },
             "metrics": metrics,
             "blocks": [

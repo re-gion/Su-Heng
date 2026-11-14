@@ -55,6 +55,15 @@ async def refresh_report_runtime(database, report):
     task_id = report.get("task", {}).get("task_id")
     if not task_id:
         return report
+    task = await database.get_task(task_id)
+    if task is not None:
+        # Old IR predates these fields, and generation can precede task completion.
+        # Never infer completion from generation or the last database update.
+        report["task"].update(
+            created_at=task.created_at,
+            completed_at=task.completed_at if task.status == "done" else None,
+            status=task.status,
+        )
     timing = await task_timing(database, task_id)
     quality = report.setdefault("quality", {})
     if timing["available"]:

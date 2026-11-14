@@ -32,6 +32,12 @@ def _beijing_time(value: Any) -> str:
         return "未记录"
 
 
+def _investigation_end(task: dict[str, Any]) -> str:
+    if task.get("status") not in {None, "done"}:
+        return "尚未完成"
+    return _beijing_time(task.get("completed_at"))
+
+
 def _display_badge(item: dict[str, Any]) -> str:
     """Expose direct single-source support without changing the stored verdict."""
 
@@ -1472,7 +1478,9 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
         f"<p>{_escape(header.get('subtitle'))}</p>"
         '<p class="report-timestamps">'
         f"调查开始：{_beijing_time(report.get('task', {}).get('created_at'))} · "
-        f"报告生成：{_beijing_time(report.get('task', {}).get('generated_at'))}（北京时间 UTC+8）</p></header>"
+        f"调查结束：{_investigation_end(report.get('task', {}))}（北京时间 UTC+8）</p>"
+        '<p class="report-generation-time">'
+        f"报告生成：{_beijing_time(report.get('task', {}).get('generated_at'))}（北京时间 UTC+8，文件版本时间）</p></header>"
         f"{quality_html}"
         f'<div class="report-shell"><main id="report-main">{"".join(sections)}</main></div></div></div>'
         '<button class="back-to-top" type="button" aria-label="返回顶部"><span aria-hidden="true">↑</span>返回顶部</button>'

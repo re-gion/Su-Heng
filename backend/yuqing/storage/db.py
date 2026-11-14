@@ -23,6 +23,11 @@ from yuqing.storage.models import (
 
 T = TypeVar("T")
 
+# Both the ledger and report replay read the same persisted completion event.
+TASK_WITH_COMPLETION = """SELECT t.*,(SELECT e.ts FROM event_log e WHERE e.task_id=t.id
+    AND e.event_type='task.status' AND json_extract(e.payload,'$.data.status')='done'
+    ORDER BY e.seq DESC LIMIT 1) AS completed_at FROM task t"""
+
 
 class AccountTaskLimitExceeded(ValueError):
     def __init__(self, limit: str):
@@ -288,7 +293,7 @@ class Database:
         return record
 
     async def get_task(self, task_id: str) -> TaskRecord | None:
-        row = await self.fetch_one("SELECT * FROM task WHERE id=?", (task_id,))
+        row = await self.fetch_one(TASK_WITH_COMPLETION + " WHERE t.id=?", (task_id,))
         return self._task_record(row) if row else None
 
     @staticmethod
@@ -344,11 +349,7 @@ class Database:
             params.extend(before)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         rows = await self.fetch_all(
-            """SELECT t.*,(SELECT e.ts FROM event_log e WHERE e.task_id=t.id
-               AND e.event_type='task.status' AND json_extract(e.payload,'$.data.status')='done'
-               ORDER BY e.seq DESC LIMIT 1) AS completed_at FROM task t"""
-            + where
-            + " ORDER BY t.created_at DESC,t.id DESC LIMIT ?",
+            TASK_WITH_COMPLETION + where + " ORDER BY t.created_at DESC,t.id DESC LIMIT ?",
             (*params, limit),
         )
         return [self._task_record(row) for row in rows]

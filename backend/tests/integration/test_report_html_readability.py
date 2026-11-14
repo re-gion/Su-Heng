@@ -6,15 +6,21 @@ from yuqing.render.html import render_html
 def test_report_dates_use_beijing_time_and_missing_legacy_dates_stay_unknown():
     report = _report()
     report["task"].update(
-        created_at="2026-11-14T01:02:03Z", generated_at="2026-11-14T01:12:13+00:00"
+        created_at="2026-11-14T01:02:03Z",
+        completed_at="2026-11-14T01:13:14+00:00",
+        generated_at="2026-11-14T01:12:13+00:00",
     )
     page = render_html(report)
     assert "调查开始：2026-11-14 09:02:03" in page
+    assert "调查结束：2026-11-14 09:13:14" in page
     assert "报告生成：2026-11-14 09:12:13" in page
     assert "北京时间 UTC+8" in page
     old = render_html(_report())
     assert "调查开始：未记录" in old
+    assert "调查结束：未记录" in old
     assert "报告生成：未记录" in old
+    report["task"]["status"] = "running"
+    assert "调查结束：尚未完成" in render_html(report)
 
 
 def _report() -> dict:

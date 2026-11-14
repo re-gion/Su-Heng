@@ -98,6 +98,73 @@ async def allow(_db, _query, _note):
     return PublicInterestDecision(allowed=True, reason="fixture", category="public_event")
 
 
+@pytest.mark.parametrize("view", ["ir", "brief", "full", "download", "pdf", "evidence"])
+def test_legacy_report_and_ledger_share_investigation_dates(runtime_dir, view):
+    """A report produced before the task ended must not use generation as completion."""
+    from yuqing.core.events import EventBus
+
+    pdf = CapturingPdf()
+    app = create_app(
+        runtime_dir=runtime_dir,
+        orchestrator_factory=lambda *_: None,
+        pdf_exporter=pdf,
+    )
+    with TestClient(app) as client:
+
+        async def seed():
+            database = app.state.database
+            task = await database.create_task(TaskCreate(event_query="公开事件时间一致性"))
+            await database.execute_write(
+                "UPDATE task SET created_at=?,updated_at=? WHERE id=?",
+                ("2026-11-13T12:12:21+08:00", "2026-11-14T15:00:00+08:00", task.id),
+            )
+            events = EventBus(database)
+            event = await events.emit_task_status(
+                task.id, status="done", phase="finished", progress=100
+            )
+            await database.execute_write(
+                "UPDATE event_log SET ts=? WHERE task_id=? AND seq=?",
+                ("2026-11-13T12:21:39+08:00", task.id, event.seq),
+            )
+            report = migrate_report(
+                json.loads(await asyncio.to_thread(FIXTURE.read_text, encoding="utf-8"))
+            )
+            report["report_id"] = "legacy-time"
+            report["task"]["task_id"] = task.id
+            report["task"].pop("created_at", None)
+            # A stale IR may also carry an obsolete completion estimate.
+            report["task"]["completed_at"] = "2026-11-13T12:20:35+08:00"
+            report["task"]["generated_at"] = "2026-11-13T12:20:35+08:00"
+            await database.save_report(task.id, "legacy-time", report, "legacy.html", {})
+            return task.id
+
+        task_id = client.portal.call(seed)
+        ledger = client.get("/api/tasks").json()["items"][0]
+        assert ledger["created_at"] == "2026-11-13T12:12:21+08:00"
+        assert ledger["completed_at"] == "2026-11-13T12:21:39+08:00"
+        report = client.get(f"/api/tasks/{task_id}/report").json()
+        assert report["task"]["created_at"] == ledger["created_at"]
+        assert report["task"]["completed_at"] == ledger["completed_at"]
+        assert report["task"]["generated_at"] == "2026-11-13T12:20:35+08:00"
+        if view == "ir":
+            return
+        endpoint = {"pdf": "pdf", "evidence": "evidence-package"}.get(view, "html")
+        response = client.get(
+            f"/api/reports/legacy-time/{endpoint}",
+            params={"view": "full" if view == "full" else "brief", "download": view == "download"},
+        )
+        assert response.status_code == 200
+        if view == "evidence":
+            with zipfile.ZipFile(BytesIO(response.content)) as archive:
+                page = archive.read("report.html").decode()
+        else:
+            page = pdf.html if view == "pdf" else response.text
+        assert "调查开始：2026-11-13 12:12:21" in page
+        assert "调查结束：2026-11-13 12:21:39" in page
+        assert "报告生成：2026-11-13 12:20:35" in page
+        assert "调查开始：未记录" not in page
+
+
 @pytest.mark.parametrize("view", ["ir", "html", "pdf", "evidence"])
 def test_completed_report_includes_late_comment_runtime_and_requests(runtime_dir, view):
     pdf = CapturingPdf()
@@ -175,5 +242,16 @@ async def test_missing_historical_records_preserve_saved_statistics_and_limits(r
         await refresh_report_runtime(database, unknown)
         assert not unknown["quality"].get("timing", {}).get("available")
         assert "主动运行：" not in render_html(unknown)
+        assert unknown["task"]["created_at"] == task.created_at
+        assert unknown["task"]["completed_at"] is None
+        assert "调查结束：尚未完成" in render_html(unknown)
+        # Even if marked done, missing completion events cannot be replaced by
+        # the report generation time or the last database modification.
+        await database.set_task_status(task.id, "done")
+        unknown["task"]["generated_at"] = "2026-11-13T12:20:35+08:00"
+        unknown["task"]["completed_at"] = "2026-11-13T12:20:35+08:00"
+        await refresh_report_runtime(database, unknown)
+        assert unknown["task"]["completed_at"] is None
+        assert "调查结束：未记录" in render_html(unknown)
     finally:
         await database.close()
