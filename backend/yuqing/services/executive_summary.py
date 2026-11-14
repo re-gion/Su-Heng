@@ -2,15 +2,74 @@
 
 from __future__ import annotations
 
-from yuqing.core.executive_summary import narrative_errors, summary_context
+import re
+
+from yuqing.core.executive_summary import (
+    SUMMARY_ERROR_LABELS,
+    check_paragraphs,
+    narrative_errors,
+    summary_context,
+)
 
 FALLBACK_NOTICE = "综合摘要未通过完整生成与审查，以下为事实提要；请结合正文及局限性阅读。"
+
+
+def safe_summary_diagnostics(value) -> list[dict]:
+    """Publish only controlled codes and numeric positions, never rejected model prose."""
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value[:8]:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("stage"), str)
+            or item.get("stage")
+            not in {
+                "generation",
+                "structure",
+                "semantic",
+                "scope",
+                "assembly",
+            }
+        ):
+            continue
+        codes = item.get("codes")
+        if not isinstance(codes, list):
+            continue
+        codes = [c for c in codes if isinstance(c, str) and c in SUMMARY_ERROR_LABELS]
+        if not codes:
+            continue
+        record = {"stage": item["stage"], "codes": list(dict.fromkeys(codes))}
+        if type(item.get("attempt")) is int and 0 <= item["attempt"] <= 2:
+            record["attempt"] = item["attempt"]
+        issues = []
+        for issue in item.get("issues", []) if isinstance(item.get("issues"), list) else []:
+            if (
+                not isinstance(issue, dict)
+                or not isinstance(issue.get("path"), str)
+                or not re.fullmatch(
+                    r"paragraphs(?:\[\d+\]\.sentences\[\d+\])?|review|sentences(?:\.S\d{2})?|coverage(?:\.(?:event|current_state|dispute|findings|boundaries|follow_up))?|coherent|non_redundant|no_material_omission",
+                    issue["path"],
+                )
+            ):
+                continue
+            issue_codes = issue.get("codes")
+            if not isinstance(issue_codes, list):
+                continue
+            accepted = [c for c in issue_codes if isinstance(c, str) and c in codes]
+            if accepted:
+                issues.append({"path": issue["path"], "codes": accepted})
+        if issues:
+            record["issues"] = issues[:24]
+        result.append(record)
+    return result
 
 
 def fact_brief(block: dict, *, reason: str) -> None:
     block.update(summary_mode="fact_brief", fallback_notice=FALLBACK_NOTICE)
     block.pop("paragraphs", None)
     block.pop("narrative_review", None)
+    block.pop("summary_diagnostics", None)
     block["summary_status"] = reason
 
 
@@ -22,6 +81,7 @@ def refresh_summary_release(report: dict) -> None:
     quality["executive_summary"] = {
         "status": "complete" if ready else "fact_brief",
         "reason": block.get("summary_status", "unavailable"),
+        "diagnostics": safe_summary_diagnostics(block.get("summary_diagnostics")),
     }
     missing = [m for m in quality.get("release_gate_missing", []) if m != "executive_summary"]
     if not ready:
@@ -94,10 +154,21 @@ async def attach_executive_summary(
             "paragraphs": result.get("paragraphs"),
             "narrative_review": result.get("narrative_review"),
         }
-        if narrative_errors(candidate, report):
+        diagnostics = safe_summary_diagnostics(result.get("diagnostics"))
+        errors = list(
+            dict.fromkeys(
+                [
+                    *check_paragraphs(candidate.get("paragraphs"), context, require_headings=True),
+                    *narrative_errors(candidate, report),
+                ]
+            )
+        )
+        if errors:
             fact_brief(
                 block, reason="unavailable" if result.get("status") == "unavailable" else "rejected"
             )
+            if not diagnostics:
+                diagnostics = [{"stage": "assembly", "codes": errors}]
         else:
             paragraphs = candidate["paragraphs"]
             if scope_reviewer is not None:
@@ -109,6 +180,10 @@ async def attach_executive_summary(
                 ):
                     # A redacted sentence needs a fresh semantic review; never reuse its approval.
                     fact_brief(block, reason="scope_review_incomplete")
+                    block["summary_diagnostics"] = [
+                        *diagnostics,
+                        {"stage": "scope", "codes": ["scope_review_incomplete"]},
+                    ]
                     refresh_summary_release(report)
                     return
             block.update(
@@ -125,6 +200,8 @@ async def attach_executive_summary(
                         r for p in paragraphs for s in p["sentences"] for r in s["claim_refs"]
                     )
                 )
+        block["summary_diagnostics"] = safe_summary_diagnostics(diagnostics)
     except Exception:
         fact_brief(block, reason="unavailable")
+        block["summary_diagnostics"] = [{"stage": "assembly", "codes": ["model_call_unavailable"]}]
     refresh_summary_release(report)

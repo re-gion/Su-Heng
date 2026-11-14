@@ -251,6 +251,13 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
             if mode is not None and value.get("min_reader_minor", 0) < 10:
                 errors.append("R25: 新摘要契约要求 reader 10")
             if mode == "narrative":
+                paragraphs = block.get("paragraphs")
+                if (
+                    isinstance(paragraphs, list)
+                    and any(isinstance(p, dict) and "heading" in p for p in paragraphs)
+                    and value.get("min_reader_minor", 0) < 11
+                ):
+                    errors.append("R25: 段落标题要求 reader 11")
                 errors.extend(f"R25: {reason}" for reason in narrative_errors(block, value))
             elif block.get("paragraphs") or block.get("narrative_review"):
                 errors.append("R25: 未完成审查的叙述摘要不得随事实提要发布")

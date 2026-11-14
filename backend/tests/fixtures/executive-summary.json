@@ -1,7 +1,7 @@
 {
   "report": {
-    "schema_version": "0.10",
-    "min_reader_minor": 10,
+    "schema_version": "0.11",
+    "min_reader_minor": 11,
     "task": {
       "task_id": "summary-test",
       "event_query": "诉求受理事件",
@@ -138,7 +138,8 @@
           "analysis_refs": [],
           "limitation_refs": []
         }
-      ]
+      ],
+      "heading": "事件与当前进展"
     },
     {
       "sentences": [
@@ -151,7 +152,8 @@
           ],
           "limitation_refs": []
         }
-      ]
+      ],
+      "heading": "核心判断"
     },
     {
       "sentences": [
@@ -164,7 +166,8 @@
             "L01"
           ]
         }
-      ]
+      ],
+      "heading": "边界与后续关注"
     }
   ]
 }

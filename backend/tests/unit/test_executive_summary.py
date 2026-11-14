@@ -17,7 +17,7 @@ from yuqing.core.executive_summary import (
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import migrate_report
 from yuqing.render.validator import ReportValidationError, validate_report
-from yuqing.services.executive_summary import attach_executive_summary
+from yuqing.services.executive_summary import attach_executive_summary, safe_summary_diagnostics
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "executive-summary.json"
 
@@ -236,7 +236,7 @@ def test_old_report_migration_preserves_summary_without_synthesizing_new_prose(s
     before = copy.deepcopy(block)
     migrated = migrate_report(summary_report)
     assert migrated["blocks"][1] == before
-    assert migrated["migration_history"] == ["0.9->0.10"]
+    assert migrated["migration_history"] == ["0.9->0.10", "0.10->0.11"]
     assert "关键进展及其核验状态" in render_html(migrated)
 
 
@@ -257,6 +257,32 @@ async def test_model_self_approval_cannot_replace_verifier(summary_report):
 def test_unreviewed_analysis_is_not_summary_material(summary_report):
     summary_report["quality"]["semantic_review"] = {"status": "not_provided"}
     assert summary_context(summary_report)["analyses"] == {}
+
+
+def test_compact_context_preserves_facts_and_relations_and_includes_chart_timeline(summary_report):
+    summary_report["blocks"][2]["items"][0]["verify_reason"] = "冗余审查过程记录。" * 500
+    summary_report["blocks"].append(
+        {
+            "type": "chart",
+            "chart_kind": "timeline",
+            "items": [{"date": "2026-11-14", "text": "公开受理通报。", "claim_refs": ["C001"]}],
+        }
+    )
+    full = summary_context(summary_report, version="narrative-v1")
+    compact = summary_context(summary_report)
+    assert full["timeline"] == [] and len(compact["timeline"]) == 1
+    assert len(json.dumps(compact)) < len(json.dumps(full))
+    for ref, fact in full["facts"].items():
+        assert compact["facts"][ref]["text"] == fact["text"]
+        assert compact["facts"][ref]["badge"] == fact["badge"]
+        citations = compact["facts"][ref]["citations"]
+        assert len(citations) == len(fact["citations"])
+        for old, new in zip(fact["citations"], citations, strict=True):
+            for field in ("evidence_ref", "quote", "relation", "fetch_status", "source_role"):
+                assert old[field] == new[field]
+    before = digest(compact)
+    summary_report["blocks"][2]["items"][0]["verify_reason"] = "材料关系变化。"
+    assert digest(summary_context(summary_report)) != before
 
 
 @pytest.mark.asyncio
@@ -322,3 +348,211 @@ def test_analysis_can_cite_its_explicit_limitation_together(summary_report):
     value = paragraphs()
     value[1]["sentences"][0]["limitation_refs"] = ["L01"]
     assert check_paragraphs(value, summary_context(summary_report)) == []
+
+
+@pytest.mark.asyncio
+async def test_factual_summary_with_source_boundary_is_not_downgraded(summary_report):
+    class BoundaryGateway(Gateway):
+        async def complete_json(self, role, *args, **kwargs):
+            if role == "reporter":
+                value = paragraphs()
+                value[0]["sentences"][0]["limitation_refs"] = ["L01"]
+                return {"paragraphs": value}
+            return await super().complete_json(role, *args, **kwargs)
+
+    await attach_executive_summary(summary_report, OpenAIReportAgent(BoundaryGateway(), "fixture"))
+    assert summary_report["blocks"][1]["summary_mode"] == "narrative"
+    assert "executive_summary" not in summary_report["quality"]["release_gate_missing"]
+
+
+@pytest.mark.asyncio
+async def test_structure_repair_receives_previous_draft_and_actionable_limits(summary_report):
+    class RepairGateway(Gateway):
+        attempts = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                self.attempts += 1
+                value = paragraphs()
+                if self.attempts == 1:
+                    # Reproduces the real-task output exceeding the hard length bound.
+                    sentence = value[0]["sentences"][0]
+                    value[0]["sentences"] = [
+                        {
+                            **sentence,
+                            "text": f"校方通报称，{i}。" + "相关事项仍需依据公开材料理解。" * 10,
+                        }
+                        for i in range(10)
+                    ]
+                    return {"paragraphs": value}
+                feedback = json.loads(prompt.split("\n", 1)[1])["repair_feedback"]
+                assert feedback["previous_paragraphs"]
+                assert feedback["limits"]["max_characters"] == 1400
+                assert feedback["issues"]
+                return {"paragraphs": value}
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    gateway = RepairGateway()
+    await attach_executive_summary(summary_report, OpenAIReportAgent(gateway, "fixture"))
+    assert gateway.attempts == 2
+    assert summary_report["blocks"][1]["summary_mode"] == "narrative"
+    diagnostic = summary_report["quality"]["executive_summary"]["diagnostics"][0]
+    assert diagnostic["stage"] == "structure" and "summary_too_long" in diagnostic["codes"]
+
+
+def test_factual_boundary_reference_does_not_replace_fact_or_allow_analysis(summary_report):
+    value = paragraphs()
+    sentence = value[0]["sentences"][0]
+    sentence["limitation_refs"] = ["L01"]
+    sentence["claim_refs"] = []
+    assert "summary_kind" in check_paragraphs(value, summary_context(summary_report))
+    sentence["claim_refs"] = ["C001"]
+    sentence["analysis_refs"] = ["analysis:0"]
+    assert "summary_kind" in check_paragraphs(value, summary_context(summary_report))
+
+
+@pytest.mark.asyncio
+async def test_downgrade_reports_controlled_reasons_without_model_feedback(summary_report):
+    class RejectGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "verifier":
+                result["sentences"]["S01"] = False
+                result["feedback"] = "PRIVATE_UNREVIEWED_REJECTION_TEXT"
+            return result
+
+    await attach_executive_summary(summary_report, OpenAIReportAgent(RejectGateway(), "fixture"))
+    diagnostics = summary_report["quality"]["executive_summary"]["diagnostics"]
+    assert diagnostics and "content_review_rejected" in diagnostics[0]["codes"]
+    assert {"path": "sentences.S01", "codes": ["sentence_not_supported"]} in diagnostics[0][
+        "issues"
+    ]
+    assert "PRIVATE_UNREVIEWED_REJECTION_TEXT" not in json.dumps(summary_report)
+    html = render_html(summary_report)
+    assert "摘要未完成原因" in html and "摘要内容或整体覆盖未通过审查" in html
+    assert "PRIVATE_UNREVIEWED_REJECTION_TEXT" not in html
+
+
+@pytest.mark.asyncio
+async def test_paragraph_headings_are_reviewed_and_displayed(summary_report):
+    headings = ["事件与当前进展", "核心判断", "边界与后续关注"]
+
+    class HeadingGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                value = paragraphs()
+                for paragraph, heading in zip(value, headings, strict=True):
+                    paragraph["heading"] = heading
+                return {"paragraphs": value}
+            for heading in headings:
+                assert heading in prompt
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    await attach_executive_summary(summary_report, OpenAIReportAgent(HeadingGateway(), "fixture"))
+    assert summary_report["blocks"][1]["summary_mode"] == "narrative"
+    html = render_html(summary_report)
+    for heading in headings:
+        assert f'<h3 class="summary-heading">{heading}</h3>' in html
+    assert validate_report(summary_report).errors == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_repair_locates_unsupported_sentence_and_missing_dispute(summary_report):
+    class RepairGateway(Gateway):
+        reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter" and self.reviews:
+                feedback = json.loads(prompt.split("\n", 1)[1])["repair_feedback"]
+                assert {"path": "sentences.S01", "codes": ["sentence_not_supported"]} in feedback[
+                    "issues"
+                ]
+                assert {"path": "coverage.dispute", "codes": ["coverage_gap"]} in feedback["issues"]
+                assert feedback["previous_paragraphs"] and "本次是修订" in prompt
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "verifier":
+                self.reviews += 1
+                if self.reviews == 1:
+                    result["sentences"]["S01"] = False
+                    result["coverage"]["dispute"] = False
+                    result["feedback"] = "PRIVATE_REVIEW_FEEDBACK"
+            return result
+
+    await attach_executive_summary(summary_report, OpenAIReportAgent(RepairGateway(), "fixture"))
+    assert summary_report["blocks"][1]["summary_mode"] == "narrative"
+    assert "PRIVATE_REVIEW_FEEDBACK" not in json.dumps(summary_report)
+    assert summary_report["blocks"][1]["narrative_review"]["repair_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_heading_changes_invalidate_approval(summary_report):
+    await attach(summary_report)
+    summary_report["blocks"][1]["paragraphs"][0]["heading"] = "全部诉求已经解决"
+    with pytest.raises(ReportValidationError, match="R25"):
+        validate_report(summary_report)
+
+
+@pytest.mark.parametrize(
+    "heading,error",
+    [
+        ("", "heading_text"),
+        ("<b>结果</b>", "heading_text"),
+        ("长标题" * 12, "heading_text"),
+        ("已解决999条诉求", "unsupported_number"),
+    ],
+)
+def test_invalid_or_unsupported_headings_are_rejected(summary_report, heading, error):
+    value = paragraphs()
+    value[0]["heading"] = heading
+    assert error in check_paragraphs(value, summary_context(summary_report), require_headings=True)
+
+
+@pytest.mark.asyncio
+async def test_old_narrative_migration_does_not_invent_headings(summary_report):
+    await attach(summary_report)
+    block = summary_report["blocks"][1]
+    for p in block["paragraphs"]:
+        p.pop("heading")
+    # A historical fixture with the original, headerless content approval.
+    block["narrative_review"]["content_digest"] = digest(block["paragraphs"])
+    summary_report.update(schema_version="0.10", min_reader_minor=10)
+    block["narrative_review"]["version"] = "narrative-v1"
+    block["narrative_review"]["basis_digest"] = digest(
+        summary_context(summary_report, version="narrative-v1")
+    )
+    before = copy.deepcopy(block)
+    assert validate_report(summary_report).errors == []
+    migrated = migrate_report(summary_report)
+    assert migrated["blocks"][1] == before
+    assert migrated["migration_history"] == ["0.10->0.11"]
+    assert '<h3 class="summary-heading">' not in render_html(migrated)
+
+
+def test_diagnostic_filter_does_not_publish_model_prose_or_arbitrary_paths():
+    result = safe_summary_diagnostics(
+        [
+            {
+                "stage": "semantic",
+                "attempt": 1,
+                "codes": ["sentence_not_supported", "PRIVATE_TEXT"],
+                "message": "PRIVATE_TEXT",
+                "issues": [
+                    {
+                        "path": "sentences.S01",
+                        "codes": ["sentence_not_supported"],
+                        "text": "PRIVATE_TEXT",
+                    },
+                    {"path": "PRIVATE_PATH", "codes": ["sentence_not_supported"]},
+                ],
+            },
+            {"stage": {}, "codes": ["invalid_review"]},
+        ]
+    )
+    assert result == [
+        {
+            "stage": "semantic",
+            "attempt": 1,
+            "codes": ["sentence_not_supported"],
+            "issues": [{"path": "sentences.S01", "codes": ["sentence_not_supported"]}],
+        }
+    ]

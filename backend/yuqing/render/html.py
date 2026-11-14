@@ -6,7 +6,7 @@ from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
 
-from yuqing.core.executive_summary import narrative_errors, summary_context
+from yuqing.core.executive_summary import SUMMARY_ERROR_LABELS, narrative_errors, summary_context
 from yuqing.core.history_cards import unique_history_cards
 from yuqing.core.verification_presentation import (
     LABELS,
@@ -145,13 +145,34 @@ def _summary(
                     f'<span class="summary-sentence" data-kind="{_escape(sentence["kind"])}">'
                     f'{_escape(sentence["text"])}<sup class="summary-citations">{refs}</sup></span>'
                 )
-            paragraphs.append(f"<p>{''.join(sentences)}</p>")
+            heading = (
+                f'<h3 class="summary-heading">{_escape(paragraph["heading"])}</h3>'
+                if paragraph.get("heading")
+                else ""
+            )
+            paragraphs.append(f"{heading}<p>{''.join(sentences)}</p>")
         return (
             '<section id="summary" class="summary-narrative"><h2>执行摘要</h2>'
             + "".join(paragraphs)
             + "</section>"
         )
     if block.get("summary_mode") == "fact_brief":
+        reasons = list(
+            dict.fromkeys(
+                SUMMARY_ERROR_LABELS[c]
+                for d in block.get("summary_diagnostics", [])
+                if isinstance(d, dict)
+                for c in (d.get("codes") if isinstance(d.get("codes"), list) else [])
+                if isinstance(c, str) and c in SUMMARY_ERROR_LABELS
+            )
+        )
+        diagnostic = (
+            '<details class="summary-boundary"><summary>摘要未完成原因</summary><ul>'
+            + "".join(f"<li>{_escape(reason)}</li>" for reason in reasons)
+            + "</ul></details>"
+            if reasons
+            else ""
+        )
         items = "".join(
             f"<li>{_escape(item.get('text'))}{_claim_link(item['claim_ref'])}</li>"
             for item in block.get("what", [])
@@ -160,7 +181,7 @@ def _summary(
         return (
             '<section id="summary" class="summary-fact-brief"><h2>执行摘要</h2>'
             f'<p class="fallback-note">{_escape(block.get("fallback_notice"))}</p>'
-            f"<h3>事实提要</h3><ul>{items}</ul></section>"
+            f"{diagnostic}<h3>事实提要</h3><ul>{items}</ul></section>"
         )
     groups = []
     for key, title in (
@@ -1536,6 +1557,7 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
     .source-boundary{font-size:13px;color:var(--muted);margin:8px 0 0;line-height:1.6}
     .verification-legend{padding:10px 14px;border-left:3px solid #315bd7;background:#eef3fd;color:#314a70;font-size:13px}
     .summary-narrative>p{font-size:17px;line-height:2;text-align:justify;margin:0 0 1.15em;orphans:3;widows:3}
+    .summary-narrative>.summary-heading{font-size:17px;line-height:1.6;margin:1.3em 0 .4em;color:var(--ink-2);break-after:avoid}
     .summary-citations{font-size:11px;line-height:0;vertical-align:super}.summary-citations .claim-link{margin-left:3px;text-decoration:none}
     .summary-citations .claim-link:hover{text-decoration:underline}.summary-citations .claim-link:focus-visible{outline:2px solid #315bd7;outline-offset:2px}
     @media(max-width:600px){.summary-narrative>p{font-size:16px;line-height:1.9;text-align:left}}

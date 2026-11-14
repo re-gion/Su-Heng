@@ -102,6 +102,7 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
                 ref = next(iter(context["limitations"]))
                 paragraphs = [
                     {
+                        "heading": "事件进展",
                         "sentences": [
                             {
                                 "text": "校方通报称，已收到120条诉求，并交由工作组核查。",
@@ -110,9 +111,10 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
                                 "analysis_refs": [],
                                 "limitation_refs": [],
                             }
-                        ]
+                        ],
                     },
                     {
+                        "heading": "材料边界",
                         "sentences": [
                             {
                                 "text": context["limitations"][ref]["text"],
@@ -121,7 +123,7 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
                                 "analysis_refs": [],
                                 "limitation_refs": [ref],
                             }
-                        ]
+                        ],
                     },
                 ]
 
@@ -168,6 +170,7 @@ def test_narrative_layout_and_citation_navigation(narrative_report, tmp_path, wi
             page.emulate_media(reduced_motion="reduce")
             page.goto(path.as_uri())
             expect(page.locator("#summary > p")).to_have_count(3)
+            expect(page.locator("#summary > h3.summary-heading")).to_have_count(3)
             expect(page.locator("#summary .badge")).to_have_count(0)
             assert page.locator("#summary").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
             page.locator('#summary a[href="#claim-C001"]').click()

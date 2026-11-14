@@ -376,7 +376,7 @@ def test_v08_migration_preserves_facts_and_does_not_invent_observations():
         "quality": {"release_label": "evidence_brief"},
     }
     migrated = migrate_report(report)
-    assert migrated["schema_version"] == "0.10" and migrated["min_reader_minor"] == 10
+    assert migrated["schema_version"] == "0.11" and migrated["min_reader_minor"] == 11
     assert migrated["blocks"] == report["blocks"] and migrated["quality"] == report["quality"]
     assert report["schema_version"] == "0.8"
 
