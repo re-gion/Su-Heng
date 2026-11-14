@@ -47,7 +47,7 @@ class AgentSkillRuntime:
         if not candidates:
             raise ValueError(f"{agent.label} 没有当前工作单可用的已登记技能")
         selected = candidates[0]
-        reason = "根据当前工作单加载该角色的专项方法。"
+        reason = "程序根据当前工作阶段匹配本角色已登记的技能。"
         mode = "work_order"
         if role in INVESTIGATORS and stage in {"plan", "reflect"} and len(candidates) > 1:
             # A separate logical allowance keeps selection from exhausting the action's retries.
@@ -129,17 +129,17 @@ class AgentSkillRuntime:
             await self._record(record, "running")
             value = await self.gateway._complete_json(role, system, user, **options)
         except asyncio.CancelledError:
-            await self._record(record, "cancelled", outcome="调用被取消，不能视为完成。")
+            await self._record(record, "cancelled", outcome="处理请求已取消，不能视为完成。")
             raise
         except Exception as exc:
             await self._record(
-                record, "failed", outcome=f"方法调用未完成（{type(exc).__name__}）。"
+                record, "failed", outcome=f"使用技能的处理请求未完成（{type(exc).__name__}）。"
             )
             raise
         await self._record(
             record,
             "response_ready",
-            outcome="模型响应已返回；是否采纳由后续业务校验与入库决定。",
+            outcome="模型响应已返回；本条响应是否采纳仍由业务校验与入库决定。",
         )
         return value
 

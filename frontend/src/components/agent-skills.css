@@ -26,6 +26,20 @@
 .skill-activity-log > summary { font-weight: 600; }
 .skill-filter { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; font-size: .85rem; }
 .skill-filter select { width: auto; max-width: 100%; }
+.skill-scope-summary { padding: .65rem .8rem; background: #eef2f6; line-height: 1.7; overflow-wrap: anywhere; font-size: .85rem; }
+.skill-count-help { margin: .75rem 0; font-size: .85rem; }
+.skill-count-help summary, .skill-group > summary, .skill-trace > summary { cursor: pointer; line-height: 1.7; }
+.skill-count-help p { line-height: 1.7; }
+.skill-group { border-top: 1px solid var(--line, #d7dde4); padding: .9rem 0; }
+.skill-group > summary > span { display: block; margin-left: 1rem; font-size: .8rem; color: #526176; }
+.skill-group > summary > .skill-group-notice { color: #86520e; }
+.skill-group > p { font-size: .8rem; line-height: 1.7; }
+.skill-group .skill-activity { margin-left: .75rem; }
+.skill-trace { margin-top: .75rem; font-size: .8rem; color: #526176; }
+.skill-trace p, .skill-trace dd { overflow-wrap: anywhere; }
+.skill-trace dt { font-weight: 600; margin-top: .7rem; }
+.skill-trace dd { margin: .2rem 0 .6rem; }
+.skill-trace dd small { display: block; margin-top: .25rem; line-height: 1.65; }
 .skill-activity { padding: .75rem 0; border-top: 1px solid var(--line, #d7dde4); font-size: .85rem; }
 .skill-activity summary > span { margin-left: .75rem; color: #526176; font-size: .8rem; }
 .skill-activity p { line-height: 1.65; overflow-wrap: anywhere; }
