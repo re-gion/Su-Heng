@@ -257,6 +257,8 @@ def test_directory_scroll_is_independent_of_document(report_page):
     page = report_page
     page.set_viewport_size({"width": page.viewport_size["width"], "height": 300})
     scroller = page.locator(".toc-scroll")
+    # The toolbar ResizeObserver updates available sidebar height on the next frame.
+    page.wait_for_function("el=>el.scrollHeight>el.clientHeight", arg=scroller.element_handle())
     assert scroller.evaluate("el=>el.scrollHeight>el.clientHeight")
     bounds = scroller.bounding_box()
     document_scroll = page.evaluate("window.scrollY")
