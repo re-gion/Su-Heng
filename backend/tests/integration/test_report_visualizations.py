@@ -186,6 +186,37 @@ def test_timeline_keeps_decisions_and_other_same_day_records_without_truncation(
     assert chosen[-1]["text"] == facts[2]["text"]
 
 
+@pytest.mark.parametrize("width", [1440, 390])
+def test_grouped_event_keeps_individual_badges_links_and_print_content(visual_page, width):
+    page = visual_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    report = visual_report()
+    facts = report["blocks"][2]["items"]
+    for item in facts:
+        item["text"] = "甲公司2025年9月17日发布情况说明称将提供免费升级。"
+    # Same event, different verification states: grouping cannot publish a shared badge.
+    report["blocks"][1]["items"] = event_timeline(facts)
+    page.set_content(render_html(report), wait_until="load")
+    card = page.locator("#events .visual-event")
+    expect(card).to_have_count(1)
+    expect(card.locator(".visual-group-label")).to_contain_text("已归并 2 条陈述")
+    summary = card.locator("summary")
+    summary.focus()
+    summary.press("Enter")
+    expect(card.locator(".visual-related-claim")).to_have_count(2)
+    expect(
+        card.locator('.visual-related-claim[data-claim-ref="C001"] .verification_incomplete')
+    ).to_be_visible()
+    expect(card.locator('.visual-related-claim[data-claim-ref="C002"] .verified')).to_be_visible()
+    card.get_by_role("link", name="查看事实 C002", exact=True).click()
+    expect(page.locator("#claim-C002")).to_be_in_viewport()
+    page.evaluate("window.dispatchEvent(new Event('beforeprint'))")
+    page.emulate_media(media="print")
+    expect(card.locator('.visual-related-claim[data-claim-ref="C001"]')).to_be_visible()
+    expect(card.locator('.visual-related-claim[data-claim-ref="C002"]')).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 2")
+
+
 @pytest.fixture
 def visual_page(tmp_path: Path):
     path = tmp_path / "visual-report.html"

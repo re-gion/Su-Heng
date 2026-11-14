@@ -6,6 +6,8 @@ import copy
 import re
 from datetime import date
 
+from yuqing.core.timeline_grouping import group_timeline_events
+
 DATE = re.compile(r"(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 DISCLOSURE = re.compile(
     r"发帖|发文|发布.{0,12}(?:测试视频|评测|测评|帖文|文章)|首次.{0,8}(?:公开|曝光|披露)"
@@ -114,7 +116,12 @@ def earlier_event_candidates(facts: list[dict], sources) -> list[dict]:
                 continue
             if stamp == earliest and (
                 not DISCLOSURE.search(passage)
-                or any(DISCLOSURE.search(node["text"]) for node in nodes if node["date"] == stamp)
+                or any(
+                    DISCLOSURE.search(member["text"])
+                    for node in nodes
+                    if node["date"] == stamp
+                    for member in node.get("related_claims", [node])
+                )
             ):
                 continue
             candidates.add((stamp, source.local_id))
@@ -130,8 +137,10 @@ def restore_report_chronology(report: dict) -> None:
         for f in b.get("items", [])
     ]
     task = report.get("task", {})
-    nodes = event_timeline(
-        facts, date_from=task.get("time_range_from"), date_to=task.get("time_range_to")
+    nodes = group_timeline_events(
+        event_timeline(
+            facts, date_from=task.get("time_range_from"), date_to=task.get("time_range_to")
+        )
     )
     for block in report.get("blocks", []):
         if block.get("block_id") != "b_02_correction_timeline":

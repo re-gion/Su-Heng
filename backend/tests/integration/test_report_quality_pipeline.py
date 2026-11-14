@@ -118,6 +118,36 @@ async def test_earlier_admitted_passage_is_a_recovery_gap_until_it_has_a_claim(r
 
 
 @pytest.mark.asyncio
+async def test_repeated_claims_of_one_event_do_not_satisfy_two_event_release_gate(runtime_dir):
+    from yuqing.core.verification_presentation import enrich_report_sources
+
+    db = Database(runtime_dir / "duplicate-events.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(TaskCreate(event_query="甲公司公开测试事件"))
+        await add_fact(
+            db,
+            task,
+            "2026年10月8日，甲公司相关账号发布测试视频称3台测试车辆踏板断裂。",
+            date="2026-10-08",
+        )
+        await add_fact(
+            db, task, "甲公司2026年10月8日发布测试视频称3台测试车辆踏板断裂。", date="2026-10-09"
+        )
+        _, report, _ = await FullReportBuilder(db, runtime_dir / "reports").build(task.id)
+        raw = next(b for b in report["blocks"] if b.get("chart_kind") == "timeline")
+        assert len(raw["items"]) == 2
+        assert "event_timeline" in report["quality"]["release_gate_missing"]
+        displayed = enrich_report_sources(report)
+        chart = next(b for b in displayed["blocks"] if b.get("chart_kind") == "timeline")
+        assert len(chart["items"]) == 1
+        assert len(chart["items"][0]["related_claims"]) == 2
+        assert all("related_claims" not in item for item in raw["items"])
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_unverified_diagnostic_keeps_attributed_summary(runtime_dir):
     db = Database(runtime_dir / "diagnostic.db")
     await db.initialize()

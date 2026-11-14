@@ -8,6 +8,7 @@ from collections import defaultdict
 from typing import Any
 
 from yuqing.core.claim_semantics import publication_actor
+from yuqing.core.timeline_grouping import event_display_claims, group_timeline_events
 from yuqing.core.verification_presentation import LABELS, NOTES, presentation_status
 
 
@@ -70,11 +71,33 @@ def _source_details(item: dict) -> str:
     )
 
 
+def _timeline_badge(item: dict) -> str:
+    badge = presentation_status(item)
+    return f'<span class="badge {badge}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">{_escape(LABELS.get(badge, badge))}</span>'
+
+
+def _timeline_details(item: dict) -> str:
+    members = item.get("related_claims", [])
+    if len(members) < 2:
+        return _source_details(item)
+    return (
+        '<p class="visual-group-notice">同一事项的关联记录归并展示；下列原句、核验状态和依据逐条保留。归并不增加独立信源，也不表示所有说法均已证实。</p>'
+        + "".join(
+            f'<article class="visual-related-claim" data-claim-ref="{_escape(member.get("claim_ref"))}">'
+            f"<p>{_escape(member['text'])}</p>"
+            + _timeline_badge(member)
+            + _source_details(member)
+            + "</article>"
+            for member in members
+        )
+    )
+
+
 def timeline_visual(block: dict) -> str:
     items = [item for item in block.get("items", []) if item.get("date") and item.get("text")]
     if not items:
         return ""
-    items = sorted(items, key=lambda item: str(item["date"]))
+    items = group_timeline_events(sorted(items, key=lambda item: str(item["date"])))
     categories = list(dict.fromkeys(_category(item["text"]) for item in items))
     options = "".join(
         f'<option value="{_escape(category)}">{_escape(category)}</option>'
@@ -84,7 +107,34 @@ def timeline_visual(block: dict) -> str:
     for item in items:
         category = _category(item["text"])
         lane = categories.index(category) + 1
-        badge = presentation_status(item)
+        member_count = len(item.get("related_claims", []))
+        group_warnings = []
+        if any(
+            member.get("badge") in {"disputed", "refuted"}
+            for member in item.get("related_claims", [])
+        ):
+            group_warnings.append("含有争议或已证伪陈述")
+        if any(
+            presentation_status(member) == "verification_incomplete"
+            for member in item.get("related_claims", [])
+        ):
+            group_warnings.append("含核验未完成陈述")
+        warning = " · " + "；".join(group_warnings) if group_warnings else ""
+        verification = (
+            f'<span class="visual-group-label">已归并 {member_count} 条陈述 · 逐条核验{warning}</span>'
+            if member_count > 1
+            else _timeline_badge(item)
+        )
+        expand_label = f"查看 {member_count} 条陈述与依据" if member_count > 1 else "查看依据"
+        additions = (
+            "".join(
+                f'<span class="visual-event-addition">{_escape(member["text"])}</span>'
+                for member in event_display_claims(item)
+                if member["claim_ref"] != item.get("claim_ref")
+            )
+            if member_count > 1
+            else ""
+        )
         window = (
             f'<span class="visual-window">{_escape(item["window_label"])}</span>'
             if item.get("window_label")
@@ -96,11 +146,12 @@ def timeline_visual(block: dict) -> str:
             '<span class="visual-dot" aria-hidden="true"></span><div class="visual-event-body">'
             f'<span class="visual-category">{_escape(category)}</span>{window}'
             '<details class="visual-detail"><summary>'
-            f'<span class="visual-event-text">{_escape(item["text"])}</span>'
-            '<span class="visual-expand-label">查看依据</span></summary>'
-            + _source_details(item)
-            + f'</details><span class="badge {badge}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">{_escape(LABELS.get(badge, badge))}</span>'
-            "</div></li>"
+            f'<span class="visual-event-text">{_escape(item["text"])}{additions}</span>'
+            f'<span class="visual-expand-label">{expand_label}</span></summary>'
+            + _timeline_details(item)
+            + "</details>"
+            + verification
+            + "</div></li>"
         )
     controls = (
         '<div class="visual-controls"><div class="visual-switch" role="group" aria-label="时间线布局">'
@@ -289,6 +340,8 @@ VISUAL_CSS = """
 .report-visual{--lane-0:#0f6b78;--lane-1:#4263ad;--lane-2:#916524;--lane-3:#795b95;overflow-wrap:anywhere}
 .visual-guide{color:var(--muted);font-size:14px;margin:0 0 18px}.visual-caption{color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px;line-height:1.7}
 .visual-print-reference{display:none}
+.visual-group-label,.visual-group-notice{font-size:12px;color:var(--muted)}.visual-group-label{display:inline-block;margin-top:8px}.visual-related-claim{border-top:1px solid var(--line);padding:12px 0}.visual-related-claim>p{margin:0 0 8px}
+.visual-event-addition{display:block;margin-top:8px;font-weight:400}
 .visual-controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px;background:#f2f6f8;border:1px solid #dce5eb;border-radius:6px;margin:16px 0 24px}
 .visual-controls button,.visual-controls select{font:inherit;font-size:13px;padding:7px 10px;border:1px solid #b7c8d3;border-radius:4px;color:var(--ink-2);background:#fff;cursor:pointer}
 .visual-controls label{font-size:13px;color:var(--muted)}.visual-controls button[aria-pressed=true]{background:var(--ink-2);color:#fff;border-color:var(--ink-2)}.visual-controls button:focus-visible,.visual-controls select:focus-visible,.visual-detail>summary:focus-visible{outline:3px solid #c78316;outline-offset:3px}
@@ -321,6 +374,7 @@ VISUAL_CSS = """
  .visual-chronology[data-layout] .visual-event>time{grid-column:auto;display:block;padding-top:10px}
  .visual-chronology[data-layout] .visual-dot{display:block;grid-column:auto;grid-row:auto}
  .visual-chronology[data-layout] .visual-event-body{grid-column:auto;height:auto;padding:12px}
+ .visual-chronology[data-layout] .visual-event:has(.visual-related-claim){break-inside:auto}.visual-related-claim{break-inside:avoid}
  .visual-issue{overflow:visible;break-inside:auto}.visual-issue-grid{display:block}.visual-issue-cell{border-right:0;border-bottom:1px solid #dce5eb;break-inside:auto}
  .visual-detail::details-content{content-visibility:visible!important;display:block!important}.visual-detail>summary{display:block}
  .visual-action{display:block;break-inside:auto}.visual-action>div{margin:8px 0}.visual-action-arrow{display:none}

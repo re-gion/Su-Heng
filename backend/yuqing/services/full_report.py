@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.event_chronology import CHRONOLOGY_NOTE, earlier_event_candidates
 from yuqing.core.history_cards import background_complete, unique_history_cards
+from yuqing.core.timeline_grouping import group_timeline_events
 from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
@@ -1873,7 +1874,7 @@ class FullReportBuilder:
             concrete_event=bool(task.resolved_event_query or task.request_kind == "event"),
             main_evidence=len(main_evidence),
             verifiable_key_claims=definitive_claims,
-            event_timeline_nodes=len(event_nodes),
+            event_timeline_nodes=len(group_timeline_events(event_nodes)),
             event_chronology_complete=not chronology_gaps,
             publication_nodes=publication_nodes,
             propagation_edges=propagation_edges,
