@@ -11,6 +11,8 @@ from yuqing.core.llm.roles import LLMRole
 class AgentDefinition(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{2,31}$")
     label: str
+    description: str = ""
+    main_skill: str | None = None
     model_role: LLMRole
     tools: list[str] = []
     skills: list[str] = []

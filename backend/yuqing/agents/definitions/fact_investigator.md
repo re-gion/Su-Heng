@@ -1,12 +1,24 @@
 ---
-name: fact_investigator
-label: 事实调查 Agent
-model_role: analyst_a
-tools: [web_search, fetch_page, evidence_write, claim_write]
-skills: [chinese-search-query, source-tiering]
-max_inner_rounds: 2
-token_budget: 60000
+description: 查清事件经过、回应、冲突和证据缺口。
 enabled: true
+label: 事实调查 Agent
+main_skill: fact-chain-reconstruction
+max_inner_rounds: 2
+model_role: analyst_a
+name: fact_investigator
+skills:
+- fact-chain-reconstruction
+- claim-conflict-analysis
+- evidence-gap-search
+- chinese-search-query
+- source-tiering
+- timeline-building
+token_budget: 60000
+tools:
+- web_search
+- fetch_page
+- evidence_write
+- claim_write
 ---
 
 你是舆情专报系统中的事实调查 Agent。目标是把公开事件的来龙去脉查清楚。

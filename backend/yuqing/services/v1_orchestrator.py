@@ -2664,7 +2664,12 @@ class V1Orchestrator:
                 break
             claims = await self.database.list_claims(task_id)
             try:
-                reflection = await agent.reflect(scoped_query, claims)
+                if hasattr(agent, "reflect_with_evidence"):
+                    reflection = await agent.reflect_with_evidence(
+                        scoped_query, claims, await self.database.list_evidence(task_id)
+                    )
+                else:
+                    reflection = await agent.reflect(scoped_query, claims)
             except LLMBudgetExhausted as exc:
                 model_limited = True
                 message = await warn_phase_budget("reflect", exc)
@@ -2763,6 +2768,13 @@ class V1Orchestrator:
             task_id,
             "agent.status",
             {"agent": agent_name, "phase": "done", "inner_round": inner_round},
+        )
+        await self._finish_skill_stage(
+            agent_name,
+            outcome="调查阶段已保存论坛摘要和可回查产物；阶段引用不表示每次模型候选均被采纳。",
+            evidence_refs=refs,
+            claim_refs=[claim.local_id for claim in finding_claims],
+            partial=model_limited or not findings,
         )
         return {
             "agent": agent_name,
@@ -2910,6 +2922,11 @@ class V1Orchestrator:
                     payload={"agent": directive.agent},
                 ),
             )
+        await self._finish_skill_stage(
+            "moderator",
+            outcome="主持人评审与实际分派指令已保存；结束论坛不等于报告通过。",
+            partial=review.degraded,
+        )
         return review
 
     async def _seed_selected_sources(self, task) -> None:
@@ -3019,6 +3036,14 @@ class V1Orchestrator:
         async def verify_one(claim):
             async with semaphore:
                 verified = await self.verification.verify_claim(claim)
+                await self._finish_skill_stage(
+                    "evidence_verifier",
+                    claim_ref=verified.local_id,
+                    claim_refs=[verified.local_id],
+                    evidence_refs=verified.evidence_ids,
+                    outcome="该陈述核验阶段已入库；最终徽章由代码按实际证据关系计算。",
+                    partial=verified.verification_state != "complete",
+                )
                 await self.events.emit(
                     task_id,
                     "verify.progress",
@@ -3045,8 +3070,21 @@ class V1Orchestrator:
 
         return await deepen_comment_question(self, task_id, question_id, follow_up=follow_up)
 
+    async def _finish_skill_stage(self, name: str, **details):
+        activity = getattr(getattr(self, "usage", None), "agent_activity", None)
+        if activity is not None:
+            role = next(
+                (role for role, agent in activity.catalog.agents.items() if agent.name == name),
+                None,
+            )
+            if role:
+                await activity.finish_stage(role, **details)
+
     async def _bind_task_runtime(self, task):
         task_id = task.id
+        activity = getattr(self.usage, "agent_activity", None)
+        if activity is not None:
+            activity.bind(task_id)
         if self.scope_reviewer:
             self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
         if self.usage is not None and hasattr(self.usage, "record_call"):
@@ -3784,6 +3822,12 @@ class V1Orchestrator:
         # 报告构建包含分章综合分析与语义审查，终态前再落一次最终 usage。
         await self._emit_budget(task_id, task.depth)
         await self.database.save_report(task_id, report_id, report, html_path, report["metrics"])
+        for agent_name in ("reporter", "evidence_verifier", "task_preparation", "comment_insight"):
+            await self._finish_skill_stage(
+                agent_name,
+                report_id=report_id,
+                outcome="所属处理阶段已结束，报告产物已保存；候选是否采纳以报告与证据台账为准。",
+            )
         for block in report["blocks"]:
             await self.events.emit(
                 task_id,

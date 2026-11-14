@@ -499,6 +499,8 @@ class LLMGateway:
         self._tokens_reserved = 0
         self._budget_lock = asyncio.Lock()
         self.record_call = None
+        # Optional application adapter; the transport has no dependency on Agent definitions.
+        self.request_adapter = None
         self._call_context = ContextVar("llm_call_context", default=None)
         self._logical_context = ContextVar("llm_logical_context", default=None)
         self._endpoint_failures = {}
@@ -572,6 +574,21 @@ class LLMGateway:
             await asyncio.sleep(delay)
 
     async def complete_json(
+        self,
+        role: LLMRole,
+        system: str,
+        user: str,
+        **options,
+    ) -> dict[str, Any]:
+        if self.request_adapter is not None:
+            return await self.request_adapter(role, system, user, options)
+        return await self._complete_json(role, system, user, **options)
+
+    @property
+    def call_context(self) -> dict:
+        return dict(self._call_context.get() or {})
+
+    async def _complete_json(
         self,
         role: LLMRole,
         system: str,

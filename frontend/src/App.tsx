@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { AgentSkillRoster, AgentSkillSummary, useAgentCatalog } from './components/AgentSkills'
 import {
   createTask,
   TaskCreationError,
@@ -99,7 +100,7 @@ function AccountControls({ auth }: { auth: AuthView }) {
   </>
 }
 
-const roleLabels: Record<string, string> = { analyst_a: '事实调查', analyst_b: '媒体传播', analyst_c: '历史洞察', comment_analyst: '评论洞察', moderator: '协作主持', verifier: '证据核验', reporter: '报告撰写', utility: '通用辅助' }
+const roleLabels: Record<string, string> = { analyst_a: '事实调查 Agent', analyst_b: '媒体传播 Agent', analyst_c: '历史洞察 Agent', comment_analyst: '评论洞察 Agent', moderator: '协作主持 Agent', verifier: '证据核验 Agent', reporter: '报告综合 Agent', utility: '任务准备 Agent' }
 const roleOrder = ['analyst_a', 'analyst_b', 'analyst_c', 'comment_analyst', 'moderator', 'verifier', 'reporter', 'utility']
 const roleDescriptions: Record<string, string> = {
   analyst_a: '查清事件经过、通报与回应，形成有来源的事实陈述。',
@@ -125,13 +126,6 @@ const providerLabels: Record<string, string> = { yuanbao: '元宝搜索', exa: '
 const platformLabels: Record<string, string> = { weibo: '微博', bilibili: '哔哩哔哩', zhihu: '知乎', xiaohongshu: '小红书', douyin: '抖音', kuaishou: '快手', tieba: '百度贴吧' }
 const taskStatusLabels: Record<string, string> = { queued: '排队中', running: '进行中', pausing: '正在暂停', paused: '已暂停', stopping: '正在停止', done: '已完成', failed: '未完成' }
 const depthLabels: Record<string, string> = { quick: '快速', standard: '标准', deep: '深入' }
-
-const agents = [
-  ['fact_investigator', '事实调查', '核对事件本身与官方材料'],
-  ['media_propagation', '媒体传播', '梳理采编主体与报道口径'],
-  ['history_insight', '历史洞察', '本地历史库优先，搜索回溯补充'],
-  ['comment_insight', '评论洞察', '仅分析用户确认帖子的脱敏评论样本'],
-] as const
 
 const phaseLabels: Record<string, string> = {
   planning: '制定调查计划', forum: '三路协作调查', searching: '检索公开来源',
@@ -245,6 +239,7 @@ function BackToTop({ settings = false }: { settings?: boolean }) {
 }
 
 function Settings({ onClose }: { onClose: () => void }) {
+  const { catalog: agentCatalog, error: agentCatalogError } = useAgentCatalog()
   const [config, setConfig] = useState<PublicConfig | null>(null)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [notice, setNotice] = useState('')
@@ -290,10 +285,12 @@ function Settings({ onClose }: { onClose: () => void }) {
   return <main className="settings-page">
     <div className="settings-head"><div><img className="settings-brand" src={brandLockup} alt="溯衡" width="138" height="64" /><span className="section-kicker">系统配置</span><h1>配置调查服务</h1><p>设置页覆盖 `.env`，密钥只显示脱敏值，不写回文件。</p></div><button type="button" onClick={onClose}>返回调查台</button></div>
     <form className="settings-form" onSubmit={save}>
-      <section><h2>模型角色配置</h2><p className="muted">选择供应商实际提供的接口协议。Anthropic Messages 用于 Claude 原生协议或兼容中转；OpenAI 兼容用于 Chat Completions 中转。留空继续继承当前有效值；核验器与生成模型异构时，交叉核验更有意义。</p>
+      <section><h2>Agent 角色配置</h2><p className="muted">选择供应商实际提供的接口协议。Anthropic Messages 用于 Claude 原生协议或兼容中转；OpenAI 兼容用于 Chat Completions 中转。留空继续继承当前有效值；核验器与生成模型异构时，交叉核验更有意义。</p>
+        {agentCatalogError && <p role="alert">{agentCatalogError}</p>}{agentCatalog?.errors.map(item => <p className="error" key={item}>{item}</p>)}
         <div className="role-config-grid">{roles.map(([role, value]) => <article key={role}>
           <header><div><strong>{roleLabels[role] ?? role}</strong><small className="role-key">{role}</small></div><button type="button" onClick={() => void test('llm', role)}>测试</button></header>
-          <p className="role-description">{roleDescriptions[role]}</p>
+          <p className="role-description">{agentCatalog?.agents.find(agent => agent.role === role)?.description ?? roleDescriptions[role]}</p>
+          <AgentSkillSummary agent={agentCatalog?.agents.find(agent => agent.role === role)} />
           <label>接口密钥 · API Key<input type="password" value={draft[`${role}.api_key`] ?? ''} onChange={(event) => set(`${role}.api_key`, event.target.value)} placeholder={value.effective.api_key ?? '未配置'} /></label>
           <label>接口地址 · Base URL<input value={draft[`${role}.base_url`] ?? ''} onChange={(event) => set(`${role}.base_url`, event.target.value)} placeholder={value.effective.base_url} /></label>
           <label>模型名称 · Model<input value={draft[`${role}.model`] ?? ''} onChange={(event) => set(`${role}.model`, event.target.value)} placeholder={value.effective.model} /></label>
@@ -433,7 +430,6 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
     finally { setSubmitting(false) }
   }
   if (screen === 'settings') return <Settings onClose={() => setScreen('desk')} />
-  const visibleAgents = agents.filter(([key]) => key !== 'comment_insight' || commentMode !== 'off' || stream.phase.startsWith('comment_') || Boolean(stream.agents.comment_insight))
   const hasCommentCandidates = Boolean(commentCandidates?.items.length)
   const allowsSupplementalCommentUrls = ['manual', 'hybrid'].includes(commentMode)
   const detailPhase = taskDetail?.phase ?? stream.phase
@@ -478,7 +474,7 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
 
         {canTopicSelection && topicCandidates && <TopicSelectionPanel data={topicCandidates} selectedTopic={selectedTopic} manualTopic={manualTopic} onSelect={(id) => { setSelectedTopic(id); setManualTopic('') }} onManual={(value) => { setManualTopic(value); setSelectedTopic('') }} onSubmit={(payload) => void action(async () => { await submitTopicSelection(taskId, payload); selectTask(taskId) })} onExpand={() => void action(async () => { await expandTopicDiscovery(taskId); selectTask(taskId) })} />}
 
-        <section className="agent-rail"><span className="section-kicker">03 / 并行调查席</span><div className="agent-panels">{visibleAgents.map(([key, label, description]) => <article key={key} data-agent={key}><div className="agent-index">{key === 'fact_investigator' ? 'A' : key === 'media_propagation' ? 'B' : key === 'history_insight' ? 'C' : 'D'}</div><h3>{label}</h3><p>{description}</p><strong>{phaseLabels[stream.agents[key]] ?? stream.agents[key] ?? '等待调度'}</strong></article>)}</div></section>
+        <AgentSkillRoster key={`skills-${taskId}`} activities={stream.skills} phases={stream.agents} commentEnabled={commentMode !== "off" || Boolean(stream.agents.comment_insight)} finished={["done", "failed"].includes(detailStatus)} />
 
         {canCommentSelection && commentCandidates && <section className="comment-candidates"><span className="section-kicker">V2 / 评论候选确认</span><h2>选择值得进入的评论区</h2><p>最多 {commentCandidates.budgets.posts} 帖，每帖 {commentCandidates.budgets.comments_per_post} 条。确认前系统不会访问登录态内容。</p>{hasCommentCandidates ? <><div>{commentCandidates.items.map((item) => <label key={item.id} className="candidate-card"><input type="checkbox" checked={selectedCandidates.includes(item.id)} disabled={!selectedCandidates.includes(item.id) && selectedCandidates.length >= commentCandidates.budgets.posts} onChange={(event) => setSelectedCandidates((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} /><span><strong>{item.platform} · {item.title}</strong><small>评分 {item.score.toFixed(1)} · {item.reasons.join(' / ')} · {item.login_profile_present ? '已有登录 profile' : '需先登录'}</small><a href={item.url} target="_blank" rel="noreferrer">查看原帖</a></span></label>)}</div>{allowsSupplementalCommentUrls && <textarea value={supplementalCommentUrls} onChange={(event) => setSupplementalCommentUrls(event.target.value)} placeholder="可选：每行补充一个帖子 URL，确认时一并采集" aria-label="补充帖子 URL" />}<div className="candidate-actions"><button disabled={!selectedCandidates.length && !(allowsSupplementalCommentUrls && supplementalCommentUrls.trim())} onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'approve', candidate_ids: selectedCandidates, urls: supplementalCommentUrls.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) }); selectTask(taskId) })}>确认并采集</button><button className="quiet" onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'skip' }); selectTask(taskId) })}>跳过评论，继续报告</button></div></> : <><p className="muted">系统没有找到达到相关度门槛的帖子。下面保留了逐平台结果；请补充帖子 URL，或明确跳过评论洞察。</p>{commentCandidates.discovery_attempts.length > 0 && <div className="discovery-diagnostics">{commentCandidates.discovery_attempts.map((item, index) => <p key={`${item.platform}-${index}`}><strong>{platformLabels[item.platform] ?? item.platform}</strong> · {item.status === 'found' ? `发现 ${item.count} 条` : item.status === 'empty' ? '未发现匹配帖子' : '发现失败'}{item.error ? ` · ${item.error}` : ''}</p>)}</div>}<textarea value={supplementalCommentUrls} onChange={(event) => setSupplementalCommentUrls(event.target.value)} placeholder="每行补充一个帖子 URL" aria-label="补充帖子 URL" /><div className="candidate-actions"><button disabled={!supplementalCommentUrls.trim()} onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'approve', urls: supplementalCommentUrls.split(/\r?\n/).map((item) => item.trim()).filter(Boolean) }); selectTask(taskId) })}>使用补充 URL 并采集</button><button className="quiet" onClick={() => void action(async () => { await submitCommentSelection(taskId, { action: 'skip' }); selectTask(taskId) })}>明确跳过评论，继续报告</button></div></>}</section>}
 
@@ -487,7 +483,7 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
 
         {(stream.status === 'done' || taskDetail?.status === 'done') && <CommentQuickRead key={taskId} taskId={taskId} />}
 
-        <section className="evidence-ledger"><article><span className="section-kicker">06 / 证据台账</span><h2>{stream.evidence.length} 条公开材料</h2>{stream.evidence.map((item) => <div className="evidence-row" key={item.id}><span className="mono">{item.id}</span><div><strong>{item.title}</strong><small>{item.source} · L{item.tier}</small></div></div>)}</article><article><span className="section-kicker">07 / 检索路径与判定</span><h2>调查状态与限制说明</h2>{stream.degradations.map((item, index) => <p className="degradation" key={`${index}-${item}`}>{item}</p>)}{stream.decisions.map((item, index) => <p className="decision" key={`${index}-${item}`}>{item}</p>)}{stream.errors.map((item, index) => <p className="error" key={`${index}-${item}`}>{item}</p>)}</article></section>
+        <section className="evidence-ledger"><article><span className="section-kicker">06 / 证据台账</span><h2>{stream.evidence.length} 条公开材料</h2>{stream.evidence.map((item) => <div className="evidence-row" id={`evidence-${item.id}`} key={item.id}><span className="mono">{item.id}</span><div><strong>{item.title}</strong><small>{item.source} · L{item.tier}</small></div></div>)}</article><article><span className="section-kicker">07 / 检索路径与判定</span><h2>调查状态与限制说明</h2>{stream.degradations.map((item, index) => <p className="degradation" key={`${index}-${item}`}>{item}</p>)}{stream.decisions.map((item, index) => <p className="decision" key={`${index}-${item}`}>{item}</p>)}{stream.errors.map((item, index) => <p className="error" key={`${index}-${item}`}>{item}</p>)}</article></section>
       </>}
     </main><footer><img className="footer-brand" src={brandSymbol} alt="" width="28" height="28" />溯衡 · 舆情调查与研判　｜　结论可回查来源，评论仅代表已采集样本</footer><BackToTop />
   </>

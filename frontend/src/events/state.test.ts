@@ -6,6 +6,20 @@ function event(seq: number, name: string, data: Record<string, unknown>): TaskEv
 }
 
 describe('SSE public state seam', () => {
+  it('replays skill transitions by invocation without corrupting task phases or duplicating calls', () => {
+    const skill = { invocation_id: 's1', agent: 'fact_investigator', skill_id: 'fact-chain-reconstruction', label: '事实链', status: 'running' }
+    let state = applyEvent(initialStreamState, event(1, 'agent.status', { agent: 'fact_investigator', phase: 'searching' }))
+    state = applyEvent(state, event(2, 'agent.status', { kind: 'skill', skill }))
+    expect(state.agents.fact_investigator).toBe('searching')
+    expect(state.skills).toHaveLength(1)
+    const saved = event(3, 'agent.status', { kind: 'skill', skill: { ...skill, status: 'stage_saved', evidence_refs: ['E001'], claim_refs: ['C001'] } })
+    state = applyEvent(state, saved)
+    expect(state.skills).toHaveLength(1)
+    expect(state.skills[0].evidence_refs).toEqual(['E001'])
+    expect(applyEvent(state, saved)).toBe(state)
+    expect(applyEvent(state, event(4, 'agent.status', { kind: 'skill', skill: 'bad' })).skills).toEqual(state.skills)
+    expect(applyEvent(state, { ...event(0, '__reset__', {}) }).skills).toEqual([])
+  })
   it('tracks active and paused time from transitions before the first budget event', () => {
     const running = { ...event(1, 'task.status', { status: 'running', phase: 'forum' }), ts: '2026-09-29T00:00:00Z' }
     let state = applyEvent(initialStreamState, running)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from yuqing.core.llm.gateway import LLMGateway
+from yuqing.core.llm.gateway import LLMGateway, logical_model_call
 
 
 class Translator(Protocol):
@@ -13,6 +13,7 @@ class OpenAITranslator:
     def __init__(self, gateway: LLMGateway):
         self.gateway = gateway
 
+    @logical_model_call("translation")
     async def translate_to_chinese(self, text: str, source_lang: str) -> str:
         result = await self.gateway.complete_json(
             "utility",

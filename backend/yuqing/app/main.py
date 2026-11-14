@@ -23,6 +23,7 @@ from yuqing.agents.comment_analysis import OpenAICommentAgent
 from yuqing.agents.loader import load_definitions
 from yuqing.agents.openai_runtime import OpenAIInvestigationAgent
 from yuqing.agents.reporter import OpenAIReportAgent
+from yuqing.agents.skill_catalog import builtin_catalog
 from yuqing.core.comments import adapter_for_url
 from yuqing.core.events import EventBus
 from yuqing.core.fetch import BuiltinFetchProvider, FetchChain, FirecrawlCloudProvider
@@ -44,6 +45,7 @@ from yuqing.render.ir_migrations import (
     UnsupportedReportVersion,
     migrate_report,
 )
+from yuqing.services.agent_skills import AgentSkillRuntime
 from yuqing.services.auth import (
     SESSION_COOKIE_NAME,
     AuthSettings,
@@ -275,6 +277,9 @@ def _build_default_orchestrator(runtime_dir: Path) -> OrchestratorFactory:
         budgets = resolve_budget_table(parse_budget_overrides(environ.get("BUDGET_OVERRIDES")))
         llm_factory = LLMClientFactory(environ)
         gateway = LLMGateway(llm_factory)
+        skills = AgentSkillRuntime(gateway, builtin_catalog(), events)
+        gateway.request_adapter = skills
+        gateway.agent_activity = skills
         order = [name for name in DEFAULT_SEARCH_PROVIDER_ORDER if name in provider_types]
         providers = []
         for name in order:
@@ -932,6 +937,10 @@ def create_app(
     async def read_config(request: Request) -> dict[str, Any]:
         database, _ = services(request)
         return await ConfigService(database).public()
+
+    @app.get("/api/agents")
+    async def read_agent_skills() -> dict[str, Any]:
+        return builtin_catalog().public()
 
     @app.put("/api/config")
     async def update_config(payload: dict[str, Any], request: Request):

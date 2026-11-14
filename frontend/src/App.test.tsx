@@ -3,6 +3,7 @@ import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { agentCatalogFixture } from './testFixtures/agentCatalog'
 
 type Listener = (event: MessageEvent<string>) => void
 
@@ -35,6 +36,7 @@ function json(body: unknown, status = 200) {
 
 function baseFetch(input: RequestInfo | URL, init?: RequestInit) {
   const path = String(input)
+  if (path === '/api/agents') return Promise.resolve(json(agentCatalogFixture))
   if (path === '/api/config') return Promise.resolve(json({ llm: { default: { api_key: null, base_url: '', model: '' }, roles: {} }, search: { provider_order: ['yuanbao', 'qianfan', 'bocha', 'exa', 'tavily', 'serper'], keys: { yuanbao: 'la-***key', qianfan: 'qi-***key', bocha: 'bo-***key', exa: 'ex-***key', tavily: 'ta-***key', serper: 'se-***key' }, quota: { exa: { state: 'metered_without_fixed_limit', upstream_quota_verified: false, windows: [{ period: 'month', period_key: 'month:2026-09', unit: 'milli_usd', used: 20024, normal_limit: null, critical_limit: null, normal_remaining: null, critical_remaining: null }] }, qianfan: { state: 'normal_limit_reached', upstream_quota_verified: false, windows: [{ period: 'day', period_key: 'day:2026-09-22', unit: 'calls', used: 40, normal_limit: 40, critical_limit: 50, normal_remaining: 0, critical_remaining: 10 }] } } }, fetch: { provider_order: ['builtin', 'firecrawl'], keys: { firecrawl: 'fc-***key' } }, comments: { enabled: false }, budget: { overrides: {}, effective: {}, defaults: {}, fields: [], depths: [], source: 'default' } }))
   if (path === '/api/comment-plugin/status') return Promise.resolve(json({ enabled: false, available: false, demo_mode: false, container: false, platforms: [], risk_notice: '' }))
   if (path.startsWith('/api/tasks?')) return Promise.resolve(json({ items: [] }))
@@ -69,10 +71,10 @@ describe('V2 task desk', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === '/api/config' ? Promise.resolve(json(config)) : baseFetch(input, init)))
     const { container } = render(<App />)
     fireEvent.click(await screen.findByRole('button', { name: '系统配置 ↗' }))
-    await screen.findByLabelText('评论洞察 接口协议')
+    await screen.findByLabelText('评论洞察 Agent 接口协议')
     const cards = container.querySelectorAll('.role-config-grid article')
     expect(cards).toHaveLength(8)
-    expect([...cards].map(card => card.querySelector('strong')?.textContent)).toEqual(['事实调查', '媒体传播', '历史洞察', '评论洞察', '协作主持', '证据核验', '报告撰写', '通用辅助'])
+    expect([...cards].map(card => card.querySelector('strong')?.textContent)).toEqual(['事实调查 Agent', '媒体传播 Agent', '历史洞察 Agent', '评论洞察 Agent', '协作主持 Agent', '证据核验 Agent', '报告综合 Agent', '任务准备 Agent'])
     cards.forEach(card => expect(card.querySelector('.role-description')?.textContent).toBeTruthy())
   })
 
@@ -103,6 +105,17 @@ describe('V2 task desk', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+  })
+
+  it('keeps exactly one eight-Agent roster when a running task finishes', async () => {
+    history.replaceState(null, '', '/?task=t1')
+    render(<App />)
+    await screen.findByRole('heading', { name: '事实调查 Agent' })
+    const source = FakeEventSource.instances.at(-1)!
+    await act(async () => source.emit('task.status', { status: 'running', phase: 'reporting' }, 1))
+    await act(async () => source.emit('task.status', { status: 'done', phase: 'finished' }, 2))
+    expect(screen.getAllByRole('region', { name: 'Agent 技能与执行记录' })).toHaveLength(1)
+    expect(document.querySelectorAll('.agent-skill-card')).toHaveLength(8)
   })
 
   it('keeps the comment seat hidden when disabled and reveals manual URL input on demand', async () => {
@@ -177,7 +190,7 @@ describe('V2 task desk', () => {
 
     render(<App />)
     fireEvent.click(await screen.findByRole('button', { name: '系统配置 ↗' }))
-    fireEvent.change(await screen.findByLabelText('事实调查 接口协议'), { target: { value: 'anthropic' } })
+    fireEvent.change(await screen.findByLabelText('事实调查 Agent 接口协议'), { target: { value: 'anthropic' } })
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
 
     await waitFor(() => {
@@ -221,7 +234,7 @@ describe('V2 task desk', () => {
     act(() => FakeEventSource.instances[0].emit('task.status', { status: 'paused', phase: 'comment_selection', progress: 68 }))
 
     expect(await screen.findByText(/高价值候选/)).toBeInTheDocument()
-    expect(document.querySelector('[data-agent="comment_insight"]')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '评论洞察 Agent' })).toBeInTheDocument()
     expect(screen.getByText(/需先登录/)).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: '补充帖子 URL' })).not.toBeInTheDocument()
 

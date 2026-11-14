@@ -24,6 +24,13 @@ export type EvidenceItem = {
   tier: number
 }
 
+export type SkillActivity = {
+  invocation_id: string; agent: string; role: string; skill_id: string; label: string
+  version: string; digest: string; stage: string; status: string; reason: string
+  selection_mode: string; outcome: string; claim_refs: string[]; evidence_refs: string[]
+  report_id: string; at: string
+}
+
 export type StreamState = {
   lastSeq: number
   lastEventAt?: string
@@ -33,6 +40,7 @@ export type StreamState = {
   phase: string
   agentPhase: string
   agents: Record<string, string>
+  skills: SkillActivity[]
   evidence: EvidenceItem[]
   forum: ForumItem[]
   hostReviews: HostReview[]
@@ -63,6 +71,7 @@ export const initialStreamState: StreamState = {
   phase: 'planning',
   agentPhase: '等待启动',
   agents: {},
+  skills: [],
   evidence: [],
   forum: [],
   hostReviews: [],
@@ -205,6 +214,23 @@ export function applyEvent(state: StreamState, message: TaskEvent): StreamState 
       total: Math.max(state.verification.total, numberValue(message.data.total)),
     }
   } else if (message.event === 'agent.status') {
+    if (message.data.kind === 'skill') {
+      const raw = message.data.skill
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return next
+      const row = raw as Record<string, unknown>
+      if (!text(row.invocation_id) || !text(row.agent) || !text(row.skill_id)) return next
+      const item: SkillActivity = {
+        invocation_id: text(row.invocation_id), agent: text(row.agent), role: text(row.role),
+        skill_id: text(row.skill_id), label: text(row.label), version: text(row.version),
+        digest: text(row.digest), stage: text(row.stage), status: text(row.status),
+        reason: text(row.reason), selection_mode: text(row.selection_mode), outcome: text(row.outcome),
+        claim_refs: textList(row.claim_refs), evidence_refs: textList(row.evidence_refs),
+        report_id: text(row.report_id), at: message.ts,
+      }
+      const index = state.skills.findIndex((entry) => entry.invocation_id === item.invocation_id)
+      next.skills = index < 0 ? [...state.skills, item] : state.skills.map((entry, i) => i === index ? item : entry)
+      return next
+    }
     next.agentPhase = text(message.data.phase)
     const agent = text(message.data.agent)
     if (agent) next.agents = { ...state.agents, [agent]: text(message.data.phase) }

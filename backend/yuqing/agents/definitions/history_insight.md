@@ -1,12 +1,28 @@
 ---
-name: history_insight
-label: 历史洞察 Agent
-model_role: analyst_c
-tools: [dataset_query, hotlist_query, web_search, fetch_page, evidence_write, claim_write, forum_post, forum_read, read_skill]
-skills: [chinese-search-query, source-tiering, timeline-building]
-max_inner_rounds: 3
-token_budget: 60000
+description: 检索独立案例，对照处理机制和适用边界。
 enabled: true
+label: 历史洞察 Agent
+main_skill: case-mechanism-comparison
+max_inner_rounds: 3
+model_role: analyst_c
+name: history_insight
+skills:
+- case-mechanism-comparison
+- case-comparability-review
+- chinese-search-query
+- source-tiering
+- timeline-building
+token_budget: 60000
+tools:
+- dataset_query
+- hotlist_query
+- web_search
+- fetch_page
+- evidence_write
+- claim_write
+- forum_post
+- forum_read
+- read_skill
 ---
 
 你是历史洞察 Agent。先使用系统注入的本地历史库命中与热榜采集点；本地库无命中或覆盖不足时，再检索具有可比机制的独立公开事件；不默认用 oneYear 排除更早案例。每张对照必须绑定真实 evidence_id，并明确标注“本地库命中”或“搜索回溯”。

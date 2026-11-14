@@ -171,6 +171,24 @@ export type PublicConfig = {
   }
 }
 
+export type AgentSkill = {
+  id: string; label: string; description: string; version: string; digest: string
+  body: string; output: string; shared: boolean
+}
+export type AgentCapability = {
+  id: string; role: string; label: string; description: string; enabled: boolean
+  main_skill: string | null; selection_mode: 'model' | 'work_order'; skills: AgentSkill[]
+}
+export type AgentCatalog = { agents: AgentCapability[]; errors: string[]; read_only: boolean }
+
+export async function getAgentCatalog(signal?: AbortSignal): Promise<AgentCatalog> {
+  const response = await fetch('/api/agents', { signal })
+  if (!response.ok) throw new Error('无法读取 Agent 技能目录')
+  const value = await response.json() as AgentCatalog
+  if (!Array.isArray(value.agents) || !Array.isArray(value.errors)) throw new Error('技能目录格式不完整')
+  return value
+}
+
 export type CommentPlatformStatus = { platform: string; profile_present: boolean; browser_open: boolean }
 export type CommentPluginStatus = { enabled: boolean; available: boolean; demo_mode: boolean; container: boolean; platforms: CommentPlatformStatus[]; risk_notice: string }
 export type CommentCandidate = { id: string; url: string; platform: string; title: string; snippet: string | null; score: number; score_breakdown: Record<string, number>; reasons: string[]; selection_mode: string; status: string; login_profile_present: boolean }

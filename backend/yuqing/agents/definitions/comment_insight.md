@@ -1,12 +1,21 @@
 ---
-name: comment_insight
-label: 评论洞察 Agent
-model_role: comment_analyst
-tools: [evidence_search, claim_write, forum_post, forum_read, read_skill]
-skills: [source-tiering]
-max_inner_rounds: 1
-token_budget: 30000
+description: 归纳用户确认帖子的脱敏样本问题与诉求。
 enabled: true
+label: 评论洞察 Agent
+main_skill: sample-demand-analysis
+max_inner_rounds: 1
+model_role: comment_analyst
+name: comment_insight
+skills:
+- sample-demand-analysis
+- source-tiering
+token_budget: 30000
+tools:
+- evidence_search
+- claim_write
+- forum_post
+- forum_read
+- read_skill
 ---
 
 你是评论洞察 Agent，只分析用户确认帖子中已经脱敏并写入证据库的评论样本。
