@@ -17,7 +17,13 @@ from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.history_cards import unique_history_cards
 from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
+from yuqing.render.ir_migrations import CURRENT_READER_MINOR, CURRENT_SCHEMA_VERSION
 from yuqing.render.validator import prune_citation_backlinks, validate_report
+from yuqing.services.executive_summary import (
+    attach_executive_summary,
+    fact_brief,
+    refresh_summary_release,
+)
 from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
 from yuqing.services.history_comparison import independent_case_evidence
@@ -75,7 +81,17 @@ class FullReportBuilder:
         task = await self.database.get_task(task_id)
         if task and task.investigation_scope in PROTECTED_SCOPES:
             await self._retain_reviewed_blocks(candidate, task)
-        return self.retain_comment_increment(core, candidate) or core
+        result = self.retain_comment_increment(core, candidate) or core
+        if any(
+            b.get("type") == "executive_summary" and b.get("summary_mode") for b in result["blocks"]
+        ):
+            await attach_executive_summary(
+                result,
+                self.reporter,
+                scope_reviewer=self.scope_reviewer,
+                scope_required=bool(task and task.investigation_scope in PROTECTED_SCOPES),
+            )
+        return validate_report(result).report
 
     @staticmethod
     def retain_comment_increment(core, candidate):
@@ -124,12 +140,19 @@ class FullReportBuilder:
             len(report["blocks"]),
         )
         report["blocks"].insert(index, copy.deepcopy(module))
-        report.update(schema_version="0.9", min_reader_minor=9)
+        report.update(schema_version=CURRENT_SCHEMA_VERSION, min_reader_minor=CURRENT_READER_MINOR)
         report.setdefault("quality", {})["comment_increment"] = {
             "core_preserved": True,
             "reviewed_observations": len(module.get("observations", [])),
         }
         FullReportBuilder._reconcile_reviewed_comment_themes(report)
+        for summary in report["blocks"]:
+            if (
+                summary.get("type") == "executive_summary"
+                and summary.get("summary_mode") == "narrative"
+            ):
+                fact_brief(summary, reason="report_updated")
+                refresh_summary_release(report)
         prune_citation_backlinks(report)
         return validate_report(report).report
 
@@ -1886,15 +1909,6 @@ class FullReportBuilder:
                 f"优先调查时间窗口：{task.time_range_from or '未指定起点'} 至 {task.time_range_to or '未指定终点'}；必要的本事件前史、后续进展与独立对照另行标注。"
                 if has_explicit_window
                 else "未指定调查时间范围；按证据核验结果呈现本事件经过及独立历史对照。"
-            )
-            + (
-                "已通过完整专报发布门；分析判断与已核验事实分开呈现，仍需关注各条不确定性。"
-                if release.label == "full_report"
-                else (
-                    "当前仅输出检索诊断，没有足够的本事件证据与可核验关键陈述。"
-                    if release.label == "retrieval_diagnostic"
-                    else "已形成有依据的分析条目，但当前仍是证据简报；事实链、传播关系或行动依据尚不完整。"
-                )
             ),
         }
         if not quality["sourced_measurements"]:
@@ -1966,6 +1980,14 @@ class FullReportBuilder:
                             for m in b["items"]
                             if item["evidence_ref"] in m["evidence_refs"]
                         ]
+        await attach_executive_summary(
+            report,
+            None if diagnostic_only else self.reporter,
+            scope_reviewer=self.scope_reviewer
+            if task.investigation_scope in PROTECTED_SCOPES
+            else None,
+            scope_required=task.investigation_scope in PROTECTED_SCOPES,
+        )
         await refresh_report_runtime(self.database, report)
         prune_citation_backlinks(report)
         validated = validate_report(report).report

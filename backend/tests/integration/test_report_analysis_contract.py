@@ -131,7 +131,7 @@ async def analytical_report(runtime_dir, claim_limits):
 @pytest.mark.asyncio
 async def test_full_report_has_grounded_analysis_and_compact_audit(analytical_report):
     report, rendered = analytical_report
-    assert report["schema_version"] == "0.9"
+    assert report["schema_version"] == "0.10"
     assert report["quality"]["status"] == "analysis_available"
     assert report["quality"]["sourced_measurements"] == 1
     assert report["quality"]["rejected_items"]["analysis_reference"] == 1
@@ -142,8 +142,9 @@ async def test_full_report_has_grounded_analysis_and_compact_audit(analytical_re
     assert rendered.count("有限采样") == 1
     assert 'class="audit-module"' in rendered
     assert 'class="analysis-basis"' in rendered
-    assert "优先决策事项（分析判断）" in rendered
-    assert 'href="#b_07_analysis"' in rendered
+    assert "以下为事实提要" in rendered
+    assert "优先决策事项（分析判断）" not in rendered
+    assert 'id="b_07_analysis"' in rendered
     assert validate_report(report).errors == []
 
 
@@ -235,6 +236,6 @@ def test_v04_migration_preserves_authority_and_is_idempotent():
     }
     migrated = migrate_report(original)
     assert migrated["blocks"] == original["blocks"]
-    assert migrated["schema_version"] == "0.9"
+    assert migrated["schema_version"] == "0.10"
     assert migrate_report(migrated) == migrated
     assert original["schema_version"] == "0.4"

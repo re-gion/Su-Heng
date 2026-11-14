@@ -3,8 +3,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = "0.9"
-CURRENT_READER_MINOR = 9
+CURRENT_SCHEMA_VERSION = "0.10"
+CURRENT_READER_MINOR = 10
 
 
 class UnsupportedReportVersion(ValueError):
@@ -18,6 +18,13 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
     version = str(value.get("schema_version") or "")
     if version == CURRENT_SCHEMA_VERSION:
         return value
+    if version == "0.9":
+        value.update(
+            schema_version=CURRENT_SCHEMA_VERSION,
+            min_reader_minor=CURRENT_READER_MINOR,
+            migration_history=[*value.get("migration_history", []), "0.9->0.10"],
+        )
+        return value
     if version not in {"0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8"}:
         raise UnsupportedReportVersion(f"不支持报告 IR {version or 'unknown'}")
     history = list(value.get("migration_history") or [])
@@ -25,7 +32,7 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
         value.update(
             schema_version=CURRENT_SCHEMA_VERSION,
             min_reader_minor=CURRENT_READER_MINOR,
-            migration_history=[*history, "0.8->0.9"],
+            migration_history=[*history, "0.8->0.9", "0.9->0.10"],
         )
         return value
     if version == "0.1":
@@ -57,6 +64,7 @@ def migrate_report(report: dict[str, Any]) -> dict[str, Any]:
         history.append("0.6->0.7")
     history.append("0.7->0.8")
     history.append("0.8->0.9")
+    history.append("0.9->0.10")
     quality = value.setdefault("quality", {})
     quality.setdefault("chapter_status", {})
     quality.setdefault("scope_review", {"status": "unknown", "message": "旧报告未记录逐项范围审查"})

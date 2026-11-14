@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from yuqing.core.executive_summary import narrative_errors
 from yuqing.core.measurements import measurement_values
 from yuqing.render.ir_migrations import CURRENT_READER_MINOR
 
@@ -244,6 +245,15 @@ def validate_report(report: dict[str, Any]) -> ValidationResult:
                 ):
                     errors.append("R8: 历史候选材料排除说明缺少有效依据")
         if block.get("type") == "executive_summary":
+            mode = block.get("summary_mode")
+            if mode not in {None, "narrative", "fact_brief"}:
+                errors.append("R25: 无效的摘要模式")
+            if mode is not None and value.get("min_reader_minor", 0) < 10:
+                errors.append("R25: 新摘要契约要求 reader 10")
+            if mode == "narrative":
+                errors.extend(f"R25: {reason}" for reason in narrative_errors(block, value))
+            elif block.get("paragraphs") or block.get("narrative_review"):
+                errors.append("R25: 未完成审查的叙述摘要不得随事实提要发布")
             for key in ("what", "why", "so_what"):
                 for item in block.get(key, []):
                     if item.get("is_editorial"):

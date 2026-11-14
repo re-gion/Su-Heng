@@ -335,6 +335,8 @@ class BriefReportBuilder:
                     "section": "01",
                     "in_brief": True,
                     "is_editorial": False,
+                    "summary_mode": "fact_brief",
+                    "fallback_notice": "尚未形成通过内容审查的综合摘要，以下为事实提要。",
                     "lede": "本报告围绕机构公开回应与处理检索公开材料并逐条核验。"
                     if task.investigation_scope == "institution"
                     else f"本报告围绕“{event_title}”检索公开材料并逐条核验。",

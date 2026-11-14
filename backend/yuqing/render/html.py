@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
 
+from yuqing.core.executive_summary import narrative_errors, summary_context
 from yuqing.core.history_cards import unique_history_cards
 from yuqing.core.verification_presentation import (
     LABELS,
@@ -118,6 +119,41 @@ def _summary(
     analysis_targets: dict[str, str] | None = None,
 ) -> str:
     analysis_targets = analysis_targets or {}
+    if block.get("summary_mode") == "narrative":
+        paragraphs = []
+        for paragraph in block["paragraphs"]:
+            sentences = []
+            for sentence in paragraph["sentences"]:
+                refs = "".join(_claim_link(r) for r in sentence["claim_refs"])
+                refs += "".join(
+                    f'<a class="claim-link" href="#{_escape(analysis_targets[r])}" aria-label="查看摘要研判依据">[研判]</a>'
+                    for r in sentence["analysis_refs"]
+                )
+                refs += "".join(
+                    f'<a class="claim-link" href="#limitation-{_escape(r)}" aria-label="查看局限性 {_escape(r)}">[局限]</a>'
+                    for r in sentence["limitation_refs"]
+                )
+                sentences.append(
+                    f'<span class="summary-sentence" data-kind="{_escape(sentence["kind"])}">'
+                    f'{_escape(sentence["text"])}<sup class="summary-citations">{refs}</sup></span>'
+                )
+            paragraphs.append(f"<p>{''.join(sentences)}</p>")
+        return (
+            '<section id="summary" class="summary-narrative"><h2>执行摘要</h2>'
+            + "".join(paragraphs)
+            + "</section>"
+        )
+    if block.get("summary_mode") == "fact_brief":
+        items = "".join(
+            f"<li>{_escape(item.get('text'))}{_claim_link(item['claim_ref'])}</li>"
+            for item in block.get("what", [])
+            if item.get("claim_ref")
+        )
+        return (
+            '<section id="summary" class="summary-fact-brief"><h2>执行摘要</h2>'
+            f'<p class="fallback-note">{_escape(block.get("fallback_notice"))}</p>'
+            f"<h3>事实提要</h3><ul>{items}</ul></section>"
+        )
     groups = []
     for key, title in (
         ("what", "关键进展及其核验状态"),
@@ -293,7 +329,7 @@ def _fact_table(block: dict[str, Any]) -> str:
 def _limitations(block: dict[str, Any]) -> str:
     current, process = [], []
     for item in block.get("items", []):
-        line = f"<li><strong>{_escape(item.get('category'))}</strong>：{_escape(item.get('text'))}</li>"
+        line = f'<li id="limitation-{_escape(item.get("id"))}"><strong>{_escape(item.get("category"))}</strong>：{_escape(item.get("text"))}</li>'
         (process if item.get("category") == "协作编排" else current).append(line)
     history = (
         '<details class="process-limitations"><summary>调查过程记录与阶段缺口</summary>'
@@ -627,7 +663,7 @@ def _generic_block(block: dict[str, Any]) -> str:
     block_type = block.get("type")
     title = _escape(block.get("title") or "数据板块")
     if block_type == "text":
-        return f'<section id="{_escape(block.get("block_id"))}"><h2>{title}</h2><p>{_escape(block.get("text") or block.get("fallback_text"))}</p></section>'
+        return f'<section id="{_escape(block.get("block_id"))}"><h2>{title}</h2><p>{_escape(block.get("text") or block.get("fallback_text"))}{_escape(block.get("release_note"))}</p></section>'
     if block_type == "kpi_grid":
         items = "".join(
             f'<div class="kpi kpi-{_escape(item.get("tone") or "neutral")}">'
@@ -1177,6 +1213,11 @@ def _block_heading(block: dict[str, Any]) -> str:
 
 
 def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "brief") -> str:
+    basis = summary_context(report)
+    for block in report.get("blocks", []):
+        if block.get("type") == "executive_summary" and block.get("summary_mode") == "narrative":
+            if narrative_errors(block, report):
+                raise ValueError("叙述摘要内容或依据发生变化，需重新生成并审查")
     report = enrich_report_sources(report)
     blocks = report.get("blocks", [])
     header = next((block for block in blocks if block.get("type") == "report_header"), {})
@@ -1195,11 +1236,12 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
         for item in block.get("items", [])
         if item.get("title")
     }
+    analysis_targets.update({ref: item["target"] for ref, item in basis["analyses"].items()})
     for block in blocks:
         if block.get("type") == "report_header":
             continue
         rendered = _render_block(block, claim_badges, analysis_targets)
-        if block.get("type") == "executive_summary":
+        if block.get("type") == "executive_summary" and not block.get("summary_mode"):
             decisions = [
                 (analysis.get("block_id"), item.get("title"))
                 for analysis in blocks
@@ -1459,6 +1501,11 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
     .badge.partially_supported,.badge.insufficient_evidence,.badge.verification_incomplete,.badge.source_conflict{background:#fff1cb;color:#856018}
     .source-boundary{font-size:13px;color:var(--muted);margin:8px 0 0;line-height:1.6}
     .verification-legend{padding:10px 14px;border-left:3px solid #315bd7;background:#eef3fd;color:#314a70;font-size:13px}
+    .summary-narrative>p{font-size:17px;line-height:2;text-align:justify;margin:0 0 1.15em;orphans:3;widows:3}
+    .summary-citations{font-size:11px;line-height:0;vertical-align:super}.summary-citations .claim-link{margin-left:3px;text-decoration:none}
+    .summary-citations .claim-link:hover{text-decoration:underline}.summary-citations .claim-link:focus-visible{outline:2px solid #315bd7;outline-offset:2px}
+    @media(max-width:600px){.summary-narrative>p{font-size:16px;line-height:1.9;text-align:left}}
+    @media print{.summary-narrative>p{font-size:11pt;line-height:1.85}.summary-citations{font-size:8pt}}
     .report-section{overflow-wrap:anywhere}.report-section blockquote{margin-left:16px;margin-right:16px}
     @media(max-width:720px){.evidence-card>summary{grid-template-columns:minmax(0,1fr)}}
     @media(max-width:600px){body>header,.report-quality{width:calc(100% - 28px)}.report-quality{margin:12px auto;padding:14px;font-size:13px}}

@@ -1,0 +1,170 @@
+{
+  "report": {
+    "schema_version": "0.10",
+    "min_reader_minor": 10,
+    "task": {
+      "task_id": "summary-test",
+      "event_query": "诉求受理事件",
+      "investigation_scope": "general"
+    },
+    "metrics": {
+      "key_claims_candidate": 1,
+      "key_claims_rendered": 1,
+      "key_claims_rejected": 0
+    },
+    "quality": {
+      "semantic_review": {
+        "status": "complete"
+      },
+      "analysis_items": 1,
+      "release_label": "evidence_brief",
+      "release_gate_missing": [
+        "media_propagation",
+        "executive_summary"
+      ]
+    },
+    "blocks": [
+      {
+        "block_id": "header",
+        "type": "report_header",
+        "section": "00",
+        "event_title": "诉求受理事件"
+      },
+      {
+        "block_id": "summary",
+        "type": "executive_summary",
+        "section": "01",
+        "in_brief": true,
+        "summary_mode": "fact_brief",
+        "what": [
+          {
+            "claim_ref": "C001",
+            "text": "校方通报已收到120条诉求，并交由工作组核查。"
+          }
+        ],
+        "why": [],
+        "so_what": []
+      },
+      {
+        "block_id": "facts",
+        "type": "fact_check_table",
+        "section": "03",
+        "in_brief": true,
+        "items": [
+          {
+            "claim_ref": "C001",
+            "text": "校方通报已收到120条诉求，并交由工作组核查。",
+            "badge": "unverified",
+            "verification_state": "complete",
+            "origin_agent": "fact_investigator",
+            "citations": [
+              {
+                "evidence_ref": "E001",
+                "quote_type": "snippet",
+                "quote": "校方通报已收到120条诉求，并交由工作组核查。",
+                "relation": "support",
+                "fetch_status": "fetched",
+                "source_role": "party"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "block_id": "analysis",
+        "type": "analysis",
+        "section": "05",
+        "in_brief": false,
+        "is_editorial": true,
+        "editorial_basis": "依据公开受理通报",
+        "title": "受理与结果的区别",
+        "items": [
+          {
+            "title": "受理记录不能证明处置完成",
+            "observation": "校方通报已收到120条诉求，并交由工作组核查。",
+            "interpretation": "受理与处理结果属于不同环节，通报仅能说明进入核查。",
+            "implication": "应继续关注核查结果的公开。",
+            "uncertainty": "没有材料证明所有诉求均已解决。",
+            "claim_refs": [
+              "C001"
+            ],
+            "evidence_refs": [
+              "E001"
+            ]
+          }
+        ]
+      },
+      {
+        "block_id": "limits",
+        "type": "limitations",
+        "section": "08",
+        "in_brief": true,
+        "items": [
+          {
+            "id": "L01",
+            "category": "材料范围",
+            "text": "本轮仅取得校方通报，尚不足以判断全部处理结果。"
+          }
+        ]
+      },
+      {
+        "block_id": "appendix",
+        "type": "evidence_appendix",
+        "section": "09",
+        "in_brief": false,
+        "items": [
+          {
+            "evidence_ref": "E001",
+            "title": "受理通报",
+            "source_name": "校方",
+            "url": "https://example.edu/notice",
+            "source_tier": 2,
+            "fetch_status": "fetched",
+            "source_role": "party"
+          }
+        ]
+      }
+    ]
+  },
+  "paragraphs": [
+    {
+      "sentences": [
+        {
+          "text": "校方通报称，已收到120条诉求，相关事项已交工作组核查。",
+          "kind": "fact",
+          "claim_refs": [
+            "C001"
+          ],
+          "analysis_refs": [],
+          "limitation_refs": []
+        }
+      ]
+    },
+    {
+      "sentences": [
+        {
+          "text": "据此，本报告认为需要区分受理与处理结果，现有受理记录不能说明处置已经完成。",
+          "kind": "analysis",
+          "claim_refs": [],
+          "analysis_refs": [
+            "analysis:0"
+          ],
+          "limitation_refs": []
+        }
+      ]
+    },
+    {
+      "sentences": [
+        {
+          "text": "本轮材料主要来自校方通报，尚不足以判断全部处理结果。",
+          "kind": "limitation",
+          "claim_refs": [],
+          "analysis_refs": [],
+          "limitation_refs": [
+            "L01"
+          ]
+        }
+      ]
+    }
+  ]
+}
