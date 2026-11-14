@@ -40,6 +40,7 @@ _GENERIC_EVENT_TERMS = (
     "后续",
     "发布",
     "处理",
+    "处置",
     "问题",
 )
 _INSTITUTION_PATTERN = re.compile(
@@ -241,7 +242,8 @@ def is_domestic_url(url: str) -> bool:
 def _subject_anchors(
     event_query: str, aliases: Sequence[str], *, fallback_to_query: bool = False
 ) -> tuple[str, ...]:
-    values = [item.group(0) for item in _INSTITUTION_PATTERN.finditer(event_query)]
+    subject_query = _without_query_dates(event_query)
+    values = [item.group(0) for item in _INSTITUTION_PATTERN.finditer(subject_query)]
     values.extend(item.group(0) for item in _ENGLISH_INSTITUTION_PATTERN.finditer(event_query))
     for value in tuple(values):
         if value.endswith("大学") and len(value) >= 4:
@@ -258,6 +260,19 @@ def _subject_anchors(
     return tuple(dict.fromkeys(item.casefold() for item in values if len(item.strip()) >= 2))
 
 
+def _without_query_dates(event_query: str) -> str:
+    return re.sub(r"(?<!\d)(?:19|20)\d{2}年(?:\d{1,2}月(?:\d{1,2}日)?)?", " ", event_query)
+
+
+def _event_context_text(event_query: str, subject_anchors: Sequence[str]) -> str:
+    compact = re.sub(r"\s+", "", _without_query_dates(event_query)).casefold()
+    for value in sorted(subject_anchors, key=len, reverse=True):
+        compact = compact.replace(value, "")
+    for value in _GENERIC_EVENT_TERMS:
+        compact = compact.replace(value, "")
+    return compact.strip("的与及和")
+
+
 def _event_context_anchors(event_query: str, subject_anchors: Sequence[str]) -> tuple[str, ...]:
     """Extract small, event-specific anchors after removing subject and boilerplate.
 
@@ -265,11 +280,7 @@ def _event_context_anchors(event_query: str, subject_anchors: Sequence[str]) -> 
     event investigations, not a general Chinese segmenter or a relevance score.
     """
 
-    compact = re.sub(r"\s+", "", event_query).casefold()
-    for value in sorted(subject_anchors, key=len, reverse=True):
-        compact = compact.replace(value, "")
-    for value in _GENERIC_EVENT_TERMS:
-        compact = compact.replace(value, "")
+    compact = _event_context_text(event_query, subject_anchors)
     chunks = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}", compact)
     anchors: list[str] = []
     for chunk in chunks:
@@ -280,6 +291,17 @@ def _event_context_anchors(event_query: str, subject_anchors: Sequence[str]) -> 
             # Two-character fragments from longer concepts are too ambiguous:
             # 图书 in 图书馆 also matches unrelated 图书资料 pages.
     return tuple(dict.fromkeys(item for item in anchors if len(item) >= 2))
+
+
+def _event_context_matches(event_query: str, subjects: Sequence[str], text: str) -> bool:
+    if any(anchor in text for anchor in _event_context_anchors(event_query, subjects)):
+        return True
+    # Compact four/six/eight-character concepts can be separated in source prose,
+    # e.g. 食堂...异物. Require every non-overlapping pair, never a single generic word.
+    for chunk in re.findall(r"[\u4e00-\u9fff]{4,8}", _event_context_text(event_query, subjects)):
+        if len(chunk) % 2 == 0 and all(chunk[i : i + 2] in text for i in range(0, len(chunk), 2)):
+            return True
+    return False
 
 
 def _history_relevant(text: str, search_query: str | None) -> bool:
@@ -362,6 +384,7 @@ class InvestigationScope:
         reasons: list[str] = []
 
         anchors = _subject_anchors(self.event_query, self.subject_aliases)
+        subject_anchors = anchors
         normalized_text = text.casefold()
         if agent == "history_insight":
             history_text = f"{normalized_text} {body_lead.casefold()}"
@@ -370,7 +393,7 @@ class InvestigationScope:
                 anchors
                 and any(anchor in history_text for anchor in anchors)
                 and event_anchors
-                and any(anchor in history_text for anchor in event_anchors)
+                and _event_context_matches(self.event_query, anchors, history_text)
             ):
                 return ScopeDecision(
                     accepted=False,
@@ -423,9 +446,8 @@ class InvestigationScope:
             and anchors
             and event_anchors
             and query_language == detected
-            and not any(
-                anchor in normalized_text or anchor in body_lead.casefold()
-                for anchor in event_anchors
+            and not _event_context_matches(
+                self.event_query, anchors, f"{normalized_text} {body_lead.casefold()}"
             )
         ):
             return ScopeDecision(

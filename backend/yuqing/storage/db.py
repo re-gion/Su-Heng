@@ -156,10 +156,19 @@ class Database:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS ix_task_owner_created ON task(owner_user_id,created_at DESC)"
         )
-        connection.execute("DROP INDEX IF EXISTS ux_evidence_task_url")
-        connection.execute(
-            "CREATE UNIQUE INDEX ux_evidence_task_url ON evidence(task_id,url_hash,kind)"
-        )
+        connection.commit()
+        # Serialize the legacy index check and replacement across independent connections.
+        # Current databases must not drop a live uniqueness constraint on every startup.
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            indexed_columns = tuple(
+                row[2] for row in connection.execute("PRAGMA index_info(ux_evidence_task_url)")
+            )
+            if indexed_columns != ("task_id", "url_hash", "kind"):
+                connection.execute("DROP INDEX IF EXISTS ux_evidence_task_url")
+                connection.execute(
+                    "CREATE UNIQUE INDEX ux_evidence_task_url ON evidence(task_id,url_hash,kind)"
+                )
         hot_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(hot_snapshot)").fetchall()
         }

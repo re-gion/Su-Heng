@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from yuqing.services.institution_scope import InstitutionScopeReviewer, only_anonymous_roles_changed
+from yuqing.services.institution_scope import (
+    SCOPE_REVIEW_REVISION,
+    InstitutionScopeReviewer,
+    only_anonymous_roles_changed,
+)
 
 
 @pytest.mark.asyncio
@@ -16,7 +20,10 @@ async def test_exact_reviewed_comment_is_reusable_but_cannot_override_report_rej
 
     def key(kind):
         return hashlib.sha256(
-            json.dumps(["public-event-v1", "public_event", kind, text], ensure_ascii=False).encode()
+            json.dumps(
+                ["public-event-v1", SCOPE_REVIEW_REVISION, "public_event", kind, text],
+                ensure_ascii=False,
+            ).encode()
         ).hexdigest()
 
     cache = {key("comment"): {"status": "accepted", "reason": "scope_passed", "text": text}}
@@ -243,6 +250,82 @@ async def test_cached_role_only_change_is_reused_without_model_call():
     decision = (await reviewer.review(["涉事男生收到处分。"], kind="report_text"))[0]
     assert decision.text == "涉事男生收到处分。"
     assert decision.allowed and decision.reason == "anonymous_roles_preserved"
+
+
+@pytest.mark.asyncio
+async def test_indefinite_anonymous_student_is_not_redacted_again():
+    original = "2023年6月1日，某职业技术学院一名学生上传食堂异物视频。"
+    reviewer = InstitutionScopeReviewer(
+        Gateway(
+            [
+                {
+                    "items": [
+                        {
+                            "id": 0,
+                            "allowed": True,
+                            "redactions": [{"text": "一名学生", "replacement": "涉事学生"}],
+                        }
+                    ]
+                }
+            ]
+        )
+    )
+    decision = (await reviewer.review([original], kind="report_text", scope="public_event"))[0]
+    assert decision.allowed and decision.text == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("span", ["某职业技术学院一名学生", "2023年6月1日，张某"])
+async def test_person_redaction_cannot_remove_institution_or_date(span):
+    original = f"{span}发布公开消息。"
+    reviewer = InstitutionScopeReviewer(
+        Gateway(
+            [
+                {
+                    "items": [
+                        {
+                            "id": 0,
+                            "allowed": True,
+                            "redactions": [{"text": span, "replacement": "涉事学生"}],
+                        }
+                    ]
+                }
+            ]
+        )
+    )
+    decision = (await reviewer.review([original], kind="report_text", scope="public_event"))[0]
+    assert not decision.allowed
+    assert decision.status == "incomplete" and decision.text == original
+
+
+@pytest.mark.asyncio
+async def test_old_redaction_approval_is_not_reused_after_guard_revision():
+    original = "某职业技术学院一名学生上传食堂异物视频。"
+    old_key = hashlib.sha256(
+        json.dumps(
+            ["public-event-v1", "public_event", "report_text", original], ensure_ascii=False
+        ).encode()
+    ).hexdigest()
+
+    class Database:
+        async def get_scope_review(self, _task, key):
+            if key == old_key:
+                return {
+                    "status": "accepted",
+                    "reason": "privacy_redacted",
+                    "text": "涉事学生上传食堂异物视频。",
+                }
+            return None
+
+        async def save_scope_review(self, *_args):
+            pass
+
+    gateway = Gateway([{"items": [{"id": 0, "allowed": True}]}])
+    reviewer = InstitutionScopeReviewer(gateway)
+    reviewer.bind(Database(), "task", "public_event")
+    decision = (await reviewer.review([original], kind="report_text"))[0]
+    assert decision.allowed and decision.text == original
+    assert gateway.responses == []
 
 
 @pytest.mark.asyncio

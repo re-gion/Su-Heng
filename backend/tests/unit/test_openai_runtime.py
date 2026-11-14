@@ -21,6 +21,204 @@ class StaticGateway:
 
 
 @pytest.mark.asyncio
+async def test_history_repairs_paraphrased_background_selections_before_saving():
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                return {
+                    "backgrounds": [
+                        {
+                            "id": 0,
+                            "subject": "另一高校",
+                            "event": "食堂异物事件",
+                            "progress": "已将样品送检",
+                        }
+                    ]
+                }
+            return {
+                "claims": [
+                    {
+                        "text": "另一高校通报食堂异物事件，已将样品送检。",
+                        "evidence_ids": ["E001"],
+                        "analysis_data": {
+                            "historical_case": {
+                                "name": "另一高校食堂异物事件",
+                                "institution": "另一高校",
+                                "independent": True,
+                                "case_type": "analogous",
+                                "similarity": "均有样品检测",
+                                "difference": "检测主体不同",
+                                "background": {
+                                    "subject": "另一高校",
+                                    "event": "食堂异物事件",
+                                    "progress": "已将样品送检"
+                                    if self.calls > 1
+                                    else "把样品送交检测机构",
+                                },
+                            }
+                        },
+                    }
+                ]
+            }
+
+    gateway = Gateway()
+    source = _evidence(1)
+    source.title = "另一高校食堂公告"
+    claims = await OpenAIInvestigationAgent(gateway, "历史角色", role="analyst_c").summarize(
+        "当前事件", [source]
+    )
+    assert gateway.calls == 2
+    assert len(claims) == 1
+    assert claims[0].analysis_data["historical_case"]["background"]["progress"] == "已将样品送检"
+
+
+@pytest.mark.asyncio
+async def test_invalid_optional_history_background_does_not_discard_supported_fact():
+    text = "另一高校通报食堂异物事件，已将样品送检。"
+
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                return {
+                    "backgrounds": [
+                        {"id": 0, "subject": "另一高校", "event": "虚构事件", "progress": "送检"}
+                    ]
+                }
+            return {
+                "claims": [
+                    {
+                        "text": text,
+                        "evidence_ids": ["E001"],
+                        "analysis_data": {
+                            "historical_case": {
+                                "name": "另一高校食堂异物事件",
+                                "institution": "另一高校",
+                                "independent": True,
+                                "case_type": "analogous",
+                                "similarity": "均有检测",
+                                "difference": "检测主体不同",
+                                "background": {
+                                    "subject": "另一高校",
+                                    "event": "食堂异物事件",
+                                    "progress": "将样品送交机构进行检测",
+                                },
+                            }
+                        },
+                    }
+                ]
+            }
+
+    source = _evidence(1)
+    source.title = "另一高校公告"
+    gateway = Gateway()
+    claims = await OpenAIInvestigationAgent(gateway, "历史角色", role="analyst_c").summarize(
+        "当前事件", [source]
+    )
+    assert len(claims) == 1 and claims[0].text == text
+    background = claims[0].analysis_data["historical_case"]["background"]
+    assert background == {"subject": "另一高校", "event": "食堂异物事件", "progress": "送检"}
+
+
+@pytest.mark.asyncio
+async def test_history_case_identity_preserves_source_language_before_saving():
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, *_args, **_kwargs):
+            self.calls += 1
+            return {
+                "claims": [
+                    {
+                        "text": "报道记载另一高校食堂发现异物后启动调查。",
+                        "evidence_ids": ["E001"],
+                        "analysis_data": {
+                            "historical_case": {
+                                "name": "另一高校食堂异物事件",
+                                "independent": True,
+                                "institution": "Example University"
+                                if self.calls > 1
+                                else "另一高校",
+                                "case_type": "analogous",
+                                "similarity": "均启动调查",
+                                "difference": "调查层级不同",
+                                "background": {
+                                    "subject": "另一高校",
+                                    "event": "食堂发现异物",
+                                    "progress": "启动调查",
+                                },
+                            }
+                        },
+                    }
+                ]
+            }
+
+    source = _evidence(1, lang="en")
+    source.title = "Example University investigates foreign object in canteen food"
+    gateway = Gateway()
+    claims = await OpenAIInvestigationAgent(gateway, "历史角色", role="analyst_c").summarize(
+        "当前事件", [source]
+    )
+    assert gateway.calls == 2
+    assert claims[0].analysis_data["historical_case"]["institution"] == "Example University"
+
+
+@pytest.mark.asyncio
+async def test_history_summary_rejects_current_event_claims_without_case_contract():
+    invalid = {"text": "联合调查组通报认定本事件异物为鼠头。", "evidence_ids": ["E001"]}
+    valid = {
+        "text": "另一高校发布公告解除涉事食堂承包合同。",
+        "evidence_ids": ["E002"],
+        "analysis_data": {
+            "historical_case": {
+                "name": "另一高校食堂食品安全事件",
+                "institution": "另一高校",
+                "independent": True,
+                "case_type": "analogous",
+                "similarity": "均由监管部门调查食堂食品安全",
+                "difference": "另一事件直接解除合同，未出现初判被推翻",
+            }
+        },
+    }
+    gateway = StaticGateway({"claims": [invalid, valid]})
+    evidence = [
+        SimpleNamespace(
+            local_id="E001", title="本事件通报", snippet="联合调查组通报认定异物为鼠头。"
+        ),
+        SimpleNamespace(
+            local_id="E002", title="另一高校公告", snippet="另一高校发布公告解除涉事食堂承包合同。"
+        ),
+    ]
+    claims = await OpenAIInvestigationAgent(gateway, "历史角色", role="analyst_c").summarize(
+        "本事件", evidence
+    )
+    assert [claim.text for claim in claims] == [valid["text"]]
+
+
+@pytest.mark.asyncio
+async def test_history_summary_does_not_reaccept_invalid_cached_claims():
+    cached = {
+        "claims": [{"text": "本事件联合调查组通报认定异物为鼠头。", "evidence_ids": ["E001"]}],
+        "evidence_ids": ["E001"],
+    }
+
+    async def load_batch(key):
+        return None if key.startswith("material:") else cached
+
+    gateway = StaticGateway({"claims": []})
+    evidence = [SimpleNamespace(local_id="E001", title="本事件通报", snippet="本事件材料")]
+    claims = await OpenAIInvestigationAgent(gateway, "历史角色", role="analyst_c").summarize(
+        "本事件", evidence, load_batch=load_batch
+    )
+    assert claims == []
+
+
+@pytest.mark.asyncio
 async def test_summarize_drops_claim_with_unsupported_statement_kind():
     gateway = StaticGateway(
         {

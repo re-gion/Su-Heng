@@ -1,5 +1,7 @@
 """Regressions for losing the beginning and middle of an evidence-backed event."""
 
+import pytest
+
 from yuqing.render.html import render_html
 from yuqing.services.report_analysis import event_timeline
 
@@ -13,6 +15,26 @@ def fact(ref, text):
         "verification_state": "complete",
         "citations": [{"evidence_ref": "E001", "relation": "support"}],
     }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "联合调查组通报称涉事学院对2023年6月1日食堂食品安全事件负主体责任。",
+        "校方表示2023年6月1日学生上传了视频。",
+        "关于2023年6月1日事件的调查结果已经公布。",
+        "截至2023年6月17日，材料尚未载明后续问责结果。",
+    ],
+)
+def test_nested_incident_or_observation_date_is_not_undated_statement_date(text):
+    assert event_timeline([fact("C001", text)]) == []
+
+
+def test_explicitly_dated_statement_keeps_its_date_when_recounting_earlier_incident():
+    nodes = event_timeline(
+        [fact("C001", "联合调查组2023年6月17日通报称，学院对6月1日事件负主体责任。")]
+    )
+    assert nodes[0]["date"] == "2023-06-17"
 
 
 def test_initial_publication_survives_two_responses_on_the_same_day():

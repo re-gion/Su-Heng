@@ -15,7 +15,12 @@ from urllib.parse import urlsplit
 
 from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.event_chronology import CHRONOLOGY_NOTE, earlier_event_candidates
-from yuqing.core.history_cards import background_complete, unique_history_cards
+from yuqing.core.history_cards import (
+    background_complete,
+    partition_distinct_history_cards,
+    reconcile_history_completion,
+    unique_history_cards,
+)
 from yuqing.core.timeline_grouping import group_timeline_events
 from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
@@ -30,7 +35,7 @@ from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
 from yuqing.services.history_comparison import independent_case_evidence
 from yuqing.services.institution_scope import PROTECTED_SCOPES, InstitutionScopeReviewer
-from yuqing.services.investigation_scope import ReportReleaseAssessment
+from yuqing.services.investigation_scope import ReportReleaseAssessment, title_matches_subject
 from yuqing.services.report_analysis import (
     assemble_analysis,
     deduplicate_limitations,
@@ -465,6 +470,7 @@ class FullReportBuilder:
             if not (b["type"] in {"analysis", "action_plan", "metric_cards"} and not b.get("items"))
         ]
         quality = report.setdefault("quality", {})
+        reconcile_history_completion(report)
         quality["analysis_items"] = sum(
             len(b.get("items", []))
             for b in report["blocks"]
@@ -1601,7 +1607,8 @@ class FullReportBuilder:
                         "reason": "案例背景待补充：现有已获支持陈述尚不能同时交代主体、核心事件和关键经过或处置；仅保留材料线索，不作为正式历史对照或建议依据。",
                     }
                 )
-        local_cards = ready_cards
+        local_cards, ambiguous_cases = partition_distinct_history_cards(ready_cards)
+        background_leads.extend(ambiguous_cases)
         ready_history_refs = {ref for card in local_cards for ref in card.get("claim_refs", [])}
         # Date-uncertain, otherwise supported cases are useful leads. Keep them
         # separate from formal comparisons and all downstream analysis inputs.
@@ -1754,6 +1761,7 @@ class FullReportBuilder:
         }
         analysis_sources = [item for item in evidence if item.local_id in analysis_source_ids]
         enrichment: dict[str, Any] = {}
+        unreviewed_warning_count = 0
         if self.reporter is not None and not diagnostic_only:
             try:
                 context = report_context(report["task"], analysis_facts, analysis_sources, forum)
@@ -1767,15 +1775,12 @@ class FullReportBuilder:
                 if not isinstance(enrichment, dict):
                     enrichment = {}
                 warnings = enrichment.get("section_warnings") or []
-                for warning in warnings[:8] if isinstance(warnings, list) else []:
-                    if isinstance(warning, str) and warning.strip():
-                        by_type["limitations"]["items"].append(
-                            {
-                                "id": f"L9{len(by_type['limitations']['items'])}",
-                                "category": "报告 Agent 提醒",
-                                "text": warning.strip()[:500],
-                            }
-                        )
+                # Free-form warnings are outside the reviewed analysis contract.
+                # Keep a diagnostic count, never promote them into material-scope facts.
+                unreviewed_warning_count = sum(
+                    isinstance(warning, str) and bool(warning.strip())
+                    for warning in (warnings[:8] if isinstance(warnings, list) else [])
+                )
             except Exception as exc:
                 by_type["limitations"]["items"].append(
                     {
@@ -1819,6 +1824,7 @@ class FullReportBuilder:
                     "error_type": type(exc).__name__,
                     "initial_rejections": original_rejections,
                 }
+        quality["unreviewed_section_warning_count"] = unreviewed_warning_count
         event_nodes = event_timeline(
             primary_fact_items,
             date_from=task.time_range_from,
@@ -2182,9 +2188,6 @@ class FullReportBuilder:
         limitations: dict[str, Any],
         event_query: str = "",
     ) -> tuple[dict[str, Any], int, int]:
-        institution_markers = re.findall(
-            r"[\u4e00-\u9fff]{2,10}(?:大学|学院|医院|政府|公司|集团)", event_query
-        )
         nodes: dict[str, dict[str, Any]] = {}
         edges: list[dict[str, Any]] = []
         for claim in claims:
@@ -2203,10 +2206,9 @@ class FullReportBuilder:
                 or node.get("node_type") not in {"original", "repost", "response", "independent"}
             ):
                 continue
-            if institution_markers and not any(
-                marker
-                in f"{source.title or ''} {(source.content_text or source.snippet or '')[:2500]}"
-                for marker in institution_markers
+            if not title_matches_subject(
+                event_query,
+                f"{source.title or ''} {(source.content_text or source.snippet or '')[:2500]}",
             ):
                 continue
             nodes[evidence_id] = {

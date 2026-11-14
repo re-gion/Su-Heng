@@ -62,6 +62,60 @@ class FailingAgent(NamedAgent):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("role,expected_count", [("fact_investigator", 1), ("history_insight", 0)])
+async def test_scope_uses_saved_event_identity_without_work_instructions(
+    runtime_dir, role, expected_count
+):
+    class PlannedAgent(NamedAgent):
+        async def plan(self, event_query):
+            self.plan_inputs.append(event_query)
+            return InvestigationPlan(queries=["食品安全 异物 调查 通报"])
+
+    db = Database(runtime_dir / f"event-identity-{role}.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(
+            TaskCreate(
+                event_query="2023年某职业技术学院食堂异物事件的官方调查与处置",
+                source_languages=["zh"],
+            )
+        )
+        source = SearchResult(
+            url="https://example.org/notice",
+            title="某职业技术学院食品安全通报",
+            snippet="某职业技术学院学生在食堂吃出疑似鼠头的异物，联合调查组通报调查结论。",
+            provider="fixture",
+            lang="zh",
+        )
+        agent = PlannedAgent(role)
+        runner = V1Orchestrator(
+            db,
+            EventBus(db),
+            search=FixtureSearchProvider([source]),
+            fetcher=FailFetcher(),
+            snapshots=SnapshotStore(runtime_dir / "snapshots"),
+            agents={role: agent},
+            moderator=ReleaseModerator(),
+            verifier=FixtureVerifier(),
+            reports_dir=runtime_dir / "reports",
+            max_inner_rounds=1,
+        )
+        await runner._run_agent(
+            task_id=task.id,
+            event_query=task.event_query + "\n用户补充说明：请围绕公开材料逐条核对边界并明确局限",
+            agent_name=role,
+            agent=agent,
+            board=await ForumBoard.restore(db, task.id),
+            outer_round=1,
+            top_k=2,
+        )
+        assert len(await db.list_evidence(task.id)) == expected_count
+        assert "用户补充说明" in agent.plan_inputs[0]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_comment_review_reason_is_local_and_not_in_forum_payload(runtime_dir):
     from yuqing.storage.models import EvidenceCreate
 
@@ -1210,7 +1264,9 @@ async def test_investigation_adds_exa_when_yuanbao_results_share_one_publisher(r
 async def test_three_agents_isolate_failure_and_still_publish_full_report(runtime_dir):
     database = Database(runtime_dir / "v1.db")
     await database.initialize()
-    task = await database.create_task(TaskCreate(event_query="三 Agent 测试", depth="standard"))
+    task = await database.create_task(
+        TaskCreate(event_query="三类 Agent 协作测试", depth="standard")
+    )
     history_data = HistoricalDataService(database)
     await history_data.import_events(
         DatasetAssetInput(
@@ -1223,7 +1279,7 @@ async def test_three_agents_isolate_failure_and_still_publish_full_report(runtim
         ),
         [
             HistoricalEventInput(
-                event_name="三 Agent 测试",
+                event_name="三类 Agent 协作测试",
                 summary="当前覆盖事件。",
                 nature="系统测试",
                 source_url="https://history.example.com/anchor",

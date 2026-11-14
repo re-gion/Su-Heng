@@ -1,7 +1,7 @@
 ---
 description: 组织有依据的分析、摘要和行动建议。
 enabled: true
-label: 报告综合 Agent
+label: 综合报告 Agent
 main_skill: evidence-bound-report
 max_inner_rounds: 1
 model_role: reporter

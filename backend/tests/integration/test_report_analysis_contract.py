@@ -88,6 +88,7 @@ async def analytical_report(runtime_dir, claim_limits):
                 "action": "公开受理步骤和反馈渠道",
             }
             return {
+                "section_warnings": ["未复核提醒：材料采集止于更早时点，全部后续处置未见。"],
                 "summary_claim_refs": ["C001"],
                 "analyses": [
                     {
@@ -126,6 +127,24 @@ async def analytical_report(runtime_dir, claim_limits):
     ).build(task.id, orchestration_limitations=["有限采样", "有限采样"])
     await db.close()
     return report, await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_unreviewed_section_warning_cannot_become_published_limitation_or_summary_basis(
+    analytical_report,
+):
+    from yuqing.core.executive_summary import summary_context
+
+    report, rendered = analytical_report
+    assert "未复核提醒" not in rendered
+    assert not any(
+        i.get("category") == "报告 Agent 提醒"
+        for b in report["blocks"]
+        if b["type"] == "limitations"
+        for i in b["items"]
+    )
+    assert "未复核提醒" not in str(summary_context(report))
+    assert report["quality"]["unreviewed_section_warning_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -187,6 +206,55 @@ async def test_scope_redaction_preserves_canonical_analysis_observation(
     for block in analyses:
         for item in block["items"]:
             assert item["observation"] == original_fact["text"]
+
+
+@pytest.mark.asyncio
+async def test_removed_history_chapter_cannot_keep_completed_status(analytical_report, runtime_dir):
+    report = copy.deepcopy(analytical_report[0])
+    report["blocks"] = [b for b in report["blocks"] if b["type"] != "history_compare"]
+    report["blocks"].append(
+        {
+            "block_id": "fixture-history",
+            "type": "history_compare",
+            "section": "06",
+            "cards": [{"summary": "待审历史案例"}],
+        }
+    )
+    report["quality"].setdefault("chapter_status", {})["history"] = {
+        "status": "complete",
+        "message": "已形成可回查的独立案例",
+    }
+
+    class Reviewer:
+        def bind(self, *_args):
+            pass
+
+        async def review(self, texts, **_kwargs):
+            return [
+                SimpleNamespace(
+                    allowed=text != "待审历史案例",
+                    status="incomplete" if text == "待审历史案例" else "accepted",
+                    text=text,
+                    reason="call_failed" if text == "待审历史案例" else "scope_passed",
+                    diagnostic=None,
+                )
+                for text in texts
+            ]
+
+    await FullReportBuilder(None, runtime_dir, scope_reviewer=Reviewer())._retain_reviewed_blocks(
+        report, SimpleNamespace(id="fixture", investigation_scope="public_event")
+    )
+    assert not any(b["type"] == "history_compare" for b in report["blocks"])
+    assert report["quality"]["chapter_status"]["history"]["status"] == "missing"
+
+
+def test_old_report_reading_copy_downgrades_stale_history_completion():
+    from yuqing.core.verification_presentation import enrich_report_sources
+
+    report = {"blocks": [], "quality": {"chapter_status": {"history": {"status": "complete"}}}}
+    displayed = enrich_report_sources(report)
+    assert displayed["quality"]["chapter_status"]["history"]["status"] == "missing"
+    assert report["quality"]["chapter_status"]["history"]["status"] == "complete"
 
 
 @pytest.mark.asyncio

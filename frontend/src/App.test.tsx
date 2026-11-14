@@ -74,7 +74,7 @@ describe('V2 task desk', () => {
     await screen.findByLabelText('评论洞察 Agent 接口协议')
     const cards = container.querySelectorAll('.role-config-grid article')
     expect(cards).toHaveLength(8)
-    expect([...cards].map(card => card.querySelector('strong')?.textContent)).toEqual(['事实调查 Agent', '媒体传播 Agent', '历史洞察 Agent', '评论洞察 Agent', '协作主持 Agent', '证据核验 Agent', '报告综合 Agent', '任务准备 Agent'])
+    expect([...cards].map(card => card.querySelector('strong')?.textContent)).toEqual(['事实调查 Agent', '媒体传播 Agent', '历史洞察 Agent', '评论洞察 Agent', '协作主持 Agent', '证据核验 Agent', '综合报告 Agent', '任务准备 Agent'])
     cards.forEach(card => expect(card.querySelector('.role-description')?.textContent).toBeTruthy())
   })
 

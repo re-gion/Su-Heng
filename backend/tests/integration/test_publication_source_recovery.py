@@ -22,6 +22,47 @@ NOTICE_BODY = "情况通报\n甲乙大学公布复核程序与处理结果。" +
 )
 
 
+@pytest.mark.parametrize("prefix", ["2023年", "2023年6月17日"])
+def test_publication_network_uses_same_date_free_subject_identity_as_investigation(prefix):
+    sources = {
+        ref: SimpleNamespace(
+            title="甲乙大学食品安全事件通报",
+            content_text="甲乙大学公布调查结果。",
+            published_at="2023-06-17",
+            snippet="",
+        )
+        for ref in ("E001", "E002")
+    }
+    claims = [
+        SimpleNamespace(
+            agent="media_propagation",
+            local_id=f"C{i:03d}",
+            text="媒体发布调查结果",
+            analysis_data={
+                "publication_node": {
+                    "evidence_id": ref,
+                    "publisher": f"媒体{i}",
+                    "node_type": "repost",
+                },
+                "propagation_edges": [
+                    {"from_evidence_id": "E001", "to_evidence_id": "E002", "relation": "repost"}
+                ],
+            },
+        )
+        for i, ref in enumerate(sources, 1)
+    ]
+    network, nodes, edges = FullReportBuilder._publication_network(
+        claims,
+        sources,
+        set(sources),
+        {"C001": {"E001"}, "C002": {"E002"}},
+        {"items": []},
+        f"{prefix}甲乙大学食堂异物事件",
+    )
+    assert nodes == 2 and edges == 1
+    assert {n["evidence_id"] for n in network["nodes"]} == set(sources)
+
+
 class SourceSearch:
     name = "fixture"
     capabilities = {"freshness", "publish_time"}

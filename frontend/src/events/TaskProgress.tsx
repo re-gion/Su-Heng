@@ -102,7 +102,7 @@ export function TaskProgress({ taskId, stream, revision = 0 }: {
   const calls = Math.max(budget?.calls ?? 0, stream.budget.calls)
   const reserved = budget?.tokens_reserved ?? stream.budget.tokensReserved ?? 0
 
-  return <><div className="budget-line"><span style={{ width: `${limit ? Math.min(100, tokens / limit * 100) : 0}%` }} /><small>{tokens.toLocaleString()} / {limit ? limit.toLocaleString() : '—'} tokens · {calls} 次调用</small></div>
+  return <><div className="budget-line"><span style={{ width: `${limit ? Math.min(100, tokens / limit * 100) : 0}%` }} /><small>{tokens.toLocaleString()} / {limit ? limit.toLocaleString() : '—'} tokens · {calls} 次模型请求</small></div>
     <div className="task-progress" aria-label="实时运行进度">
     {current && <p className="muted">主动运行 {duration(current.active_seconds ?? 0)} · 用户等待 {duration(current.waiting_seconds ?? 0)}</p>}
     {reserved > 0 && !['done', 'failed'].includes(status) && <p className="muted">最近采样：排队及在途请求预留 {reserved.toLocaleString()} token；预算是上限，核心内容达标即停止。</p>}

@@ -248,7 +248,7 @@ export function applyEvent(state: StreamState, message: TaskEvent): StreamState 
       ]
     }
   } else if (message.event === 'loop.round') {
-    const reasons: Record<string, string> = { approved: '主持人批准结束', round_limit: '达到讨论轮次上限，转入质量评估', budget_exhausted: '预算不足，调查结束', verification_reserve: '调查达到阶段预算上限，转入核验与报告', no_progress: '连续补查无新增有效结果', user_stop: '用户停止', core_complete: '核心内容已达到发布要求' }
+    const reasons: Record<string, string> = { approved: '主持人批准结束', round_limit: '达到讨论轮次上限，转入质量评估', budget_exhausted: '预算不足，调查结束', verification_reserve: '调查达到阶段预算上限，转入核验与报告', no_progress: '连续补查无新增有效结果', user_stop: '用户停止', core_complete: '核心内容已达到发布要求', claim_budget_reached: '达到陈述数量上限，转入核验与报告', review_incomplete: '审查未完成，已保留合格内容' }
     const decisions: Record<string, string> = { start: '开始调查', release: '主持人批准结束', force_release: '讨论因限制结束，未获主持人批准', continue: '继续调查', stop: '结束本轮调查' }
     const label = reasons[text(message.data.end_reason)] ?? decisions[text(message.data.decision)] ?? text(message.data.decision)
     next.decisions = [...state.decisions, `${message.data.scope === 'quality_recovery' ? '专项补查 · ' : ''}${label}：${text(message.data.reason)}`]

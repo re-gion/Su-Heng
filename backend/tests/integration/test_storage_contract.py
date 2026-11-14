@@ -8,6 +8,21 @@ from yuqing.storage.models import ClaimCreate, EvidenceCreate, QuoteCreate, Task
 
 
 @pytest.mark.asyncio
+async def test_reopening_current_database_does_not_rebuild_schema_indexes(runtime_dir):
+    path = runtime_dir / "stable-index.db"
+    database = Database(path)
+    await database.initialize()
+    await database.close()
+    with sqlite3.connect(path) as connection:
+        before = connection.execute("PRAGMA schema_version").fetchone()[0]
+    reopened = Database(path)
+    await reopened.initialize()
+    await reopened.close()
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA schema_version").fetchone()[0] == before
+
+
+@pytest.mark.asyncio
 async def test_existing_task_table_gains_institution_scope_column(runtime_dir):
     path = runtime_dir / "legacy-scope.db"
     schema = (Path(__file__).parents[2] / "yuqing" / "storage" / "schema.sql").read_text(

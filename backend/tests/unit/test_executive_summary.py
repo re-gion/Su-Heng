@@ -71,6 +71,71 @@ class Gateway:
         return result
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("omission", [False, True])
+async def test_remove_only_located_unsupported_sentence_then_require_fresh_full_review(
+    summary_report, omission
+):
+    class NoisyGateway(Gateway):
+        checks = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            value = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in value:
+                value["paragraphs"][2]["sentences"].append(
+                    {
+                        "text": "材料已产生999元的新增费用。",
+                        "kind": "fact",
+                        "claim_refs": ["C001"],
+                        "analysis_refs": [],
+                        "limitation_refs": [],
+                    }
+                )
+            if role == "verifier":
+                self.checks += 1
+                payload = json.loads(prompt.split("\n", 1)[1])
+                assert all(
+                    "999" not in s["text"] for p in payload["paragraphs"] for s in p["sentences"]
+                )
+                value["no_material_omission"] = not omission
+            return value
+
+    gateway = NoisyGateway()
+    await attach_executive_summary(summary_report, OpenAIReportAgent(gateway, "fixture"))
+    summary = next(b for b in summary_report["blocks"] if b["type"] == "executive_summary")
+    assert gateway.checks == 1
+    assert summary["summary_mode"] == ("fact_brief" if omission else "narrative")
+    if not omission:
+        assert summary["paragraphs"] == paragraphs()
+        assert summary["narrative_review"]["repair_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_type_reference_repair_explains_the_failed_sentence_contract(summary_report):
+    class TypeMismatchGateway(Gateway):
+        drafts = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            value = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in value:
+                self.drafts += 1
+                if self.drafts == 1:
+                    sentence = value["paragraphs"][-1]["sentences"][-1]
+                    sentence.update(kind="analysis", analysis_refs=[], limitation_refs=["L01"])
+                else:
+                    feedback = json.loads(prompt[prompt.index('{"report":') :])["repair_feedback"]
+                    assert feedback["issues"][0]["path"].startswith("paragraphs[3]")
+                    explanation = feedback.get("issue_explanations", {}).get("summary_kind", "")
+                    assert "analysis_refs" in explanation and "limitation_refs" in explanation
+                    assert "不能" in explanation
+            return value
+
+    gateway = TypeMismatchGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert gateway.drafts == 2
+    assert result.get("status") not in {"unavailable", "rejected"}
+
+
 async def attach(report, **options):
     gateway = Gateway(**options)
     await attach_executive_summary(report, OpenAIReportAgent(gateway, "fixture"))

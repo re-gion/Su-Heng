@@ -10,6 +10,7 @@ from typing import Any
 
 from yuqing.core.claim_semantics import publication_actor
 from yuqing.core.event_chronology import restore_report_chronology
+from yuqing.core.history_cards import reconcile_history_card_identity, reconcile_history_completion
 
 SOURCE_SUPPORT_STATUSES = {
     "single_source_supported",
@@ -146,6 +147,8 @@ def enrich_report_sources(report: dict[str, Any]) -> dict[str, Any]:
                         citation.setdefault(key, source[key])
             facts[fact.get("claim_ref")] = fact
     restore_report_chronology(value)
+    reconcile_history_card_identity(value)
+    reconcile_history_completion(value)
     for block in value.get("blocks", []):
         if block.get("chart_kind") not in {"timeline", "matrix"}:
             continue

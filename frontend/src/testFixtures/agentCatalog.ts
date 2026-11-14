@@ -9,7 +9,7 @@ export const agentCatalogFixture: AgentCatalog = {
     ['comment_insight', 'comment_analyst', '评论洞察 Agent', '评论样本问题与诉求归纳'],
     ['moderator', 'moderator', '协作主持 Agent', '缺口诊断与定向协作'],
     ['evidence_verifier', 'verifier', '证据核验 Agent', '陈述与证据对照核验'],
-    ['reporter', 'reporter', '报告综合 Agent', '证据约束的专报综合'],
+    ['reporter', 'reporter', '综合报告 Agent', '证据约束的专报综合'],
     ['task_preparation', 'utility', '任务准备 Agent', '调查范围识别与准备'],
   ].map(([id, role, label, skill]) => ({
     id, role, label, main_skill: `${id}-method`, enabled: true, selection_mode: 'work_order',

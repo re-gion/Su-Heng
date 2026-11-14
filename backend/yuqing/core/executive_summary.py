@@ -38,6 +38,7 @@ SUMMARY_ERROR_LABELS = {
     "summary_kind": "句子类型与依据引用不匹配",
     "analysis_dependency": "所引研判依赖的事实不完整",
     "unsupported_number": "摘要数字或单位未能对应所引材料",
+    "invalid_candidate_sentence_removed": "已移除定位到的不合格候选句，保留内容仍须完整复审",
     "summary_too_long": "摘要超过段落、句数或字数上限",
     "summary_not_reviewed": "摘要尚无完整有效的内容审查",
     "summary_review_stale": "摘要内容或依据变化，原审查已失效",

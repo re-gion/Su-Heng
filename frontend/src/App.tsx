@@ -100,7 +100,7 @@ function AccountControls({ auth }: { auth: AuthView }) {
   </>
 }
 
-const roleLabels: Record<string, string> = { analyst_a: '事实调查 Agent', analyst_b: '媒体传播 Agent', analyst_c: '历史洞察 Agent', comment_analyst: '评论洞察 Agent', moderator: '协作主持 Agent', verifier: '证据核验 Agent', reporter: '报告综合 Agent', utility: '任务准备 Agent' }
+const roleLabels: Record<string, string> = { analyst_a: '事实调查 Agent', analyst_b: '媒体传播 Agent', analyst_c: '历史洞察 Agent', comment_analyst: '评论洞察 Agent', moderator: '协作主持 Agent', verifier: '证据核验 Agent', reporter: '综合报告 Agent', utility: '任务准备 Agent' }
 const roleOrder = ['analyst_a', 'analyst_b', 'analyst_c', 'comment_analyst', 'moderator', 'verifier', 'reporter', 'utility']
 const roleDescriptions: Record<string, string> = {
   analyst_a: '查清事件经过、通报与回应，形成有来源的事实陈述。',
@@ -434,7 +434,7 @@ function App({ auth = localAuth }: { auth?: AuthView }) {
   const allowsSupplementalCommentUrls = ['manual', 'hybrid'].includes(commentMode)
   const detailPhase = taskDetail?.phase ?? stream.phase
   const detailStatus = taskDetail?.status ?? stream.status
-  const endLabels: Record<string, string> = { approved: '主持人批准结束讨论', round_limit: '讨论达到轮次上限', budget_exhausted: '预算不足', verification_reserve: '调查达到阶段预算上限，额度留给核验与报告', no_progress: '连续两次补查无新增有效结果', user_stop: '用户停止调查', core_complete: '核心内容评估完成', unknown: '旧任务未记录结束原因' }
+  const endLabels: Record<string, string> = { approved: '主持人批准结束讨论', round_limit: '讨论达到轮次上限', budget_exhausted: '预算不足', verification_reserve: '调查达到阶段预算上限，额度留给核验与报告', no_progress: '连续两次补查无新增有效结果', user_stop: '用户停止调查', core_complete: '核心内容评估完成', claim_budget_reached: '达到陈述数量上限，已转入核验与报告', review_incomplete: '审查未完成，已保留合格内容', unknown: '旧任务未记录结束原因' }
   const releaseLabels: Record<string, string> = { full_report: '完整舆情专报', evidence_brief: '证据简报', retrieval_diagnostic: '检索诊断' }
   const ending = taskDetail?.recovery?.end_reason ?? taskDetail?.investigation_outcome?.end_reason
   const reportLevel = taskDetail?.release_label ? `报告等级：${releaseLabels[taskDetail.release_label] ?? taskDetail.release_label}。` : '报告等级待生成。'

@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from yuqing.core.executive_summary import (
+    SUMMARY_ERROR_LABELS,
     SUMMARY_LIMITS,
     SUMMARY_ROLES,
     SUMMARY_VERSION,
@@ -33,7 +34,7 @@ from yuqing.core.llm.gateway import (
 
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "question-led-v4"
-    SUMMARY_DRAFT_VERSION = "four-stage-v1"
+    SUMMARY_DRAFT_VERSION = "four-stage-v3"
 
     @staticmethod
     def _analysis_limit(context: dict[str, Any]) -> int:
@@ -61,6 +62,27 @@ class OpenAIReportAgent:
             except ValueError:
                 pass
         return None
+
+    @staticmethod
+    def _remove_located_invalid_sentences(paragraphs: list[dict], context: dict, errors: list[str]):
+        allowed = {"unsupported_number", "internal_process_leak", "duplicate_sentence"}
+        if not errors or not set(errors) <= allowed:
+            return None
+        locations = set()
+        for issue in paragraph_issues(paragraphs, context, require_headings=True):
+            match = re.fullmatch(r"paragraphs\[(\d+)\]\.sentences\[(\d+)\]", issue["path"])
+            if match is None or not set(issue["codes"]) <= allowed:
+                return None
+            locations.add(tuple(int(i) for i in match.groups()))
+        if not locations:
+            return None
+        candidate = [
+            {**p, "sentences": [s for j, s in enumerate(p["sentences"]) if (i, j) not in locations]}
+            for i, p in enumerate(paragraphs)
+        ]
+        if check_paragraphs(candidate, context, require_headings=True):
+            return None
+        return candidate
 
     async def summarize(self, context: dict[str, Any]) -> dict[str, Any]:
         """Draft after assembly and independently review the complete narrative."""
@@ -121,12 +143,38 @@ class OpenAIReportAgent:
                     )
                     feedback = {
                         "structural_errors": errors,
+                        "issue_explanations": {
+                            code: (
+                                "句子类型与引用必须匹配：fact 必须有 claim_refs 且 analysis_refs 为空；"
+                                "analysis 必须有 analysis_refs；limitation 必须有 limitation_refs 且 analysis_refs 为空。"
+                                "段落 role 不决定句子 kind，limits 段也可以有依据已审分析的 analysis 句。"
+                                "不能只改标签凑过校验：应按句子真实语义选择类型并保留真实依据；"
+                                "若没有对应依据，删除或改写缺乏依据的表达，不得补造引用。"
+                                if code == "summary_kind"
+                                else SUMMARY_ERROR_LABELS.get(code, code)
+                            )
+                            for code in errors
+                        },
                         "issues": issues,
                         "limits": SUMMARY_LIMITS,
                         "previous_paragraphs": paragraphs,
                         "repair_instruction": "针对标明位置修订原稿；超长时压缩次要细节与重复说明，不能截断句子或删除重要证据边界。",
                     }
-                    continue
+                    pruned = (
+                        self._remove_located_invalid_sentences(paragraphs, context, errors)
+                        if attempt
+                        else None
+                    )
+                    if pruned is None:
+                        continue
+                    paragraphs = pruned
+                    diagnostics.append(
+                        {
+                            "attempt": attempt + 1,
+                            "stage": "structure",
+                            "codes": ["invalid_candidate_sentence_removed"],
+                        }
+                    )
                 stage = "semantic"
                 review = await self._summary_review(writing_context, paragraphs)
                 if review_accepted(review, paragraphs):
@@ -230,6 +278,8 @@ class OpenAIReportAgent:
             "comment_sample仅代表已采集样本，不能证明事件事实、总体民意或全网比例。"
             "每个句子按语义独立绑定依据。fact句必须有claim_refs，可附相关limitation_refs说明证据边界，不能用analysis_refs替代事实依据；analysis句必须用analysis_refs且明确是本报告的研判，避免无主体的‘有研判认为’，"
             "analysis句可同时绑定相关claim_refs与limitation_refs；limitation句用limitation_refs，可补充直接相关claim_refs。不要用一个句子包装整个段落。"
+            "段落role与句子kind相互独立：limits段中根据已审分析提出后续关注的句子可用analysis并绑定analysis_refs；"
+            "披露实际材料局限才用limitation，其analysis_refs必须为空；fact句的analysis_refs也必须为空。"
             "事实转述与机制判断分句书写；每个分析句只压缩一个已审要点，优先保留原分析的对象、范围和限定词。"
             "不得把处置类别改写成舆论争议排序，不把不同材料在同一句拼成新的因果或评价；无法忠实概括时可直接选用已审分析中的完整短句。"
             "每句保留原有归属、条件、时间与确定程度：单源支持须归属转述；争议/反驳陈述不能当成成立事实；"

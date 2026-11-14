@@ -34,6 +34,12 @@ PUBLIC_EVENT_INSTRUCTION = (
     "只归属转述有来源的公开说法；不得把未经证实的指控写成事实，不挖掘私人生活。"
 )
 SCOPE_POLICY_VERSION = "public-event-v1"
+SCOPE_REVIEW_REVISION = "context-preserving-v2"
+# A person-name span must not consume public institutions, dates or complete clauses.
+_PUBLIC_CONTEXT_SPAN = re.compile(
+    r"大学|学院|公司|集团|医院|学校|银行|政府|委员会|研究院|"
+    r"\d{4}[-/年]\d{1,2}|\d{1,2}月\d{1,2}日|[，,。；;：:\n]"
+)
 PROTECTED_SCOPES = {"institution", "public_event"}
 REDACTION_LABELS = {"涉事学生", "另一名学生", "相关个人", "相关工作人员", "当事人甲", "当事人乙"}
 ANONYMOUS_ROLE_LABELS = REDACTION_LABELS | {
@@ -53,11 +59,20 @@ ANONYMOUS_ROLE_LABELS = REDACTION_LABELS | {
     "当事男生",
     "当事女生",
     "当事学生",
+    "一名学生",
     "另一学生",
     "涉事研究生",
     "涉事本科生",
 }
 _ANONYMOUS_ROLE = re.compile("|".join(sorted(ANONYMOUS_ROLE_LABELS, key=len, reverse=True)))
+
+
+def _scope_review_key(scope: str, kind: str, text: str) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [SCOPE_POLICY_VERSION, SCOPE_REVIEW_REVISION, scope, kind, text], ensure_ascii=False
+        ).encode()
+    ).hexdigest()
 
 
 def only_anonymous_roles_changed(original: str, redacted: str) -> bool:
@@ -91,11 +106,7 @@ class InstitutionScopeReviewer:
 
     async def cache_accepted(self, text: str, *, kind: str):
         if self.database is not None and self.task_id:
-            key = hashlib.sha256(
-                json.dumps(
-                    [SCOPE_POLICY_VERSION, self.scope, kind, text], ensure_ascii=False
-                ).encode()
-            ).hexdigest()
+            key = _scope_review_key(self.scope, kind, text)
             await self.database.save_scope_review(
                 self.task_id, key, asdict(ScopeReview("accepted", "scope_passed", text))
             )
@@ -105,12 +116,7 @@ class InstitutionScopeReviewer:
     ) -> list[ScopeReview]:
         scope = scope or self.scope
         decisions = [ScopeReview("incomplete", "not_reviewed", value) for value in texts]
-        keys = [
-            hashlib.sha256(
-                json.dumps([SCOPE_POLICY_VERSION, scope, kind, value], ensure_ascii=False).encode()
-            ).hexdigest()
-            for value in texts
-        ]
+        keys = [_scope_review_key(scope, kind, value) for value in texts]
         pending = []
         identifiers = {}
         if self.database is not None and self.task_id and hasattr(self.database, "fetch_all"):
@@ -164,11 +170,7 @@ class InstitutionScopeReviewer:
                 and self.task_id
             ):
                 for source_kind in ("claim", "comment"):
-                    source_key = hashlib.sha256(
-                        json.dumps(
-                            [SCOPE_POLICY_VERSION, scope, source_kind, value], ensure_ascii=False
-                        ).encode()
-                    ).hexdigest()
+                    source_key = _scope_review_key(scope, source_kind, value)
                     approved = await self.database.get_scope_review(self.task_id, source_key)
                     if approved and approved["status"] == "accepted" and approved["text"] == value:
                         cached = approved
@@ -212,6 +214,7 @@ class InstitutionScopeReviewer:
                             "普通个人姓名或半匿名姓名须以角色称谓替换。只输出实际出现的完整字符串和替换称谓；"
                             "replacement 只允许涉事学生、另一名学生、相关个人、相关工作人员、当事人甲、当事人乙。"
                             "不能删除机构名称、日期、事实动作，不能新增结论。"
+                            "一名学生、涉事学生等已经匿名的角色称谓不需要再次替换，不得把所属机构一同当作姓名删改。"
                             if scope == "public_event"
                             else "任何普通个人身份、行为品格评价、私人指控都必须拒绝，不能改写。"
                         )
@@ -300,6 +303,8 @@ class InstitutionScopeReviewer:
                                     raise ValueError("invalid redaction span")
                                 if edit["text"] in ANONYMOUS_ROLE_LABELS:
                                     continue
+                                if _PUBLIC_CONTEXT_SPAN.search(edit["text"]):
+                                    raise ValueError("redaction consumes public context")
                                 replacement = edit["replacement"]
                                 if self.database is not None and self.task_id:
                                     alias_key = hashlib.sha256(edit["text"].encode()).hexdigest()
@@ -372,12 +377,7 @@ class InstitutionScopeReviewer:
                         )
                         # The already redacted representation needs no second nondeterministic review.
                         if decisions[index].allowed and decisions[index].text != texts[index]:
-                            safe_key = hashlib.sha256(
-                                json.dumps(
-                                    [SCOPE_POLICY_VERSION, scope, kind, decisions[index].text],
-                                    ensure_ascii=False,
-                                ).encode()
-                            ).hexdigest()
+                            safe_key = _scope_review_key(scope, kind, decisions[index].text)
                             await self.database.save_scope_review(
                                 self.task_id, safe_key, asdict(decisions[index])
                             )

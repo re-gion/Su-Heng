@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from yuqing.agents.runtime import InvestigationPlan, SearchQuery
 from yuqing.core.search.base import SearchResult
 from yuqing.services.evidence_store import extract_page_published_at
@@ -11,6 +13,52 @@ from yuqing.services.investigation_scope import (
     title_matches_subject,
 )
 from yuqing.services.v1_orchestrator import ensure_requested_languages, valid_media_analysis
+
+
+@pytest.mark.parametrize("prefix", ["2023年", "2023年6月", "2023年6月17日"])
+def test_date_prefix_is_not_part_of_institution_identity(prefix):
+    assert title_matches_subject(
+        f"{prefix}江西工业职业技术学院食堂异物事件",
+        "江西工业职业技术学院发布食品安全事件通报",
+    )
+
+
+def test_same_food_event_notice_is_main_evidence_not_an_independent_history_case():
+    scope = InvestigationScope(
+        event_query="2023年江西工业职业技术学院食堂异物事件的官方调查与处置", languages=("zh",)
+    )
+    notice = result(
+        title="江西工业职业技术学院6·1食品安全事件调查处理情况通报",
+        url="https://example.cn/notice",
+        published_at="2023-06-17",
+    ).model_copy(update={"snippet": "联合调查组调查6月1日学生在食堂吃出疑似鼠头的异物。"})
+    primary = scope.classify_result(notice, agent="fact_investigator")
+    history = scope.classify_result(
+        notice, agent="history_insight", search_query="高校 食堂 食品安全 调查 案例"
+    )
+    assert primary.accepted and primary.main_eligible
+    assert not history.accepted
+    assert history.reasons == ("current_event_not_history",)
+
+
+def test_separated_event_terms_require_both_concepts_and_preserve_another_institution_case():
+    scope = InvestigationScope(
+        event_query="2023年江西工业职业技术学院食堂异物事件的官方调查与处置", languages=("zh",)
+    )
+    unrelated = result(
+        title="江西工业职业技术学院发布食堂收费调整通报",
+        url="https://example.cn/unrelated",
+        published_at="2023-06-17",
+    )
+    assert not scope.classify_result(unrelated, agent="fact_investigator").accepted
+    independent = result(
+        title="另一大学通报食堂异物调查情况",
+        url="https://example.cn/case",
+        published_at="2022-03-01",
+    )
+    assert scope.classify_result(
+        independent, agent="history_insight", search_query="高校 食堂 食品安全 调查 案例"
+    ).accepted
 
 
 def test_history_accepts_cross_industry_mechanism_without_institution_suffix():
@@ -732,3 +780,19 @@ def test_media_output_must_use_typed_publication_nodes_and_known_edges():
         )
         is True
     )
+
+
+def test_cross_language_generic_event_without_institution_uses_translated_context():
+    scope = InvestigationScope(event_query="Electric vehicle recall", languages=("zh",))
+    decision = scope.classify_result(
+        SearchResult(
+            url="https://example.cn/recall",
+            title="电动车召回通报",
+            snippet="厂商公布电动车召回处理安排。",
+            provider="fixture",
+            lang="zh",
+        ),
+        agent="fact_investigator",
+        search_query="电动车 召回 通报",
+    )
+    assert decision.accepted and decision.main_eligible

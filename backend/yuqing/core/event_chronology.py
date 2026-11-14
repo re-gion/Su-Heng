@@ -9,6 +9,10 @@ from datetime import date
 from yuqing.core.timeline_grouping import group_timeline_events
 
 DATE = re.compile(r"(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+_NESTED_OR_CUTOFF_DATE = re.compile(
+    r"(?:通报|报道|声明|公告)(?:称|指出|认定)|表示|指出|认定|判定|确认|"
+    r"(?:针对|关于|截至|涉及|就|对)\s*$"
+)
 DISCLOSURE = re.compile(
     r"发帖|发文|发布.{0,12}(?:测试视频|评测|测评|帖文|文章)|首次.{0,8}(?:公开|曝光|披露)"
 )
@@ -16,6 +20,7 @@ CHRONOLOGY_NOTE = (
     "按陈述正文明确写出的事件或发布日期排列，不以网页发布日期替代事件日期；"
     "同日先后不明时仅并列展示。保留有引用的节点，不按每日数量或总数截断。"
     "本图仅覆盖已取得并形成陈述的经过，不保证穷尽事件始末；缺少日期或独立陈述的环节仍需补查。"
+    "未明确动作时点的回溯陈述保留在事实表，不据其中提及的事件日期推定发布时点。"
 )
 
 
@@ -30,6 +35,8 @@ def explicit_event_date(text: str) -> str | None:
         return None
     prefix = text[: match.start()]
     if len(prefix) > 80 or re.search(r"[，,。；;！？\n]", prefix):
+        return None
+    if _NESTED_OR_CUTOFF_DATE.search(prefix):
         return None
     if re.match(r"(?:前后|左右|至|到|[-—~～])", text[match.end() :].lstrip()):
         return None

@@ -2083,7 +2083,7 @@ class V1Orchestrator:
             # provenance.  Investigation relevance must use the event the user
             # actually selected, otherwise any page mentioning the institution can
             # enter the evidence inventory.
-            event_query=(task.resolved_event_query or event_query) if task else event_query,
+            event_query=(task.resolved_event_query or task.event_query) if task else event_query,
             languages=tuple(requested_languages),
             source_scope=task.effective_source_scope if task else "auto",
             date_from=task.time_range_from if task else None,
