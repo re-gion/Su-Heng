@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from yuqing.core.event_chronology import action_date_sort_key
 from yuqing.core.executive_summary import (
     NUMBER_POLICY,
     SUMMARY_ERROR_LABELS,
@@ -77,6 +78,7 @@ def fact_brief(block: dict, *, reason: str) -> None:
     block.pop("narrative_review", None)
     block.pop("summary_diagnostics", None)
     block["summary_status"] = reason
+    block["what"] = sorted(block.get("what", []), key=action_date_sort_key)
 
 
 def refresh_summary_release(report: dict) -> None:

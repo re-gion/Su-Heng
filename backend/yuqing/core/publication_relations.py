@@ -5,6 +5,15 @@ from __future__ import annotations
 import re
 
 RELATION_POLICY_VERSION = "document-credit-v1"
+DOCUMENT_CREDIT = re.compile(
+    r"(?:信息来源|文章来源|稿件来源|稿源|来源|转载自|转自)\s*[:：/|｜]\s*[^\n。；;]{2,100}"
+)
+INLINE_CITATION = re.compile(r"(?:另?据|援引|引述|引用)[^\n，,。；：:]{2,45}(?:消息|报道)[，,：:]")
+
+
+def inline_citation_passage(text: str, match: re.Match) -> str:
+    passage = re.match(r"[^\n。；]{1,200}[。；]?", text[match.end() :])
+    return passage.group() if passage else ""
 
 
 def extract_publication_identity(text: str) -> dict:
@@ -78,9 +87,20 @@ def publication_identity(source, *, fallback_publisher=None) -> dict:
 def relation_type_codes(edge: dict, by_id: dict) -> list[str]:
     """Inline attribution proves a citation, never a whole-document repost by itself."""
     original = by_id.get(edge.get("from_evidence_id"), {})
+    target = by_id.get(edge.get("to_evidence_id"), {})
     quote = edge.get("quote")
     if not isinstance(quote, str):
         return []
+    history_citations = target.get("history_citations")
+    if original.get("history_citations") or (
+        history_citations
+        and (
+            edge.get("relation") != "follow_up"
+            or edge.get("support_evidence_id") != edge.get("to_evidence_id")
+            or quote not in history_citations.get(edge.get("from_evidence_id"), ())
+        )
+    ):
+        return ["outside_confirmed_publication_citation"]
     names = [original.get(key) for key in ("publisher_entity", "source_name", "publisher")]
     names = [name for name in names if isinstance(name, str) and len(name) >= 2]
     doc_credit = any(

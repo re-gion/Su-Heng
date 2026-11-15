@@ -46,6 +46,11 @@ def explicit_event_date(text: str) -> str | None:
         return None
 
 
+def action_date_sort_key(item: dict) -> tuple[bool, str]:
+    stamp = explicit_event_date(item.get("text") or "")
+    return (stamp is None, stamp or "")
+
+
 def dated_action(text: str) -> str | None:
     """A conservative retrieval cue, not a verified event or an instruction."""
     stamp = explicit_event_date(text)

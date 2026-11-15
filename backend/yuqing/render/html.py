@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
 
+from yuqing.core.event_chronology import action_date_sort_key
 from yuqing.core.executive_summary import (
     SUMMARY_ERROR_LABELS,
     SUMMARY_HEADINGS,
@@ -181,7 +182,7 @@ def _summary(
         )
         items = "".join(
             f"<li>{_escape(item.get('text'))}{_claim_link(item['claim_ref'])}</li>"
-            for item in block.get("what", [])
+            for item in sorted(block.get("what", []), key=action_date_sort_key)
             if item.get("claim_ref")
         )
         return (

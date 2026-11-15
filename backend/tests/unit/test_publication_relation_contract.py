@@ -8,6 +8,7 @@ from yuqing.core.fetch.builtin import extract_page_publication_identity
 from yuqing.core.publication_relations import prune_relation_conflicts, publication_identity
 from yuqing.render.html import render_html
 from yuqing.services.full_report import FullReportBuilder
+from yuqing.services.investigation_scope import InvestigationScope
 
 
 def sources(quote):
@@ -41,6 +42,67 @@ def edge(quote, relation):
         "quote": quote,
         "relation": relation,
     }
+
+
+@pytest.mark.asyncio
+async def test_explicit_statement_citation_survives_mirrors_and_empty_model_draft():
+    passage = "针对网络反映的制动安全问题，三个主管部门在前期调查工作基础上，联合成立调查组开展核查并依法依规处理，有关情况将及时公布。"
+
+    def source(ref, host, path, publisher, text, credits=(), role="independent"):
+        return SimpleNamespace(
+            local_id=ref,
+            url=f"https://{host}/{path}",
+            title="三部门联合调查",
+            fetch_status="fetched",
+            published_at="2026-10-16",
+            publisher_entity=publisher,
+            source_name=publisher,
+            source_tier=2,
+            source_role=role,
+            content_text=text,
+            snippet="",
+            provider="fetch",
+            lang="zh",
+            extra={"page_source_credits": list(credits)},
+        )
+
+    credits = ("来源：装备工业一司、工信微报",)
+    original = source(
+        "E001", "www.gov.test", "article/1827", "主管部门", passage, credits, "authority"
+    )
+    mirror = source(
+        "E002", "wap.gov.test", "article/1827", "主管部门网站", passage, credits, "authority"
+    )
+    quote = "据工信微报15日消息，" + passage
+    reporting = source("E003", "media.test", "stories/74", "日报", quote)
+    reporting.extra.update(scope_status="history", date_provenance="page_metadata")
+    unrelated = source(
+        "E004", "media.test", "stories/95", "日报", "据工信微报15日消息，另一项调查已经结束。"
+    )
+    unrelated.extra.update(scope_status="history", date_provenance="page_metadata")
+    selected = {"E001": {}, "E002": {}}
+    scope = InvestigationScope("制动安全问题", ("zh",), date_from="2026-10-01")
+    items = FullReportBuilder._relation_source_context(
+        [original, mirror], selected, evidence=[reporting, unrelated], scope=scope
+    )
+    assert {item["evidence_ref"] for item in items} == {"E001", "E003"}
+
+    class Gateway:
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier":
+                assert passage in prompt
+                return {"accepted": True}
+            return {
+                "edges": [
+                    edge(quote, "repost")
+                    | {"to_evidence_id": "E003", "support_evidence_id": "E003"}
+                ]
+            }
+
+    edges = await OpenAIReportAgent(Gateway(), "fixture").recover_relations(items)
+    assert [
+        (item["from_evidence_id"], item["to_evidence_id"], item["relation"]) for item in edges
+    ] == [("E001", "E003", "follow_up")]
 
 
 @pytest.mark.asyncio

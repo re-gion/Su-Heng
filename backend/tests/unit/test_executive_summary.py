@@ -186,7 +186,7 @@ async def test_narrative_runs_after_whole_report_and_keeps_authoritative_facts(s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("options,expected_calls", [({"rejected": True}, 25), ({"error": True}, 1)])
+@pytest.mark.parametrize("options,expected_calls", [({"rejected": True}, 13), ({"error": True}, 1)])
 async def test_rejected_or_unavailable_summary_falls_back_without_leaking_draft(
     summary_report, options, expected_calls
 ):
@@ -988,8 +988,72 @@ async def test_summary_stops_at_four_drafts_even_when_review_keeps_rejecting(sum
     gateway = Gateway(rejected=True)
     result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
     assert result["status"] == "rejected"
-    assert len(gateway.calls) == 25
+    assert sum("阶段：逐句绑定依据审查。" in call[2] for call in gateway.calls) == 4
+    assert sum(call[0] == "reporter" for call in gateway.calls) == 5  # outline and four drafts
     assert result["diagnostics"][-1]["attempt"] == 4
+
+
+@pytest.mark.asyncio
+async def test_binding_repair_changes_only_rejected_sentence_and_reviews_final_whole(
+    summary_report,
+):
+    class RepairGateway(Gateway):
+        bindings = []
+        final = None
+        repairs = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if "阶段：逐句绑定依据审查。" in prompt:
+                sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                self.bindings.append(sentence["id"])
+                return {"id": sentence["id"], "supported": "撤销处分" not in sentence["text"]}
+            if "阶段：摘要句子修订。" in prompt:
+                self.repairs += 1
+                sentence = paragraphs()[0]["sentences"][0]
+                if self.repairs == 1:
+                    sentence = {**sentence, "text": sentence["text"] + "另有577人被处分。"}
+                else:
+                    feedback = json.loads(prompt.split("\n", 1)[1])
+                    assert feedback["invalid_replacement"]["number_issues"]
+                return {
+                    "replacements": [
+                        {"id": "S01", **sentence},
+                        {"id": "S02", **{**paragraphs()[1]["sentences"][0], "text": "撤销处分。"}},
+                    ]
+                }
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                result["paragraphs"][0]["sentences"][0]["text"] = "校方撤销处分。"
+            if role == "verifier":
+                self.final = json.loads(prompt.split("\n", 1)[1])
+            return result
+
+    gateway = RepairGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert gateway.final is not None
+    assert gateway.repairs == 2
+    assert [p["sentences"] for p in result["paragraphs"]] == [p["sentences"] for p in paragraphs()]
+    assert gateway.bindings.count("S01") == 2
+    assert gateway.bindings.count("S02") == 1
+
+
+def test_saved_fact_brief_renders_by_action_date(summary_report):
+    block = summary_report["blocks"][1]
+    block["summary_mode"] = "fact_brief"
+    block["what"] = [
+        {"claim_ref": "C009", "text": "校方表示已开始核查。"},
+        {"claim_ref": "C008", "text": "2026年10月15日，主管部门公布通报。"},
+        {"claim_ref": "C007", "text": "2026年10月8日上午，校方发布说明。"},
+        {"claim_ref": "C006", "text": "2026年10月8日晚，校方再发说明。"},
+    ]
+    html = (
+        render_html(summary_report)
+        .split('class="summary-fact-brief"', 1)[1]
+        .split("</section>", 1)[0]
+    )
+    assert [
+        html.index(f'href="#claim-{ref}"') for ref in ("C007", "C006", "C008", "C009")
+    ] == sorted(html.index(f'href="#claim-{ref}"') for ref in ("C007", "C006", "C008", "C009"))
 
 
 @pytest.mark.asyncio

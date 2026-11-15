@@ -24,10 +24,14 @@ from yuqing.core.history_cards import (
     unique_history_cards,
 )
 from yuqing.core.publication_relations import (
+    DOCUMENT_CREDIT,
+    INLINE_CITATION,
+    inline_citation_passage,
     prune_relation_conflicts,
     publication_identity,
     relation_type_codes,
 )
+from yuqing.core.search.base import SearchResult
 from yuqing.core.timeline_grouping import group_timeline_events
 from yuqing.core.verification_presentation import presentation_counts
 from yuqing.render.html import render_html
@@ -42,7 +46,11 @@ from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
 from yuqing.services.history_comparison import independent_case_evidence
 from yuqing.services.institution_scope import PROTECTED_SCOPES, InstitutionScopeReviewer
-from yuqing.services.investigation_scope import ReportReleaseAssessment, title_matches_subject
+from yuqing.services.investigation_scope import (
+    InvestigationScope,
+    ReportReleaseAssessment,
+    title_matches_subject,
+)
 from yuqing.services.report_analysis import (
     assemble_analysis,
     deduplicate_limitations,
@@ -1229,14 +1237,24 @@ class FullReportBuilder:
             by_type["limitations"],
             task.resolved_event_query or task.event_query,
         )
+        confirmed_current_event_sources = set()
         if not diagnostic_only and hasattr(self.reporter, "recover_relations"):
             nodes_by_id = {n["evidence_id"]: n for n in publication_network["nodes"]}
-            source_context = self._relation_source_context(main_evidence, nodes_by_id)
+            relation_scope = InvestigationScope(
+                event_query=task.resolved_event_query or task.event_query,
+                languages=tuple(task.source_languages),
+                source_scope=task.effective_source_scope,
+                date_from=task.time_range_from,
+                date_to=task.time_range_to,
+            )
+            source_context = self._relation_source_context(
+                main_evidence, nodes_by_id, evidence=evidence, scope=relation_scope
+            )
             fingerprint = hashlib.sha256(
                 json.dumps(source_context, ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
             prior_relations = await self.database.checkpoint(task_id, "report:relations") or {}
-            relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v4")
+            relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v5")
             source_fingerprints = {
                 s["evidence_ref"]: hashlib.sha256(
                     json.dumps(s, ensure_ascii=False, sort_keys=True).encode()
@@ -1317,6 +1335,9 @@ class FullReportBuilder:
                 and not relation_type_codes(edge, sources_by_id)
             ]
             for edge in recovered:
+                target = edge["to_evidence_id"]
+                if sources_by_id[target].get("history_citations"):
+                    confirmed_current_event_sources.add(target)
                 for evidence_id, node_type in (
                     (edge["from_evidence_id"], "original"),
                     (
@@ -1338,6 +1359,9 @@ class FullReportBuilder:
                     }
                     nodes_by_id[evidence_id] = node
                     publication_network["nodes"].append(node)
+            for item in appendix_items:
+                if item["evidence_ref"] in confirmed_current_event_sources:
+                    item.update(scope_status="main", scope_label="本事件报道（已审引述）")
             publication_network["edges"] = recovered
             publication_nodes = len(publication_network["nodes"])
             propagation_edges = len(recovered)
@@ -1547,12 +1571,17 @@ class FullReportBuilder:
             }
             for item in local_history
         ]
+        history_evidence_by_id = {
+            ref: item
+            for ref, item in evidence_by_id.items()
+            if ref not in confirmed_current_event_sources
+        }
         for item in historical_facts:
             claim = historical_claims[item["claim_ref"]]
             case = claim.analysis_data["historical_case"]
             eligible_refs = independent_case_evidence(
                 claim,
-                evidence_by_id,
+                history_evidence_by_id,
                 task.resolved_event_query or task.event_query,
                 task.created_at,
             )
@@ -1653,7 +1682,7 @@ class FullReportBuilder:
                     c["evidence_ref"]
                     for c in item.get("citations", [])
                     if c.get("relation") == "support"
-                    and c["evidence_ref"] in evidence_by_id
+                    and c["evidence_ref"] in history_evidence_by_id
                     and (evidence_by_id[c["evidence_ref"]].extra or {}).get("scope_status")
                     == "history"
                 ]
@@ -1684,13 +1713,13 @@ class FullReportBuilder:
                 continue
             eligible = independent_case_evidence(
                 claim,
-                evidence_by_id,
+                history_evidence_by_id,
                 task.resolved_event_query or task.event_query,
                 task.created_at,
                 require_confirmed_date=False,
             ) - independent_case_evidence(
                 claim,
-                evidence_by_id,
+                history_evidence_by_id,
                 task.resolved_event_query or task.event_query,
                 task.created_at,
             )
@@ -1723,6 +1752,7 @@ class FullReportBuilder:
             item.local_id
             for item in evidence
             if (item.extra or {}).get("scope_status") == "history"
+            and item.local_id not in confirmed_current_event_sources
         }
         excluded_history = []
         for source in evidence:
@@ -2131,7 +2161,11 @@ class FullReportBuilder:
 
     @staticmethod
     def _relation_source_context(
-        main_evidence: Sequence[Any], nodes_by_id: dict[str, dict[str, Any]]
+        main_evidence: Sequence[Any],
+        nodes_by_id: dict[str, dict[str, Any]],
+        *,
+        evidence: Sequence[Any] = (),
+        scope: InvestigationScope | None = None,
     ) -> list[dict[str, Any]]:
         """Include bounded, dated source-credit pages outside existing media claims."""
 
@@ -2148,6 +2182,10 @@ class FullReportBuilder:
                 if identity.get("identity_status")
                 else {item.publisher_entity, item.source_name}
             )
+            if getattr(item, "source_role", None) == "authority":
+                # Joint signatories of a notice can be cited individually.
+                # These terms only nominate an original for independent review.
+                names.update(re.split(r"[、，,]", identity["publisher"] or ""))
             # Aliases expand candidate recall only. The relation still needs a
             # literal credit, matching publication and independent review below.
             domain = (urlsplit(item.url).hostname or "").lower()
@@ -2159,23 +2197,83 @@ class FullReportBuilder:
 
         publisher_names = {name for item in selected for name in publisher_terms(item)}
         credit_pattern = re.compile(
-            r"来源\s*[：:|｜]|新华社.{0,8}日电|转载自|据[^\n。；，]{2,24}(?:消息|报道)"
+            rf"{DOCUMENT_CREDIT.pattern}|{INLINE_CITATION.pattern}|新华社.{{0,8}}日电"
         )
 
         def source_text(item):
             credits = getattr(item, "extra", None) or {}
             return "\n".join([item.content_text or "", *credits.get("page_source_credits", [])])
 
+        history_citations = {}
+        if scope is not None:
+            originals = [(item, publisher_terms(item)) for item in selected]
+            for item in evidence:
+                extra = item.extra or {}
+                if (
+                    extra.get("scope_status") != "history"
+                    or item.fetch_status != "fetched"
+                    or not item.published_at
+                    or extra.get("date_provenance") not in {"page_metadata", "page_visible"}
+                ):
+                    continue
+                text = item.content_text or ""
+                matches = defaultdict(list)
+                for credit in INLINE_CITATION.finditer(text):
+                    passage = inline_citation_passage(text, credit)
+                    compared = passage.rstrip("。；")
+                    if len(compared) < 40:
+                        continue
+                    for original, names in originals:
+                        if (
+                            original.published_at
+                            and original.published_at[:10] <= item.published_at[:10]
+                            and any(name in credit.group() for name in names)
+                            and compared in (original.content_text or "")
+                        ):
+                            matches[original.local_id].append(credit.group() + passage)
+                if not matches:
+                    continue
+                decision = scope.classify_result(
+                    SearchResult(
+                        url=item.url,
+                        title=item.title,
+                        snippet=item.snippet or "",
+                        source_name=item.source_name,
+                        provider=item.provider or "fetch",
+                        lang=item.lang or "unknown",
+                        published_at=datetime.fromisoformat(item.published_at),
+                        raw={"date_provenance": extra["date_provenance"]},
+                    ),
+                    agent="media_propagation",
+                    body_text=text,
+                )
+                if decision.bucket == "main":
+                    history_citations[item.local_id] = dict(matches)
+
+        # Dedupe by ref when a source has already been selected for the current event.
+        eligible = {item.local_id: item for item in main_evidence}
+        eligible.update(
+            {item.local_id: item for item in evidence if item.local_id in history_citations}
+        )
         extras = [
             item
-            for item in main_evidence
+            for item in eligible.values()
             if item.local_id not in nodes_by_id
             and item.fetch_status == "fetched"
             and item.published_at
             and credit_pattern.search(source_text(item))
         ]
+
+        def cites_selected(item):
+            return any(
+                any(name in match.group() for name in publisher_names)
+                for match in INLINE_CITATION.finditer(source_text(item))
+            )
+
         extras.sort(
             key=lambda item: (
+                item.local_id not in history_citations,
+                not cites_selected(item),
                 not any(name in source_text(item) for name in publisher_names),
                 item.source_tier or 9,
                 item.local_id,
@@ -2240,7 +2338,9 @@ class FullReportBuilder:
         seen_publications = set()
         for item in [*selected, *credited, *originals]:
             identity = publication_identity(item)
+            credits = (getattr(item, "extra", None) or {}).get("page_source_credits", [])
             body = re.sub(r"\s+", "", item.content_text or "")
+            path = urlsplit(item.url).path.rstrip("/")
             key = (
                 identity["publisher"],
                 identity.get("platform"),
@@ -2251,9 +2351,16 @@ class FullReportBuilder:
             # Keep all evidence cards. Only the relation model uses one
             # representative for exact mirrors of a dated publication.
             if body and item.published_at and identity["publisher"]:
-                if key in seen_publications:
+                # A mobile/legacy mirror may have a different carrier label.
+                # Collapse only identical titled bodies with the same dated
+                # document path and explicit credit in that case.
+                mirror = (path, item.title.strip(), item.published_at, key[-1], tuple(credits))
+                mirror = mirror if path and credits else None
+                if key in seen_publications or mirror in seen_publications:
                     continue
                 seen_publications.add(key)
+                if mirror is not None:
+                    seen_publications.add(mirror)
             excerpts = windows(item)
             sources.append(
                 {
@@ -2264,15 +2371,16 @@ class FullReportBuilder:
                     ),
                     "source_name": identity["publisher"],
                     "publisher_entity": identity["publisher"],
-                    "page_source_credits": (getattr(item, "extra", None) or {}).get(
-                        "page_source_credits", []
-                    ),
+                    "candidate_publisher_names": sorted(publisher_terms(item)),
+                    "page_source_credits": credits,
                     "url": item.url,
                     "published_at": item.published_at,
                     "excerpt": "\n[…]\n".join(excerpts),
                     "excerpt_windows": excerpts,
                 }
             )
+            if item.local_id in history_citations:
+                sources[-1]["history_citations"] = history_citations[item.local_id]
         return sources
 
     @staticmethod
