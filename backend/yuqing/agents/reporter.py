@@ -46,7 +46,7 @@ from yuqing.core.publication_relations import (
 
 
 class OpenAIReportAgent:
-    EDITORIAL_VERSION = "question-led-v4"
+    EDITORIAL_VERSION = "reader-decision-v5"
     SUMMARY_DRAFT_VERSION = "four-stage-targeted-v11"
     RELATION_VERSION = "source-identity-v7"
 
@@ -104,12 +104,12 @@ class OpenAIReportAgent:
             return None
         return candidate
 
-    async def summarize(self, context: dict[str, Any]) -> dict[str, Any]:
-        """Draft after assembly and independently review the complete narrative."""
-        fingerprint = digest([self.SUMMARY_DRAFT_VERSION, SUMMARY_VERSION, context])
+    async def cached_summary(self, context: dict[str, Any]) -> dict[str, Any]:
         if self.database and self.task_id:
             cached = await self.database.get_analysis_batch(
-                self.task_id, "reporter:summary", fingerprint
+                self.task_id,
+                "reporter:summary",
+                digest([self.SUMMARY_DRAFT_VERSION, SUMMARY_VERSION, context]),
             )
             if isinstance(cached, dict) and not check_paragraphs(
                 cached.get("paragraphs"),
@@ -126,6 +126,14 @@ class OpenAIReportAgent:
                     and review.get("content_digest") == digest(cached["paragraphs"])
                 ):
                     return cached
+        return {}
+
+    async def summarize(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Draft after assembly and independently review the complete narrative."""
+        cached = await self.cached_summary(context)
+        if cached:
+            return cached
+        fingerprint = digest([self.SUMMARY_DRAFT_VERSION, SUMMARY_VERSION, context])
         feedback: dict[str, Any] = {}
         diagnostics = []
         try:
@@ -1431,7 +1439,9 @@ class OpenAIReportAgent:
         ][:limit]
         return {
             "task": context.get("task", {}),
-            "audience": context.get("audience", "公众读者与高校或机构决策者"),
+            "audience": "希望判断这件事和后续进展的公众读者"
+            if section == "07"
+            else context.get("audience", "公众读者与高校或机构决策者"),
             "facts": ordered,
             "sources": sources,
             "open_questions": [str(item)[:180] for item in context.get("open_questions", [])][
@@ -1480,7 +1490,12 @@ class OpenAIReportAgent:
             "05回答各主体在主张什么、依据与认定对象有何不同、哪些分歧已经回应或仍未回应；"
             "缺少评论时分析公开立场，禁止用媒体样本代替公众。"
             "06回答相似机制、关键差异和可迁移的边界，不能只列案例。"
-            "07把当前仍需处理的问题对应到行动、责任职能与触发条件；"
+            "07先写会改变读者判断的具体问题，最多三项。interpretation说明现有证据支持到哪一步，"
+            "implication说明与读者的具体关系，uncertainty交代当前不能推导的结论。"
+            "action写读者能核对的具体材料、渠道或范围，trigger写出现什么可核实的新证据才应更新判断。"
+            "只有依据支持具体机构行动时才指定机构职能；其他情况owner写能采取该核对动作的读者或实际受影响对象。"
+            "把没有获得的材料写成核查方向，不得用节选或未列入的材料证明原网页、公告或裁判文书没有该内容。"
+            "不把整理时间线、准备宣传问答、维护统一口径作为读者建议。"
             "已撤销、已复核或已通报的事项不能再建议立即完成，改查剩余解释、落实或救济缺口。"
             "不同程序可能有不同认定对象；撤销处分不自动证明原处分违法，民事裁判不自动否定全部纪律依据。"
             "covered_analyses仅用于避免重复，不是事实依据；新章须增加不同问题、主体、证据或解释，不能改标题复述。"
@@ -1520,7 +1535,7 @@ class OpenAIReportAgent:
         local = {
             **self._chapter_context(context, "07"),
             "validation_feedback": feedback,
-            "repair_instruction": "依据具体拒绝原因修订第07章。不得新增数字、确定性传播效果或无依据建议。每条必须有行动、责任职能、触发条件和不确定性。",
+            "repair_instruction": "依据具体拒绝原因修订第07章。只从所引已审陈述推出读者现在能作的判断，材料缺口写成下一步核对渠道或触发条件，不推断原文缺了什么。不新增数字、确定性传播效果或无依据建议。每条必须有行动、适用对象、触发条件和不确定性。",
         }
         draft = await self._draft(local, "07")
         draft["analyses"] = [

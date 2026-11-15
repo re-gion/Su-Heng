@@ -120,7 +120,7 @@ def refresh_summary_release(report: dict) -> None:
 
 
 async def attach_executive_summary(
-    report: dict, reporter, *, scope_reviewer=None, scope_required=False
+    report: dict, reporter, *, scope_reviewer=None, scope_required=False, cached_only=False
 ) -> None:
     block = next((b for b in report["blocks"] if b.get("type") == "executive_summary"), None)
     if block is None:
@@ -144,16 +144,15 @@ async def attach_executive_summary(
         ):
             limits["items"].append({"id": "LS01", "category": "摘要审查独立性", "text": notice})
     context = summary_context(report)
-    if (
-        not context["facts"]
-        or reporter is None
-        or not hasattr(reporter, "summarize")
-        or (scope_required and scope_reviewer is None)
-    ):
+    summarize = getattr(reporter, "cached_summary" if cached_only else "summarize", None)
+    if not context["facts"] or summarize is None or (scope_required and scope_reviewer is None):
         refresh_summary_release(report)
         return
     try:
-        result = await reporter.summarize(context)
+        result = await summarize(context)
+        if cached_only and not result:
+            refresh_summary_release(report)
+            return
         if not isinstance(result, dict):
             result = {}
         candidate = {

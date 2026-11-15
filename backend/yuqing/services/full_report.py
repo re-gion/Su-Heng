@@ -823,7 +823,13 @@ class FullReportBuilder:
         return all(await self.scope_reviewer.accepted(sorted(texts), kind="report_text"))
 
     async def build(
-        self, task_id: str, *, forum=(), orchestration_limitations=(), diagnostic_only=False
+        self,
+        task_id: str,
+        *,
+        forum=(),
+        orchestration_limitations=(),
+        diagnostic_only=False,
+        defer_summary=False,
     ):
         task = await self.database.get_task(task_id)
         gateway = getattr(self.scope_reviewer, "gateway", None)
@@ -838,6 +844,7 @@ class FullReportBuilder:
                 forum=forum,
                 orchestration_limitations=orchestration_limitations,
                 diagnostic_only=diagnostic_only,
+                defer_summary=defer_summary,
                 scope_review_cap=cap if protected else None,
             )
         finally:
@@ -851,6 +858,7 @@ class FullReportBuilder:
         forum: Sequence[ForumMessage] = (),
         orchestration_limitations: Sequence[str] = (),
         diagnostic_only: bool = False,
+        defer_summary: bool = False,
         scope_review_cap: int | None = None,
     ) -> tuple[str, dict[str, Any], str]:
         task = await self.database.get_task(task_id)
@@ -1769,14 +1777,23 @@ class FullReportBuilder:
             analysis_facts,
             analysis_sources,
             propagation_edges=propagation_edges,
+            reuse_reviewed_actions=False,
+        )
+        rejected_actions = (
+            enrichment.get("analysis_review", {})
+            .get("chapters", {})
+            .get("07", {})
+            .get("rejected", 0)
         )
         if (
             not diagnostic_only
-            and quality["rejected_items"]
+            and (quality["rejected_items"] or rejected_actions)
             and not summary["so_what"]
             and hasattr(self.reporter, "repair_actions")
         ):
             original_rejections = dict(quality["rejected_items"])
+            if rejected_actions:
+                original_rejections["action_semantic_review_rejected"] = rejected_actions
             try:
                 repaired = await self.reporter.repair_actions(context, original_rejections)
                 if repaired.get("analyses"):
@@ -1788,6 +1805,7 @@ class FullReportBuilder:
                         analysis_facts,
                         analysis_sources,
                         propagation_edges=propagation_edges,
+                        reuse_reviewed_actions=False,
                     )
                 quality["action_repair"] = {
                     "status": "accepted" if summary["so_what"] else "rejected",
@@ -2022,7 +2040,7 @@ class FullReportBuilder:
                         ]
         await attach_executive_summary(
             report,
-            None if diagnostic_only else self.reporter,
+            None if diagnostic_only or defer_summary else self.reporter,
             scope_reviewer=self.scope_reviewer
             if task.investigation_scope in PROTECTED_SCOPES
             else None,
@@ -2036,7 +2054,26 @@ class FullReportBuilder:
         )
         return report_id, validated, path
 
-    async def retry_missing_reviews(self, task_id: str, report: dict) -> dict:
+    async def finalize_summary(self, task_id: str, report: dict, *, cached_only=False) -> dict:
+        task = await self.database.get_task(task_id)
+        if task is None:
+            return report
+        scope_required = task.investigation_scope in PROTECTED_SCOPES
+        if scope_required and self.scope_reviewer is not None:
+            self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
+        await attach_executive_summary(
+            report,
+            self.reporter,
+            scope_reviewer=self.scope_reviewer if scope_required else None,
+            scope_required=scope_required,
+            cached_only=cached_only,
+        )
+        prune_citation_backlinks(report)
+        return validate_report(report).report
+
+    async def retry_missing_reviews(
+        self, task_id: str, report: dict, *, review_summary=True
+    ) -> dict:
         """Review missing core sections using the same screened report and evidence."""
         quality = report["quality"]
         if self.reporter is None or quality.get("release_label") == "retrieval_diagnostic":
@@ -2098,7 +2135,7 @@ class FullReportBuilder:
                 missing.remove("media_propagation")
                 new_relations = True
 
-        if "executive_summary" in missing or new_relations:
+        if review_summary and ("executive_summary" in missing or new_relations):
             await attach_executive_summary(
                 candidate,
                 self.reporter,
@@ -2110,6 +2147,8 @@ class FullReportBuilder:
                 and candidate["quality"]["executive_summary"]["status"] != "complete"
             ):
                 return report
+        elif new_relations:
+            refresh_summary_release(candidate)
         prune_citation_backlinks(candidate)
         return validate_report(candidate).report
 

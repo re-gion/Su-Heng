@@ -12,7 +12,12 @@ from yuqing.core.event_chronology import (
     restore_report_chronology,
 )
 from yuqing.core.history_cards import reconcile_history_card_identity, reconcile_history_completion
-from yuqing.core.timeline_grouping import group_timeline_events
+from yuqing.core.timeline_grouping import (
+    group_timeline_events,
+    publication_fact_key,
+    publication_reading_parts,
+    same_publication_fact,
+)
 
 SOURCE_SUPPORT_STATUSES = {
     "single_source_supported",
@@ -99,11 +104,22 @@ def presentation_counts(items: list[dict]) -> dict[str, int]:
 
 def fact_event_groups(items: list[dict]) -> list[list[dict]]:
     """Use the timeline identity for dated events and retain each original claim."""
-    event_by_ref = {
-        ref: event["claim_ref"]
-        for event in group_timeline_events(event_timeline(items))
-        for ref in event["claim_refs"]
-    }
+    event_by_ref = {}
+    publications: dict[tuple, list[tuple[tuple, tuple]]] = {}
+    for event in group_timeline_events(event_timeline(items)):
+        identity = publication_fact_identity(event)
+        parts = publication_reading_parts(event["text"])
+        if identity and parts:
+            existing = publications.setdefault((event["date"], *parts[:3]), [])
+            original = next(
+                (key for old, key in existing if same_publication_fact(parts, old)), None
+            )
+            if original:
+                identity = original
+            else:
+                existing.append((parts, identity))
+        for ref in event["claim_refs"]:
+            event_by_ref[ref] = identity or ("event", event["claim_ref"])
     dated = [(explicit_event_date(item.get("text") or ""), item) for item in items]
     groups: dict[tuple, list[dict]] = {}
     for index, (date, item) in enumerate(
@@ -113,13 +129,22 @@ def fact_event_groups(items: list[dict]) -> list[list[dict]]:
         text = item.get("text") or ""
         # Without an explicit action date, only identical wording can be folded.
         if ref in event_by_ref:
-            key = ("event", event_by_ref[ref])
+            key = event_by_ref[ref]
         elif not date and text.strip():
             key = ("undated", text)
         else:
             key = ("claim", index)
         groups.setdefault(key, []).append(item)
     return list(groups.values())
+
+
+def publication_fact_identity(item: dict) -> tuple | None:
+    text = item.get("text") or ""
+    parts = publication_reading_parts(text)
+    date = explicit_event_date(text)
+    if parts and date and parts[3]:
+        return ("publication_fact", date, *parts[:3], publication_fact_key(parts))
+    return None
 
 
 def fact_status_key(item: dict) -> tuple:

@@ -312,3 +312,139 @@ def event_display_claims(item: dict) -> list[dict]:
             continue
         displayed.append(member)
     return displayed
+
+
+_DATED_TIME = (
+    r"(?:\d{4}年\d{1,2}月\d{1,2}日)?(?:凌晨|早上|上午|中午|下午|晚间|夜间|晚|"
+    r"\d{1,2}时(?:\d{1,2}分)?)?"
+)
+_PUBLISHED_MATERIAL = re.compile(
+    rf"^(?P<actor>[\w]{{2,32}}?)(?:相关账号|官方账号|官网|网站)?(?:于)?"
+    rf"{_DATED_TIME}(?:当日|同日)?(?:(?P<video>发布(?:的)?(?:测试)?视频|测试视频(?=称|显示))|"
+    r"(?P<notice>发布(?:了)?(?:情况|调查复核)?通报|(?:情况|调查复核)?通报(?=称|载明|公布|显示|已))|"
+    r"(?P<reply>发布(?:了)?(?:情况说明|声明)|情况说明(?=称|载明|公布|显示)|(?:回应|声明)(?=称)))"
+)
+_REPORTED = re.compile(
+    r"^(?:据)?[^，,。]{2,32}?(?:(?:综合)?报道(?:称|指出|显示)?|转载的|稿件[，,]\s*(?:报道称|称))"
+    r"[，,\s]*"
+)
+_DIFFERENT_RELEASE = re.compile(r"另行|另一份|第二份|第二次|再次|补充通报|[《》]")
+
+
+def publication_reading_parts(text: str) -> tuple[str, str, str, str] | None:
+    """Identify explicitly named published materials for reading, keeping assertions intact."""
+    leading = _DATE.match(text)
+    timing = re.search(
+        r"\d{1,2}日(凌晨|早上|上午|中午|下午|晚间|夜间|晚|\d{1,2}时(?:\d{1,2}分)?)", text
+    )
+    candidate = text[leading.end() :] if leading else text
+    candidate = re.sub(
+        r"^(?:凌晨|早上|上午|中午|下午|晚间|夜间|晚|\d{1,2}时(?:\d{1,2}分)?)", "", candidate
+    )
+    candidate = _REPORTED.sub("", candidate.lstrip("，, "), count=1)
+    candidate = (
+        candidate.removeprefix("“").replace("”", "", 1) if candidate.startswith("“") else candidate
+    )
+    if _DIFFERENT_RELEASE.search(candidate[:48]):
+        return None
+    match = _PUBLISHED_MATERIAL.match(candidate)
+    if not match:
+        return None
+    actor = match["actor"]
+    if actor.startswith(("某", "据", "一段", "一则", "网传")) or actor in {
+        "校方",
+        "学校",
+        "官方",
+        "机构",
+        "企业",
+        "公司",
+    }:
+        return None
+    kind = "测试视频" if match["video"] else "通报" if match["notice"] else "回应"
+    detail = re.sub(r"^[，,：:\s]*(?:称|载明|显示|公布)?[，,：:\s]*", "", candidate[match.end() :])
+    slot = timing[1] if timing else ""
+    return actor, kind, slot, detail
+
+
+def publication_fact_key(parts: tuple[str, str, str, str]) -> str:
+    """Normalize attribution and equivalent units in the displayed proposition only."""
+    detail = parts[3].casefold()
+    detail = re.sub(
+        r"(\d+(?:\.\d+)?)\s*km/h\s*(?:至|[-—~－])\s*(?:零|静止|0)(?:km/h)?"
+        r"|(\d+(?:\.\d+)?)\s*[-—~－]\s*0\s*km/h",
+        lambda match: (match[1] or match[2]) + "km/h至0",
+        detail,
+    )
+    counts = dict(zip("一二两三四五六七八九", "1223456789", strict=True))
+    detail = re.sub(r"([一二两三四五六七八九])(?:台|辆)", lambda m: counts[m[1]] + "辆", detail)
+    detail = re.sub(r"(\d+)台", r"\1辆", detail)
+    detail = re.sub(r"(制动)(?:测试)?(?:中|时)", r"\1", detail)
+    if re.match(r"\s*\d+辆", detail):
+        detail = re.sub(r"(?<!平)均(?![值衡等匀数分])", "", detail)
+    detail = re.sub(r"(?<!\d)[.:-]|[.:-](?!\d)", "", detail).replace("％", "%")
+    return re.sub(r"[^\w.%:-]", "", detail)
+
+
+def same_publication_fact(a: tuple[str, str, str, str], b: tuple[str, str, str, str]) -> bool:
+    """Keep the date and all decision, number and polarity markers while grouping."""
+    if a[:3] != b[:3] or not a[3] or not b[3]:
+        return False
+    left, right = publication_fact_key(a), publication_fact_key(b)
+    if left == right:
+        return True
+    markers = (
+        r"\d+(?:\.\d+)?|撤销|维持|驳回|批准|召回|未|没有|否认|不|无|否|仅|部分|全部|均|先后|"
+        r"自购|自费购买|侧向|纵向|静态|动态"
+    )
+    if re.findall(markers, left) != re.findall(markers, right):
+        return False
+    return min(len(left), len(right)) >= 24 and _similar(left, right)
+
+
+def timeline_reading_groups(nodes: list[dict]) -> list[dict]:
+    """Present one publication with its separate details, without synthesizing claims."""
+    result: list[dict] = []
+    publications: dict[tuple, list[dict]] = {}
+    for item in group_timeline_events(nodes):
+        parts = publication_reading_parts(item["text"])
+        if not parts or not item.get("claim_ref"):
+            result.append(item)
+            continue
+        actor, kind, slot, _ = parts
+        key = (item["date"], actor, kind)
+        buckets = publications.setdefault(key, [])
+        group = next(
+            (
+                old
+                for old in buckets
+                if not slot or not old["publication_time"] or old["publication_time"] == slot
+            ),
+            None,
+        )
+        if group is None:
+            group = {
+                **item,
+                "publication_title": f"{actor}{'回应' if kind == '回应' else '发布' + kind}",
+                "publication_time": slot,
+                "related_claims": list(item.get("related_claims", [item])),
+            }
+            buckets.append(group)
+            result.append(group)
+        else:
+            group["publication_time"] = group["publication_time"] or slot
+            for field in ("claim_refs", "evidence_refs"):
+                group[field] = list(dict.fromkeys([*group[field], *item[field]]))
+            group["related_claims"].extend(item.get("related_claims", [item]))
+    return result
+
+
+def timeline_publication_details(item: dict) -> list[tuple[str, dict]]:
+    """Show each distinct detail with the status of its own underlying claim."""
+    details = {}
+    for member in item["related_claims"]:
+        parts = publication_reading_parts(member["text"])
+        if not parts or not parts[3]:
+            details.setdefault(_compact(member["text"]), (member["text"], member))
+            continue
+        details.setdefault(publication_fact_key(parts), (parts[3], member))
+    return list(details.values())

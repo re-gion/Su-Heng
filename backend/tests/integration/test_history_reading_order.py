@@ -101,7 +101,7 @@ class IntroductionParser(HTMLParser):
 
 
 @pytest.mark.parametrize("view", ["brief", "full"])
-def test_each_case_introduction_precedes_its_analysis_and_joint_analysis_is_last(view):
+def test_main_case_is_visible_and_additional_cases_keep_their_reading_order(view):
     report = report_fixture()
     original = copy.deepcopy(report)
     page = render_html(report, view=view)
@@ -116,8 +116,11 @@ def test_each_case_introduction_precedes_its_analysis_and_joint_analysis_is_last
     assert report == original  # Replay must not invalidate narrative review hashes.
     parser = IntroductionParser()
     parser.feed(page)
-    assert "甲公司车型出现踏板断裂风险" in "".join(parser.visible)
-    assert "乙公司电池存在安全风险" in "".join(parser.visible)
+    visible = "".join(parser.visible)
+    assert "甲公司车型出现踏板断裂风险" in visible
+    assert "乙公司电池存在安全风险" not in visible
+    assert "两案共同启示的机制解释" not in visible
+    assert "其他已核案例与综合对照" in page
     if view == "brief":
         assert 'class="report-section is-hidden" id="report-section-06"' not in page
 
@@ -169,13 +172,14 @@ def test_unknown_history_claim_is_not_silently_attached_to_a_known_case():
     assert not chapter["cards"][0]["analyses"]
 
 
-def test_legacy_analysis_without_case_cards_unfolds_facts_as_background_leads():
+def test_legacy_analysis_without_case_cards_collects_facts_as_background_leads():
     report = report_fixture()
     report["blocks"] = report["blocks"][:2]
     page = render_html(report, view="full")
     parser = IntroductionParser()
     parser.feed(page)
-    assert "甲公司车型出现踏板断裂风险" in "".join(parser.visible)
+    assert "甲公司车型出现踏板断裂风险" in page
+    assert "甲公司车型出现踏板断裂风险" not in "".join(parser.visible)
     assert "案例背景待补充" in page
     assert "需补齐案例身份与背景后重新生成对照" in page
     assert "两案共同启示的机制解释" not in page

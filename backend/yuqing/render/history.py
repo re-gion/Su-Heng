@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from yuqing.core.history_cards import unique_history_cards
+from yuqing.core.history_cards import history_relevance, unique_history_cards
 
 
 def history_chapter(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -101,10 +101,23 @@ def history_chapter(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
     }
 
 
-def arrange_history(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def arrange_history(blocks: list[dict[str, Any]], topic: str = "") -> list[dict[str, Any]]:
     chapter = history_chapter(blocks)
     if chapter is None:
         return blocks
+    chapter["cards"].sort(
+        key=lambda card: (
+            history_relevance(
+                topic,
+                " ".join(
+                    str(card.get(field) or "") for field in ("event_name", "summary", "comparison")
+                ),
+            ),
+            bool(card.get("analyses")),
+            len(card.get("evidence_refs", [])),
+        ),
+        reverse=True,
+    )
     result = []
     inserted = False
     for block in blocks:

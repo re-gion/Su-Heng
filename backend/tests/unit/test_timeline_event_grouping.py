@@ -1,7 +1,8 @@
 """Timeline cards represent events while every authoritative claim stays traceable."""
 
 from yuqing.core.event_chronology import event_timeline as dated_claims
-from yuqing.core.timeline_grouping import group_timeline_events
+from yuqing.core.timeline_grouping import group_timeline_events, timeline_reading_groups
+from yuqing.core.verification_presentation import fact_event_groups
 from yuqing.render.visualizations import timeline_visual
 
 
@@ -39,6 +40,68 @@ def test_near_duplicate_test_publications_from_different_sources_share_one_event
     assert set(nodes[0]["claim_refs"]) == {"C005", "C016"}
     assert set(nodes[0]["evidence_refs"]) == {"E001", "E018"}
     assert nodes[0]["text"] in {fact["text"] for fact in facts}
+
+
+def test_reader_groups_one_publication_but_keeps_separate_outcomes_and_releases():
+    facts = [
+        record("C001", "甲大学2025年9月20日通报称校方决定撤销记过处分。", "E001"),
+        record("C002", "2025年9月20日，甲大学通报称学位评定委员会决定维持硕士学位。", "E002"),
+        record("C003", "2025年9月20日，甲大学另行发布通报称启动新的专项调查。", "E003"),
+        record("C004", "甲市中级人民法院2025年9月20日发布通报称二审维持原判。", "E004"),
+    ]
+    groups = timeline_reading_groups(dated_claims(facts))
+    assert len(groups) == 3 and groups[0]["claim_refs"] == ["C001", "C002"]
+    html = timeline_visual({"items": dated_claims(facts)})
+    assert "甲大学发布通报" in html and "撤销记过处分" in html and "维持硕士学位" in html
+    assert len(fact_event_groups(facts)) == 4
+
+
+def test_reading_fact_key_normalizes_speed_units_and_chinese_count_without_changing_facts():
+    facts = [
+        record(
+            "C001",
+            "2026年10月8日，甲机构相关账号发布测试视频，显示3台甲型汽车在100km/h至0制动中踏板支架均断裂。",
+        ),
+        record(
+            "C002",
+            "2026年10月8日，乙媒体报道称“甲机构”测试视频显示三辆甲型汽车在100-0km/h制动时踏板支架断裂。",
+        ),
+        record(
+            "C003", "2026年10月8日，甲机构发布测试视频称4台甲型汽车在100km/h至0制动中踏板支架断裂。"
+        ),
+    ]
+    groups = fact_event_groups(facts)
+    assert [[item["claim_ref"] for item in group] for group in groups] == [
+        ["C001", "C002"],
+        ["C003"],
+    ]
+
+
+def test_fact_group_preserves_distinct_decimal_values_in_the_same_notice():
+    groups = fact_event_groups(
+        [
+            record("C001", "甲机构2025年9月20日通报称样本中的检出比例为1.9%。"),
+            record("C002", "甲机构2025年9月20日通报称样本中的检出比例为19%。"),
+        ]
+    )
+    assert len(groups) == 2
+
+
+def test_fact_group_resolves_same_day_notice_across_reposts():
+    groups = fact_event_groups(
+        [
+            record("C001", "甲大学2025年9月20日发布通报称已组建工作组复核论文和处分。"),
+            record("C002", "乙报2025年9月20日报道，甲大学当日通报称已组建工作组复核论文和处分。"),
+            record(
+                "C003", "丙平台2025年9月20日发布乙报稿件，称甲大学通报已组建工作组复核论文和处分。"
+            ),
+            record("C004", "甲大学2025年9月20日另行发布通报称已组建工作组复核论文和处分。"),
+        ]
+    )
+    assert [[item["claim_ref"] for item in group] for group in groups] == [
+        ["C001", "C002", "C003"],
+        ["C004"],
+    ]
 
 
 def test_same_announcement_combines_overview_and_details_without_deleting_claims():

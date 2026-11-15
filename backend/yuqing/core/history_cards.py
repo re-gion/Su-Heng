@@ -29,6 +29,11 @@ def historical_identity_issue(case: dict, text: str) -> str | None:
     if not subject or subject in generic:
         return "case_identity_unconfirmed"
     at = name.find(subject)
+    institution = compact(case.get("institution"))
+    if at < 0 and institution and subject.startswith(institution) and name.startswith(institution):
+        # A claim can name a more specific role (e.g. the institution's
+        # former student) while the case is anchored to the institution.
+        at = 0
     if at < 0:
         return "case_subject_mismatch"
     # A university named as the object of an office's interview is not that
@@ -37,13 +42,22 @@ def historical_identity_issue(case: dict, text: str) -> str | None:
         r"约谈|调查|督查|处罚|问责|通报|回应|起诉|召回|interview|investigat|sanction", name[:at]
     ):
         return "case_subject_mismatch"
-    institution = compact(case.get("institution"))
     if institution and institution not in body:
         # A whole page may mention several English institutions. Matching its
         # Chinese case label to a Chinese sentence is not a trusted bilingual
         # identity mapping for a different source-language anchor.
         return "case_subject_alias_unconfirmed"
     return None
+
+
+def history_relevance(topic: str, text: str) -> int:
+    def terms(value: str) -> set[str]:
+        chinese = re.findall(r"[\u4e00-\u9fff]+", value)
+        return {
+            part[index : index + 2] for part in chinese for index in range(len(part) - 1)
+        } | set(re.findall(r"[a-z0-9]{2,}", value.casefold()))
+
+    return len(terms(topic) & terms(text))
 
 
 def _ambiguous_case_identity(left: dict, right: dict) -> bool:

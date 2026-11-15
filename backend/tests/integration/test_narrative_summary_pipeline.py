@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,10 @@ async def narrative_report():
 
 
 @pytest.mark.asyncio
-async def test_full_builder_generates_summary_from_final_screened_blocks(runtime_dir, claim_limits):
+@pytest.mark.parametrize("defer_summary", [False, True])
+async def test_full_builder_generates_summary_from_final_screened_blocks(
+    runtime_dir, claim_limits, defer_summary
+):
     db = Database(runtime_dir / "summary.db")
     await db.initialize()
     try:
@@ -111,10 +115,17 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
         )
 
         class Reporter:
+            calls = 0
+            agent = None
+
             async def enrich(self, _context):
                 return {}
 
+            async def cached_summary(self, context):
+                return await self.agent.cached_summary(context)
+
             async def summarize(self, context):
+                self.calls += 1
                 # This callback must see final limitations, not the chapter-local context.
                 assert context["limitations"]
                 assert context["facts"]["C001"]["text"] == text
@@ -181,17 +192,27 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
                             return {"id": sentence["id"], "supported": True}
                         return approve(paragraphs)
 
-                return await OpenAIReportAgent(Gateway(), "fixture").summarize(context)
+                self.agent = OpenAIReportAgent(Gateway(), "fixture")
+                self.agent.bind(db, task.id)
+                return await self.agent.summarize(context)
 
-        _, report, path = await FullReportBuilder(
-            db, runtime_dir / "reports", reporter=Reporter()
-        ).build(task.id)
+        reporter = Reporter()
+        builder = FullReportBuilder(db, runtime_dir / "reports", reporter=reporter)
+        _, report, path = await builder.build(task.id, defer_summary=defer_summary)
+        if defer_summary:
+            assert reporter.calls == 0
+            assert report["quality"]["executive_summary"]["status"] == "fact_brief"
+            resumed = deepcopy(report)
+            report = await builder.finalize_summary(task.id, report)
+            assert await builder.finalize_summary(task.id, resumed, cached_only=True) == report
+        assert reporter.calls == 1
         summary = next(b for b in report["blocks"] if b["type"] == "executive_summary")
         assert summary["summary_mode"] == "narrative"
         assert report["quality"]["executive_summary"]["status"] == "complete"
-        assert 'class="summary-narrative"' in await asyncio.to_thread(
-            Path(path).read_text, encoding="utf-8"
-        )
+        if not defer_summary:
+            assert 'class="summary-narrative"' in await asyncio.to_thread(
+                Path(path).read_text, encoding="utf-8"
+            )
         assert report["quality"]["release_label"] != "full_report"
     finally:
         await db.close()

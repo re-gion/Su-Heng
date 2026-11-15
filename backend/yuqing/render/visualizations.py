@@ -8,7 +8,11 @@ from collections import defaultdict
 from typing import Any
 
 from yuqing.core.claim_semantics import publication_actor
-from yuqing.core.timeline_grouping import event_display_claims, group_timeline_events
+from yuqing.core.timeline_grouping import (
+    event_display_claims,
+    timeline_publication_details,
+    timeline_reading_groups,
+)
 from yuqing.core.verification_presentation import LABELS, NOTES, presentation_status
 
 
@@ -97,7 +101,7 @@ def timeline_visual(block: dict) -> str:
     items = [item for item in block.get("items", []) if item.get("date") and item.get("text")]
     if not items:
         return ""
-    items = group_timeline_events(sorted(items, key=lambda item: str(item["date"])))
+    items = timeline_reading_groups(sorted(items, key=lambda item: str(item["date"])))
     categories = list(dict.fromkeys(_category(item["text"]) for item in items))
     options = "".join(
         f'<option value="{_escape(category)}">{_escape(category)}</option>'
@@ -126,6 +130,7 @@ def timeline_visual(block: dict) -> str:
             else _timeline_badge(item)
         )
         expand_label = f"查看 {member_count} 条陈述与依据" if member_count > 1 else "查看依据"
+        publication = item.get("publication_title") if member_count > 1 else None
         additions = (
             "".join(
                 f'<span class="visual-event-addition">{_escape(member["text"])}</span>'
@@ -135,6 +140,11 @@ def timeline_visual(block: dict) -> str:
             if member_count > 1
             else ""
         )
+        if publication:
+            additions = "".join(
+                f'<span class="visual-event-addition">{_escape(detail)} {_timeline_badge(member)}</span>'
+                for detail, member in timeline_publication_details(item)
+            )
         window = (
             f'<span class="visual-window">{_escape(item["window_label"])}</span>'
             if item.get("window_label")
@@ -146,7 +156,7 @@ def timeline_visual(block: dict) -> str:
             '<span class="visual-dot" aria-hidden="true"></span><div class="visual-event-body">'
             f'<span class="visual-category">{_escape(category)}</span>{window}'
             '<details class="visual-detail"><summary>'
-            f'<span class="visual-event-text">{_escape(item["text"])}{additions}</span>'
+            f'<span class="visual-event-text">{_escape(publication or item["text"])}{additions}</span>'
             f'<span class="visual-expand-label">{expand_label}</span></summary>'
             + _timeline_details(item)
             + "</details>"

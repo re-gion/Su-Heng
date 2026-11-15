@@ -14,6 +14,7 @@ from yuqing.core.executive_summary import (
     summary_context,
 )
 from yuqing.core.history_cards import group_history_candidates
+from yuqing.core.timeline_grouping import publication_reading_parts, same_publication_fact
 from yuqing.core.verification_presentation import (
     LABELS,
     NOTES,
@@ -291,6 +292,36 @@ def _fact_table(block: dict[str, Any]) -> str:
     for event in fact_event_groups(block.get("items", [])):
         if len(event) == 1:
             groups.append(claim_card(event[0]))
+            continue
+        publication = publication_reading_parts(event[0]["text"])
+        if publication and all(
+            (parts := publication_reading_parts(item["text"]))
+            and same_publication_fact(publication, parts)
+            for item in event
+        ):
+            leader = next((item for item in event if item.get("badge") == "verified"), event[0])
+            other = [item for item in event if item is not leader]
+            statuses = "".join(
+                f'<a class="badge {_escape(status)}" href="#claim-{_escape(item["claim_ref"])}">'
+                f"{_escape(BADGE_LABELS.get(status, status))}</a> "
+                for status, item in {
+                    _display_badge(item): item
+                    for item in other
+                    if _display_badge(item) != _display_badge(leader)
+                }.items()
+            )
+            groups.append(
+                '<div class="fact-event-group">'
+                + claim_card(leader)
+                + (
+                    f'<p class="source-boundary">其他陈述的核验状态 {statuses}</p>'
+                    if statuses
+                    else ""
+                )
+                + f'<details class="related-claims"><summary>其他表述与依据（{len(other)} 条）</summary>'
+                + "".join(map(claim_card, other))
+                + "</details></div>"
+            )
             continue
         by_status = {}
         for item in event:
@@ -745,7 +776,9 @@ def _history_reference(card: dict[str, Any]) -> str:
 
 def _history_chapter(block: dict[str, Any]) -> str:
     anchors = "".join(f'<span id="{_escape(ref)}"></span>' for ref in block.get("anchors", []))
-    cards = "".join(_history_case(card) for card in block.get("cards", []))
+    ready = block.get("cards", [])
+    cards = _history_case(ready[0]) if ready else ""
+    other_cards = "".join(_history_case(card) for card in ready[1:])
     joint = "".join(
         '<div class="history-joint">'
         + _optional_field("涉及案例", "、".join(analysis.get("case_names", [])))
@@ -764,7 +797,7 @@ def _history_chapter(block: dict[str, Any]) -> str:
         for item in block.get("excluded_candidates", [])
     )
     return (
-        f'<section class="history-chapter">{anchors}<h2>历史对照</h2>{cards}{joint}'
+        f'<section class="history-chapter">{anchors}<h2>历史对照</h2>{cards}'
         + (
             '<p class="fallback-note">未形成可直接使用的正式历史对照。'
             + _escape(block.get("fallback_text") or "需补充独立案例的背景与来源。")
@@ -778,10 +811,18 @@ def _history_chapter(block: dict[str, Any]) -> str:
             else ""
         )
         + (
-            '<aside class="history-references"><h3>待核实参考案例（不计入正式历史对照）</h3>'
+            '<details class="history-references"><summary>待核实参考案例（不计入正式历史对照）</summary>'
             + references
-            + "</aside>"
+            + "</details>"
             if references
+            else ""
+        )
+        + (
+            '<details class="analysis-basis"><summary>其他已核案例与综合对照</summary>'
+            + other_cards
+            + joint
+            + "</details>"
+            if other_cards or joint
             else ""
         )
         + (
@@ -875,10 +916,15 @@ def _generic_block(block: dict[str, Any]) -> str:
             + "</article>"
             for item in block.get("items", [])
         )
-        return (
-            f'<section id="{_escape(block.get("block_id"))}" class="action-plan">'
-            f'<h2>{title}</h2><div class="narrative-grid">{cards}</div></section>'
-        )
+        content = f'<div class="narrative-grid">{cards}</div>'
+        if block.get("items") and all(item.get("derived_from_section") for item in block["items"]):
+            content = (
+                '<p class="fallback-note">本报告尚无单独通过审查的读者研判。</p>'
+                '<details class="analysis-basis"><summary>此前报告保留的机构行动建议</summary>'
+                + content
+                + "</details>"
+            )
+        return f'<section id="{_escape(block.get("block_id"))}" class="action-plan"><h2>{title}</h2>{content}</section>'
     if block_type == "metric_cards":
         return _metric_cards(block)
     if block_type == "propagation_network":
@@ -1367,7 +1413,7 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
         if item.get("title")
     }
     analysis_targets.update({ref: item["target"] for ref, item in basis["analyses"].items()})
-    for block in arrange_history(blocks):
+    for block in arrange_history(blocks, str(report.get("task", {}).get("event_query") or "")):
         if block.get("type") == "report_header":
             continue
         rendered = _render_block(block, claim_badges, analysis_targets)

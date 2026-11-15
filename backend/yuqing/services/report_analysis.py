@@ -197,6 +197,7 @@ def assemble_analysis(
     evidence: Sequence[Any],
     *,
     propagation_edges: int | None = None,
+    reuse_reviewed_actions: bool = True,
 ) -> tuple[dict, list[dict], dict]:
     """丢弃越权字段和失配引用；事实观察始终来自权威陈述，数字只能逐字来自原文。"""
     result = enrichment if isinstance(enrichment, dict) else {}
@@ -266,7 +267,8 @@ def assemble_analysis(
             rejected["unsupported_number"] += 1
             continue
         key = re.sub(r"\W", "", fields["interpretation"])
-        if key in seen or len(sections[section]) >= 4:
+        limit = 3 if section == "07" and not reuse_reviewed_actions else 4
+        if key in seen or len(sections[section]) >= limit:
             rejected["duplicate_analysis"] += 1
             continue
         seen.add(key)
@@ -297,7 +299,7 @@ def assemble_analysis(
     # If the dedicated action chapter fails review, reuse only actions already
     # accepted with a substantive chapter. They retain the same evidence and
     # uncertainty; this adds no fresh assertion or unreviewed recommendation.
-    if not sections["07"]:
+    if reuse_reviewed_actions and not sections["07"]:
         for source_section in ("04", "05"):
             for item in sections[source_section]:
                 if all(item.get(key) for key in ("action", "owner", "trigger")):

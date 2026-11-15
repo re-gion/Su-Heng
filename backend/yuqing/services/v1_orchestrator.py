@@ -17,6 +17,7 @@ from yuqing.agents.runtime import GeneratedClaim, InvestigationAgent, Reflection
 from yuqing.core.event_chronology import earlier_event_candidates
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
+from yuqing.core.history_cards import history_relevance
 from yuqing.core.llm.gateway import (
     LLMBudgetExhausted,
     rate_limit_diagnostic,
@@ -701,6 +702,64 @@ class V1Orchestrator:
             for claim in claims
         ]
 
+    async def _fetch_history_case_leads(self, task, claims, evidence_by_id) -> None:
+        key = "report:history_case_sources"
+        if "history_insight" not in self.agents or await self.database.checkpoint(task.id, key):
+            return
+        topic = task.resolved_event_query or task.event_query
+        by_case: dict[str, dict] = {}
+        for claim in claims:
+            if claim.agent != "history_insight" or claim.verdict != "support":
+                continue
+            refs = independent_case_evidence(
+                claim, evidence_by_id, topic, task.created_at, require_confirmed_date=False
+            )
+            if not refs:
+                continue
+            case = claim.analysis_data["historical_case"]
+            group = by_case.setdefault(case["name"], {"rank": 0, "references": set()})
+            group["rank"] = max(
+                group["rank"],
+                history_relevance(topic, f"{case['name']} {case['similarity']} {claim.text}"),
+            )
+            group["references"].update(refs)
+        if not by_case:
+            return
+        best = max(by_case.values(), key=lambda item: (item["rank"], len(item["references"])))
+        leads = sorted(
+            (
+                evidence_by_id[ref]
+                for ref in best["references"]
+                if self.evidence.needs_direct_fetch(evidence_by_id[ref])
+            ),
+            key=lambda source: (
+                source.source_role != "authority",
+                source.source_tier or 9,
+                source.local_id,
+            ),
+        )[:2]
+        if not leads:
+            return
+        await self.database.save_checkpoint(
+            task.id, key, {"phase": "verified", "refs": [lead.local_id for lead in leads]}
+        )
+        scope = InvestigationScope(
+            event_query=topic,
+            languages=tuple(task.source_languages),
+            source_scope=task.effective_source_scope,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        for lead in leads:
+            current = await self.database.get_task(task.id)
+            if not current or current.status != "running":
+                break
+            if (
+                await self._fetch_once(lead, scope=scope, agent="history_insight", phase="primary")
+                is None
+            ):
+                break
+
     async def _recover_report_gaps(
         self,
         task_id: str,
@@ -795,8 +854,10 @@ class V1Orchestrator:
             )
             for c in claims
         ):
+            await self._fetch_history_case_leads(task, claims, evidence_by_id)
             goals["history_insight"] = (
-                "寻找当前事件领域优先、必要时跨行业的机制相似独立案例，查明已公开的处置进展、"
+                "集中补核处置机制最接近的一个独立案例，优先直接原始公文并补齐发生经过和已公布结果。"
+                "当前事件领域优先、必要时跨行业，查明已公开的处置进展、"
                 "相似机制和关键差异；只需关键处置机制可比，不要求指控、诉讼、论文复核、问责"
                 "每个环节全部相同。不要求已有最终结局，已公开调查、召回、复核或处分均可陈述，未公开最终结果须说明。"
                 "不能改成本事件旧报道。只使用本次任务创建前已公开的材料；旧陈述若有新来源，"
@@ -3647,11 +3708,13 @@ class V1Orchestrator:
             message = event.data.get("message")
             if isinstance(message, str) and message and message not in self._limitations:
                 self._limitations.append(message)
+        defer_summary = hasattr(self.reports.reporter, "summarize")
         report_id, report, html_path = await self.reports.build(
             task_id,
             forum=board.history(),
             orchestration_limitations=self._limitations,
             diagnostic_only=diagnostic_only,
+            defer_summary=defer_summary,
         )
         # Evaluate the assembled, reviewed report before deciding what to recover.
         # Persist each attempt, including failed attempts, so resume never resets the bound.
@@ -3663,6 +3726,8 @@ class V1Orchestrator:
         end_reason = outcome.get("end_reason", "round_limit")
         while not stop_requested and not forced_unverified_topic and task.depth != "quick":
             missing = report.get("quality", {}).get("release_gate_missing", [])
+            if defer_summary:
+                missing = [key for key in missing if key != "executive_summary"]
             if any(
                 k in missing
                 for k in (
@@ -3723,13 +3788,15 @@ class V1Orchestrator:
             before = self._quality_progress(report)
             recovery_round += 1
             # Count an interrupted attempt as no gain until its report proves otherwise.
-            progress = {
-                "phase": "verified",
-                "round": recovery_round,
-                "review_round": review_round,
-                "no_gain": no_gain + 1,
-                "missing": missing,
-            }
+            progress.update(
+                {
+                    "phase": "verified",
+                    "round": recovery_round,
+                    "review_round": review_round,
+                    "no_gain": no_gain + 1,
+                    "missing": missing,
+                }
+            )
             await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
             await self.events.emit(
                 task_id,
@@ -3767,7 +3834,12 @@ class V1Orchestrator:
                         task_id, "report:quality_recovery", progress
                     )
                     try:
-                        report = await self.reports.retry_missing_reviews(task_id, report)
+                        if defer_summary:
+                            report = await self.reports.retry_missing_reviews(
+                                task_id, report, review_summary=False
+                            )
+                        else:
+                            report = await self.reports.retry_missing_reviews(task_id, report)
                     except Exception as exc:
                         progress["review_diagnostic"] = upstream_diagnostic(
                             exc, stage="report_only_recovery"
@@ -3798,6 +3870,7 @@ class V1Orchestrator:
                 forum=board.history(),
                 orchestration_limitations=self._limitations,
                 diagnostic_only=forced_unverified_topic or not has_basis,
+                defer_summary=defer_summary,
             )
             after = self._quality_progress(report)
             no_gain = 0 if after > before else no_gain + 1
@@ -3806,6 +3879,40 @@ class V1Orchestrator:
             )
             await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
         current = await self.database.get_task(task_id)
+        if (
+            defer_summary
+            and not stop_requested
+            and current
+            and current.status == "running"
+            and not forced_unverified_topic
+            and report["quality"].get("release_label") != "retrieval_diagnostic"
+        ):
+            progress.update(
+                phase="verified", missing=report["quality"].get("release_gate_missing", [])
+            )
+            summary_round = int(progress.get("summary_round", 0))
+            if summary_round:
+                report = await self.reports.finalize_summary(task_id, report, cached_only=True)
+            for attempt in range(summary_round, 2):
+                summary = report["quality"].get("executive_summary", {})
+                if (
+                    summary.get("status") == "complete"
+                    or summary.get("reason") == "scope_review_incomplete"
+                ):
+                    break
+                if await self._emit_budget(task_id, task.depth):
+                    break
+                progress["summary_round"] = attempt + 1
+                await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
+                report = await self.reports.finalize_summary(task_id, report)
+                current = await self.database.get_task(task_id)
+                if not current or current.status != "running":
+                    break
+            progress["missing"] = report["quality"].get("release_gate_missing", [])
+            if not progress["missing"]:
+                end_reason = "core_complete"
+            elif end_reason == "core_complete":
+                end_reason = "review_incomplete"
         if (
             phase == "comments_ready"
             and not stop_requested

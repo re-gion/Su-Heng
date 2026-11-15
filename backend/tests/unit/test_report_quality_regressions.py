@@ -112,6 +112,12 @@ def test_reviewed_chapter_action_becomes_compact_action_plan():
     assert "interpretation" not in plan["items"][0]
     assert summary["so_what"] and quality["status"] == "analysis_available"
 
+    current, current_blocks, _ = assemble_analysis(
+        draft, facts, sources, propagation_edges=0, reuse_reviewed_actions=False
+    )
+    assert not current["so_what"]
+    assert not any(block.get("section") == "07" for block in current_blocks)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_analysis", [False, True])
