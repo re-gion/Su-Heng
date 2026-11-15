@@ -6,7 +6,6 @@ from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
 
-from yuqing.core.event_chronology import explicit_event_date
 from yuqing.core.executive_summary import (
     SUMMARY_ERROR_LABELS,
     SUMMARY_HEADINGS,
@@ -18,7 +17,8 @@ from yuqing.core.verification_presentation import (
     LABELS,
     NOTES,
     enrich_report_sources,
-    nearby_publication_records,
+    fact_event_groups,
+    fact_status_key,
     presentation_status,
 )
 from yuqing.render.brand import FAVICON_DATA_URI, LOGO_DATA_URI
@@ -233,15 +233,7 @@ def _summary(
 
 
 def _fact_table(block: dict[str, Any]) -> str:
-    cards: list[tuple[str, str]] = []
-    items = sorted(
-        block.get("items", []),
-        key=lambda item: (
-            explicit_event_date(str(item.get("text") or "")) is None,
-            explicit_event_date(str(item.get("text") or "")) or "",
-        ),
-    )
-    for item in items:
+    def claim_card(item: dict) -> str:
         badge = _display_badge(item)
         citations = "".join(
             _citation_link(citation.get("evidence_ref")) for citation in item.get("citations", [])
@@ -287,66 +279,42 @@ def _fact_table(block: dict[str, Any]) -> str:
             else ""
         )
         claim_ref = str(item.get("claim_ref") or "")
-        cards.append(
-            (
-                claim_ref,
-                f'<article class="claim-card" id="claim-{_escape(claim_ref)}">'
-                f'<div class="claim-meta"><span class="badge {badge}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">{BADGE_LABELS.get(badge, badge)}</span>{note}{state_chip}</div>'
-                + (
-                    f'<p class="source-boundary">{_escape(NOTES[badge])}</p>'
-                    if badge in NOTES
-                    else ""
-                )
-                + f'<h3>{_escape(item.get("text"))}</h3>{rumor}{correction}<div class="claim-refs">{citations}</div></article>',
-            )
+        return (
+            f'<article class="claim-card" id="claim-{_escape(claim_ref)}">'
+            f'<div class="claim-meta"><span class="badge {badge}" title="{_escape(NOTES.get(badge, "事实核查结论"))}">{BADGE_LABELS.get(badge, badge)}</span>{note}{state_chip}</div>'
+            + (f'<p class="source-boundary">{_escape(NOTES[badge])}</p>' if badge in NOTES else "")
+            + f'<h3>{_escape(item.get("text"))}</h3>{rumor}{correction}<div class="claim-refs">{citations}</div></article>'
         )
-    visible = [card for _, card in cards[:8]]
-    remaining = [card for _, card in cards[8:]]
-    # Group only close records with the same issuer, dates, numbers and status.
-    # Every original sentence, badge, citation and hash target stays available.
-    facts_by_ref = {str(item.get("claim_ref") or ""): item for item in block.get("items", [])}
-    ordered = [ref for ref, _ in cards]
-    leaders: list[str] = []
-    related: dict[str, list[str]] = {}
-    for ref in ordered:
-        if ref not in facts_by_ref:
+
+    groups = []
+    for event in fact_event_groups(block.get("items", [])):
+        if len(event) == 1:
+            groups.append(claim_card(event[0]))
             continue
-        parent = next(
-            (
-                old
-                for old in leaders
-                if nearby_publication_records(facts_by_ref[old], facts_by_ref[ref])
-            ),
-            None,
-        )
-        if parent:
-            related.setdefault(parent, []).append(ref)
-        else:
-            leaders.append(ref)
-    if related:
-        cards_by_ref = dict(cards)
-        grouped_cards = {}
-        for ref in leaders:
-            repeats = related.get(ref, [])
-            grouped_cards[ref] = cards_by_ref[ref] + (
-                '<details class="related-claims"><summary>'
-                f"相近发布记录（{len(repeats)}），保留各自正文、来源与核验结论</summary>"
-                + "".join(cards_by_ref[child] for child in repeats)
-                + "</details>"
-                if repeats
-                else ""
-            )
-        visible_refs = set(leaders[:8])
-        visible = [grouped_cards[ref] for ref in leaders if ref in visible_refs]
-        remaining = [grouped_cards[ref] for ref in leaders if ref not in visible_refs]
+        by_status = {}
+        for item in event:
+            by_status.setdefault(fact_status_key(item), []).append(item)
+        cards = []
+        for same_status in by_status.values():
+            leader, *repeats = same_status
+            cards.append(claim_card(leader))
+            if repeats:
+                cards.append(
+                    '<details class="related-claims"><summary>'
+                    f"同组其他陈述（{len(repeats)} 条）</summary>"
+                    + "".join(map(claim_card, repeats))
+                    + "</details>"
+                )
+        groups.append('<div class="fact-event-group">' + "".join(cards) + "</div>")
+    visible, remaining = groups[:8], groups[8:]
     overflow = (
         '<details class="claim-overflow"><summary>'
-        f"其余陈述与核验记录（{len(remaining)}{'组' if related else ''}）</summary>{''.join(remaining)}</details>"
+        f"其余陈述与核验记录（{len(remaining)}）</summary>{''.join(remaining)}</details>"
         if remaining
         else ""
     )
     legend = (
-        '<p class="verification-legend">按正文明确的动作日期从早到晚排列，同日先后不明时并列，时间未明确的记录置后；不以网页日期替代事件日期。单源和转载说明表示材料支持，不等于独立证实；'
+        '<p class="verification-legend">按正文明确的动作日期从早到晚排列，同日先后不明时并列，时间未明确的记录置后；不以网页日期替代事件日期。同一事件按核验状态展开查看各条陈述。单源和转载说明表示材料支持，不等于独立证实；'
         "“发布记录已核实”只确认机构的发布记录，不证明文件中的指控属实。"
         "部分支持、依据不足和核验未完成分别标注。</p>"
         if block.get("section") == "03"
@@ -1477,7 +1445,7 @@ h1{font-size:clamp(30px,4vw,46px)!important;max-width:1080px!important;text-wrap
 @media print{.report-section.is-current{outline:none}}
 .sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
 .evidence-card{padding:0;scroll-margin-top:76px}.evidence-card>summary{display:grid;grid-template-columns:minmax(62px,.45fr) minmax(220px,2fr) minmax(150px,1fr) minmax(120px,.8fr);gap:14px;align-items:center;padding:17px 20px;cursor:pointer;list-style-position:inside}.evidence-card>summary:hover{background:#f3f7f8}.evidence-card[open]>summary{border-bottom:1px solid var(--line);background:#f7fafb}.evidence-title{font-weight:700;line-height:1.45}.evidence-source{color:var(--muted);font-size:13px}.evidence-status{justify-self:end;padding:4px 7px;background:#edf2f5;color:#334d60;font-size:12px}.evidence-body{padding:4px 20px 18px}.evidence-body blockquote{margin-left:0;margin-right:0;padding:12px 16px;background:#f7f9fa;border-left:3px solid var(--teal)}
-.claim-overflow,.uncited-evidence-group{margin-top:18px;border:1px solid var(--line);background:#f8fafb}.claim-overflow>summary,.uncited-evidence-group>summary{padding:15px 18px;cursor:pointer;font-weight:700;color:var(--ink-2)}.claim-overflow>.claim-card,.uncited-evidence-group>.evidence-card{margin-left:14px;margin-right:14px;background:#fff}
+.fact-event-group{margin:14px 0;border:1px solid var(--line);border-radius:4px;padding:0 12px 10px;background:#f8fafb}.related-claims>summary{cursor:pointer;color:var(--ink-2);font-size:13px;padding:6px 0}.claim-overflow,.uncited-evidence-group{margin-top:18px;border:1px solid var(--line);background:#f8fafb}.claim-overflow>summary,.uncited-evidence-group>summary{padding:15px 18px;cursor:pointer;font-weight:700;color:var(--ink-2)}.claim-overflow>.claim-card,.uncited-evidence-group>.evidence-card{margin-left:14px;margin-right:14px;background:#fff}
 .analysis-module,.metric-module{max-width:100%}.analysis-notice{padding:14px 16px;background:#eef5f6;border-left:4px solid var(--teal);color:#29485b}.analysis-card{margin:14px 0;padding:20px;border:1px solid var(--line);border-left:4px solid var(--teal);background:#fbfcfc}.analysis-card h3{margin:8px 0}.analysis-kind{display:inline-block;padding:3px 7px;background:var(--ink);color:#fff;font-size:12px;font-weight:700}.analysis-action{background:#edf6f1;padding:8px 10px}.analysis-uncertainty,.metric-verification{color:#664d12;background:#fff6df;padding:8px 10px}.analysis-refs,.metric-refs{margin-top:12px}.metric-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.metric-card{padding:18px;border:1px solid var(--line);border-top:4px solid var(--teal);background:#fff}.metric-card>strong{display:block;margin:10px 0;font-size:28px;color:var(--ink-2)}.metric-card>strong small{margin-left:5px;font-size:14px;color:var(--muted)}.metric-label{font-weight:700}.metric-card p{margin:8px 0}.metric-quote{font-style:italic}
 @media(max-width:720px){.evidence-card>summary{grid-template-columns:1fr}.evidence-status{justify-self:start}}
 @media print{.evidence-card{break-inside:avoid}.evidence-card>summary{grid-template-columns:70px 2fr 1fr 1fr}.evidence-card .evidence-body{display:none!important}.evidence-tools{display:none!important}}
@@ -1504,18 +1472,22 @@ document.querySelectorAll('[data-evidence-action]').forEach(button=>button.addEv
   const open=button.dataset.evidenceAction==='expand';
   document.querySelectorAll('.uncited-evidence-group,details.evidence-card').forEach(card=>card.open=open);
 }}));
-document.querySelectorAll('[data-badge-filter]').forEach(button=>button.addEventListener('click',()=>{{
-  const filter=button.dataset.badgeFilter;
+const applyBadgeFilter=filter=>{{
   document.querySelectorAll('.claim-card').forEach(card=>card.classList.toggle('is-hidden',filter!=='all'&&!card.querySelector('.badge')?.classList.contains(filter)));
-  document.querySelectorAll('[data-badge-filter]').forEach(item=>{{const active=item===button;item.classList.toggle('is-active',active);item.setAttribute('aria-pressed',String(active));}});
-}}));
+  document.querySelectorAll('.fact-event-group,.related-claims,.claim-overflow').forEach(group=>{{
+    group.classList.toggle('is-hidden',!group.querySelector('.claim-card:not(.is-hidden)'));
+  }});
+  document.querySelectorAll('[data-badge-filter]').forEach(item=>{{const active=item.dataset.badgeFilter===filter;item.classList.toggle('is-active',active);item.setAttribute('aria-pressed',String(active));}});
+  updateNavigation();
+}};
+document.querySelectorAll('[data-badge-filter]').forEach(button=>button.addEventListener('click',()=>applyBadgeFilter(button.dataset.badgeFilter)));
 const revealTarget=hash=>{{
   if(!hash||hash==='#')return;
   let target=null;try{{target=document.querySelector(hash)}}catch(_error){{return}}
   if(!target)return;
   applyView('full');
   if(target.tagName==='DETAILS')target.open=true;
-  if(target.classList.contains('claim-card'))target.classList.remove('is-hidden');
+  if(target.matches('.claim-card.is-hidden'))applyBadgeFilter('all');
   let ancestor=target.parentElement;
   while(ancestor){{if(ancestor.tagName==='DETAILS')ancestor.open=true;ancestor=ancestor.parentElement}}
   document.querySelectorAll('.highlight').forEach(item=>item.classList.remove('highlight'));

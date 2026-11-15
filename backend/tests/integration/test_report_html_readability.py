@@ -224,8 +224,12 @@ def test_similar_publication_records_keep_distinct_anchors_and_corrections():
     facts["items"] = [first, second, correction]
     facts["priority_claim_refs"] = ["C001", "C002", "C003"]
     rendered = render_html(report, view="full")
-    assert "相近发布记录（1）" in rendered
+    assert "同组其他陈述（1 条）" in rendered
     assert all(rendered.count(f'id="claim-{ref}"') == 1 for ref in ("C001", "C002", "C003"))
+    folded_start = rendered.index('class="related-claims"')
+    folded_end = rendered.index("</details>", folded_start)
+    assert folded_start < rendered.index('id="claim-C002"') < folded_end
+    assert rendered.index('id="claim-C003"') > folded_end
     assert correction["text"] in rendered
 
 

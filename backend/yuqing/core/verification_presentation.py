@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import copy
-import re
 from collections import Counter
-from difflib import SequenceMatcher
 from typing import Any
 
-from yuqing.core.claim_semantics import publication_actor
-from yuqing.core.event_chronology import restore_report_chronology
+from yuqing.core.event_chronology import (
+    event_timeline,
+    explicit_event_date,
+    restore_report_chronology,
+)
 from yuqing.core.history_cards import reconcile_history_card_identity, reconcile_history_completion
+from yuqing.core.timeline_grouping import group_timeline_events
 
 SOURCE_SUPPORT_STATUSES = {
     "single_source_supported",
@@ -95,25 +97,41 @@ def presentation_counts(items: list[dict]) -> dict[str, int]:
     return dict(Counter(presentation_status(item) for item in items))
 
 
-def nearby_publication_records(first: dict, second: dict) -> bool:
-    """Group close release records for reading, retaining every original card/anchor."""
-    actor = publication_actor(first.get("text", ""))
-    if not actor or actor != publication_actor(second.get("text", "")):
-        return False
-    if first.get("badge") != second.get("badge") or presentation_status(
-        first
-    ) != presentation_status(second):
-        return False
-    left, right = first["text"], second["text"]
-    if re.findall(r"\d+(?:\.\d+)?", left) != re.findall(r"\d+(?:\.\d+)?", right):
-        return False
-    # Never group a correction with the statement it corrects, or hide negatives.
-    if re.findall(r"不|未|无|否|撤销|撤回|维持|驳回", left) != re.findall(
-        r"不|未|无|否|撤销|撤回|维持|驳回", right
+def fact_event_groups(items: list[dict]) -> list[list[dict]]:
+    """Use the timeline identity for dated events and retain each original claim."""
+    event_by_ref = {
+        ref: event["claim_ref"]
+        for event in group_timeline_events(event_timeline(items))
+        for ref in event["claim_refs"]
+    }
+    dated = [(explicit_event_date(item.get("text") or ""), item) for item in items]
+    groups: dict[tuple, list[dict]] = {}
+    for index, (date, item) in enumerate(
+        sorted(dated, key=lambda pair: (pair[0] is None, pair[0] or ""))
     ):
-        return False
-    left, right = (re.sub(r"\W", "", text) for text in (left, right))
-    return SequenceMatcher(None, left, right, autojunk=False).ratio() >= 0.86
+        ref = item.get("claim_ref")
+        text = item.get("text") or ""
+        # Without an explicit action date, only identical wording can be folded.
+        if ref in event_by_ref:
+            key = ("event", event_by_ref[ref])
+        elif not date and text.strip():
+            key = ("undated", text)
+        else:
+            key = ("claim", index)
+        groups.setdefault(key, []).append(item)
+    return list(groups.values())
+
+
+def fact_status_key(item: dict) -> tuple:
+    """Keep different verdicts and corrections visible even within one event."""
+    return (
+        presentation_status(item),
+        item.get("verification_state"),
+        item.get("verdict"),
+        item.get("statement_kind"),
+        item.get("rumor_text"),
+        item.get("correction_text"),
+    )
 
 
 def enrich_report_sources(report: dict[str, Any]) -> dict[str, Any]:

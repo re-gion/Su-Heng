@@ -2,6 +2,7 @@
 
 import copy
 import re
+from html.parser import HTMLParser
 
 from yuqing.core.event_chronology import event_timeline
 from yuqing.core.history_cards import unique_history_cards
@@ -204,6 +205,50 @@ def test_fact_table_sorts_dated_actions_and_keeps_unknowns_last_despite_priority
     assert re.findall(r'id="claim-(C\d+)"', html) == ["C002", "C005", "C004", "C001", "C003"]
     assert "时间未明确" in html
     assert block == original
+
+
+def test_fact_table_folds_same_event_and_status_without_hiding_other_badges():
+    post = "2023年10月11日，一名女生发帖称同年7月在明川大学图书馆自习时遭该校一名男生骚扰。"
+    variant = (
+        "2023年10月11日下午，一名女生在社交平台发帖称，"
+        "2023年7月在明川大学图书馆自习时受到该校一名男生骚扰。"
+    )
+    reply = "2023年10月11日晚，明川大学发布情况说明称，已成立工作组调查。"
+    certified = {**fact("C004", post, "E004"), "badge": "verified"}
+    block = {
+        "section": "03",
+        "items": [
+            fact("C001", post, "E001"),
+            fact("C003", reply, "E003"),
+            fact("C002", variant, "E002"),
+            certified,
+        ],
+    }
+    saved = copy.deepcopy(block)
+
+    class Cards(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.inside_details = 0
+            self.folded, self.visible = [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "details":
+                self.inside_details += 1
+            if tag == "article":
+                (self.folded if self.inside_details else self.visible).append(dict(attrs)["id"])
+
+        def handle_endtag(self, tag):
+            if tag == "details":
+                self.inside_details -= 1
+
+    page = _fact_table(block)
+    cards = Cards()
+    cards.feed(page)
+    assert cards.visible == ["claim-C001", "claim-C004", "claim-C003"]
+    assert cards.folded == ["claim-C002"]
+    assert all(f'href="#evidence-E00{i}"' in page for i in range(1, 5))
+    assert block == saved
 
 
 def test_exact_named_case_keeps_each_stage_and_its_own_sources():
