@@ -3657,6 +3657,7 @@ class V1Orchestrator:
         # Persist each attempt, including failed attempts, so resume never resets the bound.
         progress = await self.database.checkpoint(task_id, "report:quality_recovery") or {}
         recovery_round = int(progress.get("round", 0))
+        review_round = int(progress.get("review_round", 0))
         no_gain = int(progress.get("no_gain", 0))
         outcome = await self.database.checkpoint(task_id, "investigation:outcome") or {}
         end_reason = outcome.get("end_reason", "round_limit")
@@ -3725,6 +3726,7 @@ class V1Orchestrator:
             progress = {
                 "phase": "verified",
                 "round": recovery_round,
+                "review_round": review_round,
                 "no_gain": no_gain + 1,
                 "missing": missing,
             }
@@ -3758,8 +3760,22 @@ class V1Orchestrator:
                 end_reason = "user_stop"
                 break
             if prior_material == await material_state():
-                no_gain += 1
-                progress.update(no_gain=no_gain)
+                if review_round < 2 and set(missing) & {"executive_summary", "media_propagation"}:
+                    review_round += 1
+                    progress["review_round"] = review_round
+                    await self.database.save_checkpoint(
+                        task_id, "report:quality_recovery", progress
+                    )
+                    try:
+                        report = await self.reports.retry_missing_reviews(task_id, report)
+                    except Exception as exc:
+                        progress["review_diagnostic"] = upstream_diagnostic(
+                            exc, stage="report_only_recovery"
+                        )
+                no_gain = 0 if self._quality_progress(report) > before else no_gain + 1
+                progress.update(
+                    no_gain=no_gain, missing=report["quality"].get("release_gate_missing", [])
+                )
                 await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
                 continue
             recovered_evidence = {

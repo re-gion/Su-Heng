@@ -1,4 +1,5 @@
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -42,6 +43,55 @@ def edge(quote, relation):
         "quote": quote,
         "relation": relation,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("different_carrier", [True, False])
+async def test_repost_review_checks_carrier_even_when_editorial_attribution_matches(
+    different_carrier,
+):
+    credit = "来源：示例新闻网"
+    pair = sources(credit)
+    original, carrier = pair
+    original.update(
+        url="https://www.example.cn/article/1",
+        publisher="示例新闻网",
+        source_name="示例新闻网",
+        published_at="2025-09-20T09:53:21",
+        excerpt_windows=["调查复核事项已经公开，后续情况将由主管机构发布。" * 20],
+    )
+    carrier.update(
+        url="https://www.carrier.cn/news/9"
+        if different_carrier
+        else "https://wap.example.cn/news/9",
+        title=original["title"],
+        publisher="示例新闻网",
+        platform="另家媒体" if different_carrier else "示例新闻网",
+        identity_status="credited_source",
+        published_at="2025-09-20T10:22:50",
+        excerpt_windows=[credit, *original["excerpt_windows"]],
+    )
+
+    class Gateway:
+        reviews = []
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                return {"edges": [edge(credit, "repost")]}
+            body = json.loads(prompt.split("\n", 1)[1])
+            self.reviews.append(body)
+            assert body["publication_identity"]["from"]["carrier"] == "示例新闻网"
+            assert body["publication_identity"]["to"]["carrier"] == "另家媒体"
+            return {"accepted": len(self.reviews) == 2, "reason": "初审混淆两端稿源和刊载方"}
+
+    gateway = Gateway()
+    result = await OpenAIReportAgent(gateway, "fixture").recover_relations(pair)
+    if different_carrier:
+        assert len(gateway.reviews) == 2
+        assert result and result[0]["review_status"] == "accepted"
+    else:
+        assert not gateway.reviews
+        assert not result
 
 
 @pytest.mark.asyncio

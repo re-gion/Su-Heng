@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from urllib.parse import urlsplit
 
 RELATION_POLICY_VERSION = "document-credit-v1"
 DOCUMENT_CREDIT = re.compile(
@@ -22,6 +24,35 @@ def document_credit_publisher(quote: str) -> str | None:
     if not credit or _COMBINED_CREDIT.search(credit):
         return None
     return credit
+
+
+def publication_endpoint(source: dict) -> dict:
+    publisher = (
+        source.get("publisher") or source.get("publisher_entity") or source.get("source_name")
+    )
+    host = urlsplit(source.get("url") or "").hostname
+    return {
+        "publisher": publisher,
+        "carrier": source.get("platform") or publisher or host,
+        "host": re.sub(r"^(?:www|wap|m)\.", "", host or ""),
+        "published_at": source.get("published_at"),
+    }
+
+
+def _target_precedes_source(original: dict, target: dict) -> bool:
+    try:
+        a, b = (
+            datetime.fromisoformat(item.get("published_at") or "") for item in (original, target)
+        )
+    except ValueError:
+        return False
+    if (
+        (a.tzinfo is None) == (b.tzinfo is None)
+        and a.time() != datetime.min.time()
+        and b.time() != datetime.min.time()
+    ):
+        return b < a
+    return b.date() < a.date()
 
 
 def inline_citation_passage(text: str, match: re.Match) -> str:
@@ -123,6 +154,14 @@ def relation_type_codes(edge: dict, by_id: dict) -> list[str]:
             quote,
         )
     )
+    if edge.get("relation") == "repost":
+        a, b = publication_endpoint(original), publication_endpoint(target)
+        if (a["carrier"] and a["carrier"] == b["carrier"]) or (
+            a["host"] and a["host"] == b["host"]
+        ):
+            return ["same_publication_carrier"]
+        if _target_precedes_source(a, b):
+            return ["repost_precedes_original"]
     inline_reference = bool(
         re.search(r"(?:另?据|引述|援引|引用).{1,80}(?:报道|消息|指出|表示)", quote)
     )

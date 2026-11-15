@@ -402,6 +402,57 @@ async def test_standard_empty_investigation_recovers_twice_without_false_release
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("review_passes", [True, False])
+async def test_report_only_recovery_runs_when_no_investigation_material_changes(
+    runtime_dir, monkeypatch, review_passes
+):
+    database = Database(runtime_dir / "summary-only-recovery.db")
+    await database.initialize()
+    try:
+        task = await database.create_task(TaskCreate(event_query="机构公开通报", depth="standard"))
+        orchestrator = V1Orchestrator(
+            database,
+            EventBus(database),
+            search=FixtureSearchProvider([]),
+            fetcher=FailFetcher(),
+            snapshots=SnapshotStore(runtime_dir / "snapshots"),
+            agents={},
+            moderator=ReleaseModerator(),
+            verifier=FixtureVerifier(),
+            reports_dir=runtime_dir / "reports",
+            max_outer_rounds=1,
+            max_inner_rounds=1,
+        )
+        original_build = orchestrator.reports.build
+        review_rounds = []
+
+        async def build(*args, **kwargs):
+            rid, report, path = await original_build(*args, **kwargs)
+            report["quality"].update(
+                release_label="evidence_brief", release_gate_missing=["executive_summary"]
+            )
+            return rid, report, path
+
+        async def retry(task_id, report):
+            assert task_id == task.id
+            review_rounds.append(report["quality"]["release_gate_missing"])
+            if review_passes:
+                report["quality"].update(release_label="full_report", release_gate_missing=[])
+            return report
+
+        monkeypatch.setattr(orchestrator.reports, "build", build)
+        monkeypatch.setattr(orchestrator.reports, "retry_missing_reviews", retry, raising=False)
+        await orchestrator.run_task(task.id)
+        recovery = await database.checkpoint(task.id, "report:quality_recovery")
+        expected_rounds = 1 if review_passes else 2
+        assert review_rounds == [["executive_summary"]] * expected_rounds
+        assert recovery["review_round"] == expected_rounds
+        assert recovery["end_reason"] == ("core_complete" if review_passes else "no_progress")
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tokens_used", [1_250_000, 1_238_839])
 async def test_quality_recovery_does_not_start_when_only_report_reserve_remains(
     runtime_dir, tokens_used

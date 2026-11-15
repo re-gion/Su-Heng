@@ -1057,6 +1057,43 @@ def test_saved_fact_brief_renders_by_action_date(summary_report):
 
 
 @pytest.mark.asyncio
+async def test_summary_only_removes_located_redundancy_and_reviews_coverage_again(summary_report):
+    baseline = paragraphs()
+    duplicate = {**baseline[0]["sentences"][0], "text": "学校公开说明称，已受理该诉求。"}
+    draft = copy.deepcopy(baseline)
+    draft[0]["sentences"].append(duplicate)
+
+    class LocalRepairGateway(Gateway):
+        draft_calls = 0
+        global_calls = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter" and "阶段：四段摘要规划。" not in prompt:
+                self.draft_calls += 1
+                return {"paragraphs": draft}
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.global_calls += 1
+                current = json.loads(prompt.split("\n", 1)[1])["paragraphs"]
+                result = approval(current)
+                if self.global_calls == 1:
+                    result.update(
+                        non_redundant=False, duplicate_pairs=[{"keep": "S01", "remove": "S02"}]
+                    )
+                else:
+                    assert [[s["text"] for s in p["sentences"]] for p in current] == [
+                        [s["text"] for s in p["sentences"]] for p in baseline
+                    ]
+                return result
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    gateway = LocalRepairGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert gateway.draft_calls == 1 and gateway.global_calls == 2
+    assert result["paragraphs"] == baseline
+    assert sum("阶段：逐句绑定依据审查。" in call[2] for call in gateway.calls) == 5
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("still_unavailable", [False, True])
 async def test_summary_resumes_the_failed_binding_after_transient_gateway_error(
     summary_report, still_unavailable

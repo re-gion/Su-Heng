@@ -1239,143 +1239,20 @@ class FullReportBuilder:
         )
         confirmed_current_event_sources = set()
         if not diagnostic_only and hasattr(self.reporter, "recover_relations"):
-            nodes_by_id = {n["evidence_id"]: n for n in publication_network["nodes"]}
-            relation_scope = InvestigationScope(
-                event_query=task.resolved_event_query or task.event_query,
-                languages=tuple(task.source_languages),
-                source_scope=task.effective_source_scope,
-                date_from=task.time_range_from,
-                date_to=task.time_range_to,
+            confirmed_current_event_sources = await self._review_publication_network(
+                task, publication_network, main_evidence, evidence
             )
-            source_context = self._relation_source_context(
-                main_evidence, nodes_by_id, evidence=evidence, scope=relation_scope
-            )
-            fingerprint = hashlib.sha256(
-                json.dumps(source_context, ensure_ascii=False, sort_keys=True).encode()
-            ).hexdigest()
-            prior_relations = await self.database.checkpoint(task_id, "report:relations") or {}
-            relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v6")
-            source_fingerprints = {
-                s["evidence_ref"]: hashlib.sha256(
-                    json.dumps(s, ensure_ascii=False, sort_keys=True).encode()
-                ).hexdigest()
-                for s in source_context
-            }
-            if (
-                prior_relations.get("fingerprint") == fingerprint
-                and prior_relations.get("version") == relation_version
-                and prior_relations.get("status") == "complete"
-            ):
-                recovered = prior_relations.get("edges", [])
-                diagnostics = prior_relations.get("diagnostics", [])
-            else:
-                recovered = await self.reporter.recover_relations(source_context)
-                diagnostics = getattr(self.reporter, "relation_diagnostics", [])
-                retained = [
-                    e
-                    for e in prior_relations.get("edges", [])
-                    if prior_relations.get("version") == relation_version
-                    and e.get("review_status") == "accepted"
-                    and e.get("from_evidence_id") != e.get("to_evidence_id")
-                    and e.get("relation") in {"repost", "response", "follow_up"}
-                    and all(
-                        source_fingerprints.get(ref) is not None
-                        and source_fingerprints[ref]
-                        == prior_relations.get("source_fingerprints", {}).get(ref)
-                        for ref in {
-                            e["from_evidence_id"],
-                            e["to_evidence_id"],
-                            e.get("support_evidence_id"),
-                        }
-                    )
-                ]
-                recovered = list(
-                    {
-                        (e["from_evidence_id"], e["to_evidence_id"], e["relation"]): e
-                        for e in [*retained, *recovered]
-                    }.values()
-                )
-                recovered, conflicts = prune_relation_conflicts(recovered)
-                if conflicts:
-                    diagnostics = [
-                        *diagnostics,
-                        {
-                            "stage": "relation_review",
-                            "category": "structural_rejected",
-                            "codes": ["conflicting_relation_type"],
-                            "message": "同一引文的关系类型冲突，未发布相关连线",
-                        },
-                    ]
-                await self.database.save_checkpoint(
-                    task_id,
-                    "report:relations",
-                    {
-                        "phase": "verified",
-                        "fingerprint": fingerprint,
-                        "version": relation_version,
-                        "source_fingerprints": source_fingerprints,
-                        "candidates": getattr(self.reporter, "relation_candidates", []),
-                        "edges": recovered,
-                        "diagnostics": diagnostics,
-                        "status": "partial"
-                        if any(d.get("category") != "review_rejected" for d in diagnostics)
-                        else "complete",
-                    },
-                )
-            publication_network["diagnostics"] = diagnostics
-            eligible_sources = {item["evidence_ref"] for item in source_context}
-            sources_by_id = {item["evidence_ref"]: item for item in source_context}
-            recovered = [
-                edge
-                for edge in recovered
-                if edge.get("review_status") == "accepted"
-                and edge.get("from_evidence_id") in eligible_sources
-                and edge.get("to_evidence_id") in eligible_sources
-                and edge.get("support_evidence_id") in eligible_sources
-                and not relation_type_codes(edge, sources_by_id)
-            ]
-            for edge in recovered:
-                target = edge["to_evidence_id"]
-                if sources_by_id[target].get("history_citations"):
-                    confirmed_current_event_sources.add(target)
-                for evidence_id, node_type in (
-                    (edge["from_evidence_id"], "original"),
-                    (
-                        edge["to_evidence_id"],
-                        "repost" if edge["relation"] == "repost" else "independent",
-                    ),
-                ):
-                    if evidence_id in nodes_by_id:
-                        continue
-                    source = evidence_by_id[evidence_id]
-                    node = {
-                        "evidence_id": evidence_id,
-                        **publication_identity(source),
-                        "published_at": source.published_at,
-                        "node_type": node_type,
-                        "framing": (source.title or "发布记录")[:300],
-                        "evidence_refs": [evidence_id],
-                        "review_status": "accepted",
-                    }
-                    nodes_by_id[evidence_id] = node
-                    publication_network["nodes"].append(node)
             for item in appendix_items:
                 if item["evidence_ref"] in confirmed_current_event_sources:
                     item.update(scope_status="main", scope_label="本事件报道（已审引述）")
-            publication_network["edges"] = recovered
             publication_nodes = len(publication_network["nodes"])
-            propagation_edges = len(recovered)
-            if not recovered:
+            propagation_edges = len(publication_network["edges"])
+            if not propagation_edges:
                 publication_network["fallback_text"] = (
                     "已列出可回查的发布记录；尚未证明这些节点之间的转载或回应关系。"
                 )
-            if recovered:
-                publication_network["fallback_text"] = None
-                publication_network["in_brief"] = True
-                publication_network["data_basis"] = "typed_claim_and_reviewed_relation_evidence"
-                by_type["limitations"]["items"] = [
-                    item for item in by_type["limitations"]["items"] if item.get("id") != "L16"
-                ]
+            if propagation_edges:
+                self._activate_reviewed_publication(publication_network, by_type["limitations"])
         propagation = [publication_network, evidence_funnel, verification_matrix]
         numeric_hot_points = [item for item in hot_points if item.heat_value is not None]
         if hot_points and not numeric_hot_points:
@@ -2158,6 +2035,225 @@ class FullReportBuilder:
             Path(path).write_text, render_html(validated, view="full"), encoding="utf-8"
         )
         return report_id, validated, path
+
+    async def retry_missing_reviews(self, task_id: str, report: dict) -> dict:
+        """Review missing core sections using the same screened report and evidence."""
+        quality = report["quality"]
+        if self.reporter is None or quality.get("release_label") == "retrieval_diagnostic":
+            return report
+        task = await self.database.get_task(task_id)
+        if task is None:
+            return report
+        candidate = copy.deepcopy(report)
+        blocks = {b["type"]: b for b in candidate["blocks"]}
+        missing = candidate["quality"]["release_gate_missing"]
+        scope_required = task.investigation_scope in PROTECTED_SCOPES
+        if scope_required and self.scope_reviewer is not None:
+            self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
+
+        new_relations = False
+        network = blocks.get("propagation_network")
+        if (
+            "media_propagation" in missing
+            and network is not None
+            and hasattr(self.reporter, "recover_relations")
+        ):
+            appendix_refs = {
+                item["evidence_ref"]
+                for item in blocks.get("evidence_appendix", {}).get("items", [])
+            }
+            evidence = [
+                item
+                for item in await self.database.list_evidence(task_id)
+                if item.local_id in appendix_refs
+                and (item.extra or {}).get("scope_status")
+                in {"main", "foreign_supplement", "event_context"}
+            ]
+            # Only the already eligible sources are reconsidered here.
+            # Changes to historical admission go through normal report assembly.
+            reviewed = copy.deepcopy(network)
+            await self._review_publication_network(
+                task, reviewed, evidence, evidence, retry_empty=True
+            )
+            old_nodes = {node["evidence_id"] for node in network["nodes"]}
+            if (
+                reviewed["edges"]
+                and len(reviewed["nodes"]) >= 2
+                and (
+                    not scope_required
+                    or await self._scope_report_is_safe(
+                        {
+                            "nodes": [
+                                node
+                                for node in reviewed["nodes"]
+                                if node["evidence_id"] not in old_nodes
+                            ],
+                            "edges": reviewed["edges"],
+                        }
+                    )
+                )
+            ):
+                network.update(reviewed)
+                self._activate_reviewed_publication(network, blocks["limitations"])
+                missing.remove("media_propagation")
+                new_relations = True
+
+        if "executive_summary" in missing or new_relations:
+            await attach_executive_summary(
+                candidate,
+                self.reporter,
+                scope_reviewer=self.scope_reviewer if scope_required else None,
+                scope_required=scope_required,
+            )
+            if (
+                quality.get("executive_summary", {}).get("status") == "complete"
+                and candidate["quality"]["executive_summary"]["status"] != "complete"
+            ):
+                return report
+        prune_citation_backlinks(candidate)
+        return validate_report(candidate).report
+
+    @staticmethod
+    def _activate_reviewed_publication(network, limitations) -> None:
+        network.update(
+            fallback_text=None,
+            in_brief=True,
+            data_basis="typed_claim_and_reviewed_relation_evidence",
+        )
+        limitations["items"] = [item for item in limitations["items"] if item.get("id") != "L16"]
+
+    async def _review_publication_network(
+        self, task, publication_network, main_evidence, evidence, *, retry_empty=False
+    ) -> set[str]:
+        task_id = task.id
+        evidence_by_id = {item.local_id: item for item in evidence}
+        confirmed_current_event_sources = set()
+        nodes_by_id = {n["evidence_id"]: n for n in publication_network["nodes"]}
+        relation_scope = InvestigationScope(
+            event_query=task.resolved_event_query or task.event_query,
+            languages=tuple(task.source_languages),
+            source_scope=task.effective_source_scope,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        source_context = self._relation_source_context(
+            main_evidence, nodes_by_id, evidence=evidence, scope=relation_scope
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(source_context, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        prior_relations = await self.database.checkpoint(task_id, "report:relations") or {}
+        relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v7")
+        source_fingerprints = {
+            s["evidence_ref"]: hashlib.sha256(
+                json.dumps(s, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+            for s in source_context
+        }
+        if (
+            prior_relations.get("fingerprint") == fingerprint
+            and prior_relations.get("version") == relation_version
+            and prior_relations.get("status") == "complete"
+            and (prior_relations.get("edges") or not retry_empty)
+        ):
+            recovered = prior_relations.get("edges", [])
+            diagnostics = prior_relations.get("diagnostics", [])
+        else:
+            recover = self.reporter.recover_relations
+            if retry_empty:
+                recover = getattr(self.reporter, "review_missing_relations", recover)
+            recovered = await recover(source_context)
+            diagnostics = getattr(self.reporter, "relation_diagnostics", [])
+            retained = [
+                e
+                for e in prior_relations.get("edges", [])
+                if prior_relations.get("version") == relation_version
+                and e.get("review_status") == "accepted"
+                and e.get("from_evidence_id") != e.get("to_evidence_id")
+                and e.get("relation") in {"repost", "response", "follow_up"}
+                and all(
+                    source_fingerprints.get(ref) is not None
+                    and source_fingerprints[ref]
+                    == prior_relations.get("source_fingerprints", {}).get(ref)
+                    for ref in {
+                        e["from_evidence_id"],
+                        e["to_evidence_id"],
+                        e.get("support_evidence_id"),
+                    }
+                )
+            ]
+            recovered = list(
+                {
+                    (e["from_evidence_id"], e["to_evidence_id"], e["relation"]): e
+                    for e in [*retained, *recovered]
+                }.values()
+            )
+            recovered, conflicts = prune_relation_conflicts(recovered)
+            if conflicts:
+                diagnostics = [
+                    *diagnostics,
+                    {
+                        "stage": "relation_review",
+                        "category": "structural_rejected",
+                        "codes": ["conflicting_relation_type"],
+                        "message": "同一引文的关系类型冲突，未发布相关连线",
+                    },
+                ]
+            await self.database.save_checkpoint(
+                task_id,
+                "report:relations",
+                {
+                    "phase": "verified",
+                    "fingerprint": fingerprint,
+                    "version": relation_version,
+                    "source_fingerprints": source_fingerprints,
+                    "candidates": getattr(self.reporter, "relation_candidates", []),
+                    "edges": recovered,
+                    "diagnostics": diagnostics,
+                    "status": "partial"
+                    if any(d.get("category") != "review_rejected" for d in diagnostics)
+                    else "complete",
+                },
+            )
+        publication_network["diagnostics"] = diagnostics
+        eligible_sources = {item["evidence_ref"] for item in source_context}
+        sources_by_id = {item["evidence_ref"]: item for item in source_context}
+        recovered = [
+            edge
+            for edge in recovered
+            if edge.get("review_status") == "accepted"
+            and edge.get("from_evidence_id") in eligible_sources
+            and edge.get("to_evidence_id") in eligible_sources
+            and edge.get("support_evidence_id") in eligible_sources
+            and not relation_type_codes(edge, sources_by_id)
+        ]
+        for edge in recovered:
+            target = edge["to_evidence_id"]
+            if sources_by_id[target].get("history_citations"):
+                confirmed_current_event_sources.add(target)
+            for evidence_id, node_type in (
+                (edge["from_evidence_id"], "original"),
+                (
+                    edge["to_evidence_id"],
+                    "repost" if edge["relation"] == "repost" else "independent",
+                ),
+            ):
+                if evidence_id in nodes_by_id:
+                    continue
+                source = evidence_by_id[evidence_id]
+                node = {
+                    "evidence_id": evidence_id,
+                    **publication_identity(source),
+                    "published_at": source.published_at,
+                    "node_type": node_type,
+                    "framing": (source.title or "发布记录")[:300],
+                    "evidence_refs": [evidence_id],
+                    "review_status": "accepted",
+                }
+                nodes_by_id[evidence_id] = node
+                publication_network["nodes"].append(node)
+        publication_network["edges"] = recovered
+        return confirmed_current_event_sources
 
     @staticmethod
     def _relation_source_context(

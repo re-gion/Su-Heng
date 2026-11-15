@@ -90,5 +90,10 @@ async def test_relation_checkpoint_version_and_incomplete_structure_are_not_reus
         previous_calls = reporter.calls
         await builder.build(task.id)
         assert reporter.calls == previous_calls + 1
+        _, report, _ = await builder.build(task.id)
+        previous_calls = reporter.calls
+        result = await builder.retry_missing_reviews(task.id, report)
+        assert reporter.calls == previous_calls + 1
+        assert "media_propagation" in result["quality"]["release_gate_missing"]
     finally:
         await database.close()
