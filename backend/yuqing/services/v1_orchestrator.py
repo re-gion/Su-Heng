@@ -47,6 +47,7 @@ from yuqing.services.institution_scope import (
 from yuqing.services.investigation_scope import (
     InvestigationScope,
     detect_text_language,
+    title_matches_subject,
 )
 from yuqing.services.moderation import Moderator, ModeratorReview
 from yuqing.services.search_planning import SearchPlanning
@@ -193,6 +194,12 @@ class V1Orchestrator:
 
     def budget_for(self, depth: str) -> DepthBudget:
         return self.budgets.get(depth, DEFAULT_BUDGET_TABLE["standard"])
+
+    def _primary_claim_limit(self, depth: str) -> int:
+        limit = self.budget_for(depth).max_claims
+        if depth != "quick" and "history_insight" in self.agents:
+            return limit - min(2, limit // 10)
+        return limit
 
     async def _fetch_once(self, record, *, scope, agent, phase, investigation=False):
         # Two investigation seats can discover the same URL before either has
@@ -583,10 +590,18 @@ class V1Orchestrator:
                 # Several mirrors of the same release produce one source lookup.
                 date = str(item.published_at)[:10]
                 body_id = fingerprint(re.sub(r"\s+", "", item.content_text or "")[:500])
-                targets.setdefault((issuer, date, body_id), (title, item))
+                target_key = (issuer, date, body_id)
+                previous = targets.get(target_key)
+                if previous is None or len(
+                    (item.extra or {}).get("page_source_credits", [])
+                ) == 1 < len((previous[1].extra or {}).get("page_source_credits", [])):
+                    targets[target_key] = (title, item)
         ordered = sorted(
             targets.items(),
-            key=lambda entry: entry[0][0] not in (task.resolved_event_query or task.event_query),
+            key=lambda entry: (
+                entry[0][0] not in (task.resolved_event_query or task.event_query),
+                len((entry[1][1].extra or {}).get("page_source_credits", [])) != 1,
+            ),
         )[:3]
         for (issuer, date, body_id), (title, credited_source) in ordered:
             key = "report:source_recovery:" + fingerprint([issuer, date, title, body_id])
@@ -595,6 +610,27 @@ class V1Orchestrator:
             current = await self.database.get_task(task.id)
             if not current or current.status != "running" or not self._llm_phase_has_room():
                 break
+            captured = [
+                item
+                for item in evidence
+                if (item.extra or {}).get("scope_status") == "history"
+                and item.fetch_status == "fetched"
+                and (item.published_at or "")[:10] == date
+                and issuer in (item.publisher_entity, item.source_name)
+            ]
+            for original in captured[:2]:
+                restored = await self.evidence.confirm_credited_publication(
+                    original, credited_source, issuer, scope
+                )
+                if (restored.extra or {}).get("main_eligible"):
+                    await self.database.save_checkpoint(
+                        task.id,
+                        key,
+                        {"phase": "verified", "status": "complete", "fetched": [original.local_id]},
+                    )
+                    break
+            if await self.database.checkpoint(task.id, key):
+                continue
             query = f'{issuer} "{title}" {date} 官方原文'[:200]
             await self.database.save_checkpoint(
                 task.id, key, {"phase": "verified", "status": "attempted", "query": query}
@@ -1019,7 +1055,7 @@ class V1Orchestrator:
             await self.verification.verify_claim(claim, reuse_completed=retry_incomplete)
         await self._repair_history_comparison(task_id)
 
-    async def _repair_history_comparison(self, task_id: str) -> None:
+    async def _repair_history_comparison(self, task_id: str, *, allow_new_case=False) -> None:
         """Retry a case fact against its own fetched source after a partial verdict."""
         key = "report:history_repair"
         if await self.database.checkpoint(task_id, key):
@@ -1054,6 +1090,48 @@ class V1Orchestrator:
             )
             if evidence[ref].fetch_status == "fetched"
         }
+        budget = self.budget_for(task.depth)
+        available_claims = max(0, min(2, budget.max_claims - len(claims)))
+        if not sources and allow_new_case and available_claims > 0:
+            topic = task.resolved_event_query or task.event_query
+            scope = InvestigationScope(
+                event_query=topic,
+                languages=tuple(task.source_languages),
+                source_scope=task.effective_source_scope,
+                date_from=task.time_range_from,
+                date_to=task.time_range_to,
+            )
+            leads = [
+                item
+                for item in evidence.values()
+                if (item.extra or {}).get("scope_status") == "history"
+                and item.published_at
+                and item.published_at[:10] <= task.created_at[:10]
+                and not title_matches_subject(topic, item.title, fallback_to_query=True)
+            ]
+            leads.sort(
+                key=lambda item: (
+                    -history_relevance(topic, f"{item.title} {item.snippet or ''}"),
+                    item.source_role != "authority",
+                    item.fetch_status != "fetched",
+                    item.source_tier,
+                )
+            )
+            for lead in leads[:2]:
+                current = await self.database.get_task(task_id)
+                if not current or current.status != "running":
+                    break
+                fetched = await self._fetch_once(
+                    lead, scope=scope, agent="history_insight", phase="primary"
+                )
+                if (
+                    fetched
+                    and fetched.fetch_status == "fetched"
+                    and (fetched.extra or {}).get("scope_status") == "history"
+                    and (fetched.extra or {}).get("date_provenance")
+                    in {"page_metadata", "page_visible", "trusted_structured", "user_provided"}
+                ):
+                    sources[fetched.local_id] = fetched
         if (
             not sources
             or await self._emit_budget(task_id, task.depth)
@@ -1063,15 +1141,23 @@ class V1Orchestrator:
         await self.database.save_checkpoint(
             task_id, key, {"attempted": True, "evidence_refs": list(sources)[:2]}
         )
-        budget = self.budget_for(task.depth)
+        retry_usage = await self.database.checkpoint(task_id, "report:verify_retry_usage") or {}
+        used = sum([len(await self.database.claim_evidence_rows(c.pk)) for c in claims]) + int(
+            retry_usage.get("spent", 0)
+        )
+        available_claims = min(available_claims, max(0, budget.max_verify_calls - used))
         for source in list(sources.values())[:2]:
-            if await self._emit_budget(task_id, task.depth) or not self._llm_phase_has_room():
+            if (
+                not available_claims
+                or await self._emit_budget(task_id, task.depth)
+                or not self._llm_phase_has_room()
+            ):
                 break
             try:
                 generated = await agent.summarize(
                     (task.resolved_event_query or task.event_query)
-                    + "\n【历史案例核验纠错】此前历史陈述因日期或复合信息不一致而未获完整支持。"
-                    "仅根据下一份来源重新提取一条最短的机构调查或处分结果事实。"
+                    + "\n【独立历史案例核验】只用这一份原文提取一个可比案例。"
+                    "用一至两条带连续证据的陈述交代主体、独立事件经过与已知处置或结果。"
                     "不要写来源正文与页面元数据不一致的具体日期；"
                     "独立案例元数据仍须完整，不能加入其他来源或当前事件。",
                     [source],
@@ -1079,9 +1165,13 @@ class V1Orchestrator:
             except Exception as exc:
                 self._limitations.append(f"历史案例定向纠错未完成（{type(exc).__name__}）。")
                 continue
-            for item in generated[:3]:
-                if item.evidence_ids != [source.local_id] or not (item.analysis_data or {}).get(
-                    "historical_case"
+            accepted_case = False
+            for item in generated[:available_claims]:
+                if item.evidence_ids != [source.local_id] or not independent_case_evidence(
+                    item,
+                    {source.local_id: source},
+                    task.resolved_event_query or task.event_query,
+                    task.created_at,
                 ):
                     continue
                 reviewed, incomplete = await self._review_generated(task_id, [item])
@@ -1107,17 +1197,22 @@ class V1Orchestrator:
                     )
                     if claim.verification_state == "pending":
                         await self.verification.verify_claim(claim)
+                        available_claims -= 1
                     reviewed_claim = await self.database.get_claim(task_id, claim.local_id)
                     if (
                         reviewed_claim
                         and reviewed_claim.verdict == "support"
                         and reviewed_claim.independent_sources >= 1
                     ):
-                        return
+                        if not allow_new_case:
+                            return
+                        accepted_case = True
                 except Exception as exc:
                     self._limitations.append(
                         f"历史案例纠错陈述未入库或核验（{type(exc).__name__}）。"
                     )
+            if accepted_case:
+                return
 
     async def _prepare_topic_candidates(
         self, task, *, date_from: str | None = None, date_to: str | None = None
@@ -2618,7 +2713,9 @@ class V1Orchestrator:
                                 evidence_ids=item.evidence_ids,
                                 analysis_data=item.analysis_data,
                             ),
-                            max_claims=agent_budget.max_claims,
+                            max_claims=self._primary_claim_limit(self._budget_depth)
+                            if summary_phase != "quality_recovery"
+                            else agent_budget.max_claims,
                             max_evidence_per_claim=agent_budget.max_evidence_per_claim,
                         )
                     except ValueError as exc:
@@ -3398,7 +3495,7 @@ class V1Orchestrator:
             claim_count = await self.database.fetch_one(
                 "SELECT COUNT(*) AS total FROM claim WHERE task_id=?", (task_id,)
             )
-            if claim_count and claim_count["total"] >= depth_budget.max_claims:
+            if claim_count and claim_count["total"] >= self._primary_claim_limit(task.depth):
                 claim_budget_stop.set()
             active_agents = ("fact_investigator",) if task.depth == "quick" else tuple(self.agents)
             no_gain_rounds = int((checkpoint or {}).get("no_gain_rounds", 0))
@@ -3686,6 +3783,7 @@ class V1Orchestrator:
                 await self.database.list_claims(task_id),
                 {item.local_id: item for item in await self.database.list_evidence(task_id)},
             )
+            await self._repair_history_comparison(task_id, allow_new_case=True)
             await self._emit_budget(task_id, task.depth)
         current_task = await self.database.get_task(task_id)
         evidence = await self.database.list_evidence(task_id)

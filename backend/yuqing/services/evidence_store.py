@@ -401,7 +401,10 @@ class EvidenceStore:
             original.fetch_status != "fetched"
             or credited.fetch_status != "fetched"
             or (credited.extra or {}).get("scope_status") not in {"main", "event_context"}
-            or set(extra.get("scope_reasons") or []) != {"event_mismatch"}
+            or (
+                set(extra.get("scope_reasons") or []) != {"event_mismatch"}
+                and extra.get("scope_status") != "history"
+            )
             or extra.get("date_provenance") not in {"page_metadata", "page_visible"}
             or not original.published_at
             or not credited.published_at

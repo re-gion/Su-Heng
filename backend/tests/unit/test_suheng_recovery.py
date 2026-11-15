@@ -378,9 +378,15 @@ async def test_invalid_empty_relation_cache_is_not_reused():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [False, True])
-@pytest.mark.parametrize("carrier_credit", [False, True])
-async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved, carrier_credit):
+@pytest.mark.parametrize("credit_kind", ["publisher", "carrier", "official_site"])
+async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved, credit_kind):
     passage = "学校公开通报复核工作的方法、材料范围和程序依据，说明已经完成的工作与尚需说明的事项。"
+    credited_name = {
+        "publisher": "示例新闻网",
+        "carrier": "示例网",
+        "official_site": "示例大学官网",
+    }[credit_kind]
+    credit = f"来源：{credited_name}"
 
     class Gateway:
         reviews = 0
@@ -391,7 +397,7 @@ async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved,
             self.reviews += 1
             payload = json.loads(prompt.split("\n", 1)[1])
             assert payload["identity_passage"] == passage
-            assert payload["edge"]["quote"] == "来源：示例新闻网"
+            assert payload["edge"]["quote"] == credit
             return {"accepted": approved}
 
     gateway = Gateway()
@@ -399,13 +405,18 @@ async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved,
     carrier = (
         {
             "identity_status": "credited_source",
-            "platform": "示例新闻网",
+            "platform": credited_name,
             "source_name": "示例通讯社",
             "article_body_sha256": "fixture-sha",
         }
-        if carrier_credit
+        if credit_kind == "carrier"
         else {}
     )
+    if credit_kind == "official_site":
+        carrier = {
+            "source_name": "示例大学",
+            "confirmed_credit": {"issuer": "示例大学", "credited_evidence_id": "E002"},
+        }
     result = await agent.recover_relations(
         [
             {"evidence_ref": "E001", "source_name": "示例新闻网", "excerpt": passage, **carrier},
@@ -413,7 +424,7 @@ async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved,
                 "evidence_ref": "E002",
                 "source_name": "另家媒体",
                 "article_body_sha256": "fixture-sha",
-                "excerpt": passage + "\n来源：示例新闻网",
+                "excerpt": passage + "\n" + credit,
             },
         ]
     )

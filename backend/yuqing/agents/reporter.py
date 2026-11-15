@@ -48,7 +48,7 @@ from yuqing.core.publication_relations import (
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "reader-decision-v5"
     SUMMARY_DRAFT_VERSION = "four-stage-targeted-v12"
-    RELATION_VERSION = "source-identity-v8"
+    RELATION_VERSION = "source-identity-v10"
 
     @staticmethod
     def _analysis_limit(context: dict[str, Any]) -> int:
@@ -907,9 +907,18 @@ class OpenAIReportAgent:
             codes.append("invalid_support")
         support = by_id.get(support_id, {})
         windows = support.get("excerpt_windows", [support.get("excerpt", "")])
+        original_body = by_id.get(a, {}).get("article_body_sha256")
+        exact_short_credit = (
+            isinstance(quote, str)
+            and edge.get("relation") == "repost"
+            and support_id == b
+            and bool(document_credit_publisher(quote))
+            and bool(original_body)
+            and original_body == support.get("article_body_sha256")
+        )
         if (
             not isinstance(quote, str)
-            or len(quote) < 8
+            or (len(quote) < 8 and not exact_short_credit)
             or not any(isinstance(part, str) and quote in part for part in windows)
         ):
             codes.append("invalid_quote")
@@ -958,10 +967,18 @@ class OpenAIReportAgent:
                                 and original["article_body_sha256"]
                                 == target.get("article_body_sha256")
                             )
+                            confirmed_credit = original.get("confirmed_credit") or {}
+                            named_official_site = confirmed_credit.get(
+                                "credited_evidence_id"
+                            ) == b and credited in {
+                                f"{confirmed_credit.get('issuer')}官网",
+                                f"{confirmed_credit.get('issuer')}官方网站",
+                            }
                             attributed = (
                                 bool(credited)
                                 and (
                                     credited_carrier
+                                    or named_official_site
                                     or (
                                         credited in names
                                         and original.get("identity_status") != "credited_source"
@@ -1052,6 +1069,8 @@ class OpenAIReportAgent:
             "目标页明确署名单一稿源、实际刊载方不同且正文对应同一整篇稿件时可认定转载。"
             "若目标页明确署名原节点的刊载平台，且两页article_body_sha256一致，也可证明目标页以该平台所刊稿件为来源。"
             "仍须核对署名和日期方向；不能推断该平台是稿件的最初作者。"
+            "confirmed_credit代表程序已核对目标页明确注明机构官网、原节点发布单位、同日及大段同文；"
+            "结合两页网址和正文检查是不是同一份公文，机构原页标题简短与转载页加标题可以并存。"
             "同刊载方镜像、综合稿、仅共同引用第三方通报仍应拒绝。"
             + (
                 "本次专审稿源与刊载方区别。重新核对两端载体、时序、署名和同稿证据，按这些材料重新作出独立判定。"

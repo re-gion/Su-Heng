@@ -429,7 +429,7 @@ class FullReportBuilder:
                 part
                 for owner, item, part in units
                 if isinstance(owner, list)
-                and id(owner) in core_lists
+                and id(owner) in core_lists | publication_units
                 or isinstance(owner, dict)
                 and owner.get("section") in {"01", "02", "04", "07"}
             )
@@ -2554,6 +2554,8 @@ class FullReportBuilder:
             )
             if item.local_id in history_citations:
                 sources[-1]["history_citations"] = history_citations[item.local_id]
+            if identified_original(item):
+                sources[-1]["confirmed_credit"] = item.extra["publication_identity"]
         return sources
 
     @staticmethod
