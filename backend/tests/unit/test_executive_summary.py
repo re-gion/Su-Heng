@@ -22,6 +22,7 @@ from yuqing.render.html import render_html
 from yuqing.render.ir_migrations import migrate_report
 from yuqing.render.validator import ReportValidationError, validate_report
 from yuqing.services.executive_summary import attach_executive_summary, safe_summary_diagnostics
+from yuqing.services.institution_scope import InstitutionScopeReviewer
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "executive-summary.json"
 
@@ -267,6 +268,58 @@ async def test_scope_redaction_invalidates_semantic_approval(summary_report):
     )
     assert summary_report["blocks"][1]["summary_mode"] == "fact_brief"
     assert summary_report["blocks"][1]["summary_status"] == "scope_review_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_anonymous_role_redaction_does_not_discard_reviewed_summary(summary_report):
+    original = "校方收到一名女生与同校男生的诉求。"
+    summary_report["blocks"][2]["items"][0]["text"] = original
+    summary_report["blocks"][1]["what"][0]["text"] = original
+    facts = {i["claim_ref"]: i["text"] for i in summary_report["blocks"][2]["items"]}
+    for item in summary_report["blocks"][3]["items"]:
+        item["observation"] = "\n".join(facts[ref] for ref in item["claim_refs"])
+
+    class AnonymousGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            value = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in value:
+                value["paragraphs"][0]["sentences"][0]["text"] = original
+            return value
+
+    class PrivacyGateway:
+        async def complete_json(self, role, system, prompt, **kwargs):
+            texts = json.loads(prompt.split("\n", 1)[1])
+            return {
+                "items": [
+                    {
+                        "id": item["id"],
+                        "allowed": True,
+                        "redactions": [
+                            {"text": text, "replacement": replacement}
+                            for text, replacement in (
+                                ("一名女生", "当事人甲"),
+                                ("同校男生", "另一名学生"),
+                            )
+                            if text in item["text"]
+                        ],
+                    }
+                    for item in texts
+                ]
+            }
+
+    reviewer = InstitutionScopeReviewer(PrivacyGateway())
+    reviewer.scope = "public_event"
+    await attach_executive_summary(
+        summary_report,
+        OpenAIReportAgent(AnonymousGateway(), "fixture"),
+        scope_reviewer=reviewer,
+        scope_required=True,
+    )
+    summary = summary_report["blocks"][1]
+    assert summary["summary_mode"] == "narrative"
+    assert summary["paragraphs"][0]["sentences"][0]["text"] == original
+    assert summary_report["quality"]["executive_summary"]["status"] == "complete"
+    assert validate_report(summary_report).errors == []
 
 
 @pytest.mark.asyncio

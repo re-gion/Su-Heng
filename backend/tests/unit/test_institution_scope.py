@@ -393,3 +393,39 @@ async def test_personal_account_marker_applies_to_earlier_fact_and_later_resume(
     assert (await resumed.review(["该文章署名个人昵称。"], kind="report_text"))[
         0
     ].status == "rejected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True])
+async def test_qualified_anonymous_roles_keep_summary_text_unchanged(cached):
+    original = "一名女生称在图书馆遭同校男生不雅行为。"
+    changed = "当事人甲称在图书馆遭另一名学生不雅行为。"
+
+    class Database:
+        async def get_scope_review(self, *_args):
+            return {"status": "accepted", "reason": "privacy_redacted", "text": changed}
+
+    gateway = Gateway(
+        [
+            {
+                "items": [
+                    {
+                        "id": 0,
+                        "allowed": True,
+                        "redactions": [
+                            {"text": "一名女生", "replacement": "当事人甲"},
+                            {"text": "同校男生", "replacement": "另一名学生"},
+                        ],
+                    }
+                ]
+            }
+        ]
+    )
+    reviewer = InstitutionScopeReviewer(gateway)
+    if cached:
+        reviewer.bind(Database(), "task", "public_event")
+    decision = (await reviewer.review([original], kind="report_text", scope="public_event"))[0]
+    assert decision.allowed
+    assert decision.text == original
+    assert not only_anonymous_roles_changed("张某某称遭同校男生不雅行为。", changed)
+    assert not only_anonymous_roles_changed(original, changed.replace("不雅行为", "违法行为"))

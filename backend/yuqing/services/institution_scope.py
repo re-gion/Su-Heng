@@ -64,6 +64,13 @@ ANONYMOUS_ROLE_LABELS = REDACTION_LABELS | {
     "涉事研究生",
     "涉事本科生",
 }
+# Modifiers do not turn an anonymous actor into a personal name. Preserve the
+# complete phrase, including its public context, instead of anonymizing it twice.
+ANONYMOUS_ROLE_LABELS |= {
+    prefix + role
+    for prefix in ("一名", "同校")
+    for role in ("女生", "男生", "女学生", "男学生", "学生")
+}
 _ANONYMOUS_ROLE = re.compile("|".join(sorted(ANONYMOUS_ROLE_LABELS, key=len, reverse=True)))
 
 
