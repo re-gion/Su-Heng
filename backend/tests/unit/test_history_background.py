@@ -3,6 +3,32 @@ import copy
 from yuqing.core.history_cards import background_complete, unique_history_cards
 
 
+def test_same_supported_fact_cannot_count_as_two_cases_by_changing_name_or_type():
+    from yuqing.core.history_cards import partition_distinct_history_cards
+
+    body = "明川大学于2023年10月10日宣布终止食堂餐饮合同。"
+    cards = [
+        {
+            "event_name": name,
+            "case_type": kind,
+            "institution": "明川大学",
+            "background_anchors": {"subject": "明川大学"},
+            "background_facts": [{"text": body, "claim_ref": ref}],
+            "evidence_refs": ["E001"],
+        }
+        for name, kind, ref in [
+            ("明川大学食堂异物事件", "analogous", "C001"),
+            ("明川大学食堂异物处置案件", "related_prior", "C002"),
+        ]
+    ]
+    saved = copy.deepcopy(cards)
+    distinct, leads = partition_distinct_history_cards(cards)
+    assert len(distinct) == len(leads) == 1
+    assert leads[0]["duplicate_of"] == distinct[0]["event_name"]
+    assert leads[0]["background_facts"][0]["text"] == body
+    assert cards == saved
+
+
 def test_reading_copy_does_not_count_near_named_same_subject_cases_twice():
     from yuqing.core.verification_presentation import enrich_report_sources
 

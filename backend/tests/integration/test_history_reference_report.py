@@ -13,8 +13,9 @@ from yuqing.storage.models import ClaimCreate, EvidenceCreate, TaskCreate
 @pytest.mark.asyncio
 @pytest.mark.parametrize("date_confirmed", [True, False])
 @pytest.mark.parametrize("has_background", [True, False])
+@pytest.mark.parametrize("wrong_case_identity", [False, True])
 async def test_unresolved_independent_case_is_formal_or_date_uncertain_reference(
-    runtime_dir, claim_limits, date_confirmed, has_background
+    runtime_dir, claim_limits, date_confirmed, has_background, wrong_case_identity
 ):
     database = Database(runtime_dir / "cases.db")
     await database.initialize()
@@ -45,7 +46,9 @@ async def test_unresolved_independent_case_is_formal_or_date_uncertain_reference
                 evidence_ids=[evidence.local_id],
                 analysis_data={
                     "historical_case": {
-                        "name": "另一品牌制动召回事件",
+                        "name": "另一监管机构约谈另一品牌制动召回事件"
+                        if wrong_case_identity
+                        else "另一品牌制动召回事件",
                         "institution": "另一品牌",
                         "independent": True,
                         "similarity": "安全缺陷与召回机制",
@@ -94,9 +97,9 @@ async def test_unresolved_independent_case_is_formal_or_date_uncertain_reference
         _, report, path = await FullReportBuilder(
             database, runtime_dir / "reports", reporter=Reporter()
         ).build(task.id)
-        assert bool(seen_history) == (date_confirmed and has_background)
+        assert bool(seen_history) == (date_confirmed and has_background and not wrong_case_identity)
         history = next(block for block in report["blocks"] if block["type"] == "history_compare")
-        if date_confirmed and has_background:
+        if date_confirmed and has_background and not wrong_case_identity:
             assert len(history["cards"]) == 1
             assert "未记载最终处理结果" in history["cards"][0]["outcome"]
             assert not history["reference_candidates"]
@@ -110,11 +113,20 @@ async def test_unresolved_independent_case_is_formal_or_date_uncertain_reference
             assert len(history["reference_candidates"]) == 1
             page = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
             assert "待核实参考案例（不计入正式历史对照）" in page
-            if date_confirmed:
+            if wrong_case_identity:
+                assert "案例归属待核" in page
+                assert "来源整页提到相关机构不能证明本句属于该案例" in page
+                assert history["reference_candidates"][0]["reported_event_name"].startswith(
+                    "另一监管机构"
+                )
+                assert history["reference_candidates"][0]["origin_claim_ref"] == claim.local_id
+            elif date_confirmed:
                 assert "案例背景待补充" in page
                 assert "不作为正式历史对照或建议依据" in page
             else:
                 assert "不作为历史结论或建议依据" in page
+                assert history["reference_candidates"][0]["institution"] == "另一品牌"
+                assert history["reference_candidates"][0]["origin_claim_ref"] == claim.local_id
         facts = next(block for block in report["blocks"] if block["type"] == "fact_check_table")
         assert not facts["items"]
     finally:

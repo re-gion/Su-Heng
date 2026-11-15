@@ -15,6 +15,17 @@ def test_source_credit_is_retained_outside_the_article_and_scripts_are_ignored()
     assert extract_source_credits(raw) == ["来源：发布机构"]
 
 
+@pytest.mark.parametrize("label", ["信息来源", "文章来源", "稿件来源", "稿源"])
+def test_labelled_article_credit_beside_publication_time_is_retained(label):
+    from yuqing.core.fetch.builtin import extract_source_credits
+
+    raw = (
+        f'<div class="article-meta">发布时间：2024-01-08 10:54　{label}：甲新闻机构</div>'
+        "<script>信息来源：假机构</script><article>正文不含稿源。</article>"
+    )
+    assert extract_source_credits(raw) == [f"{label}：甲新闻机构"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "body",

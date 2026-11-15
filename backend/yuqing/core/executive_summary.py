@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
+from datetime import date
 from typing import Any
 
-from yuqing.core.measurements import measurement_values
+from yuqing.core.measurements import MEASUREMENT, measurement_values
 
 SUMMARY_VERSION = "narrative-v3"
 SUPPORTED_SUMMARY_VERSIONS = {"narrative-v1", "narrative-v2", SUMMARY_VERSION}
@@ -21,6 +23,7 @@ SUMMARY_ROLES = tuple(SUMMARY_HEADINGS)
 PARAGRAPH_REVIEW_FIELDS = ("role_match", "focused", "gap_disclosed")
 COVERAGE_FIELDS = ("event", "current_state", "dispute", "findings", "boundaries", "follow_up")
 SUMMARY_LIMITS = {
+    "max_draft_attempts": 4,
     "max_paragraphs": 4,
     "max_sentences_per_paragraph": 10,
     "max_sentence_characters": 400,
@@ -65,6 +68,223 @@ SUMMARY_ERROR_LABELS = {
     "summary_background_rewind": "摘要末段首次堆入背景或处置细节",
 }
 NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:%|％)?")
+NUMBER_POLICY = "calendar-v1"
+BINDING_POLICY = "sentence-local-v1"
+FULL_DATE = re.compile(
+    r"(?<!\d)(?P<year>\d{4})(?:年|[-/.])(?P<month>\d{1,2})"
+    r"(?:月|[-/.])(?P<day>\d{1,2})(?:日|号)?(?!\d)"
+)
+
+
+def _date_parts(text: str) -> tuple[str, set[str]]:
+    dates = set()
+
+    def replace(match):
+        try:
+            value = date(*(int(match[k]) for k in ("year", "month", "day")))
+        except ValueError:
+            # Invalid dates cannot become supporting dates through normalization.
+            dates.add("invalid:" + match.group())
+        else:
+            dates.add(value.isoformat())
+        return " "
+
+    prose = FULL_DATE.sub(replace, text)
+
+    def partial(match):
+        if match.groupdict().get("year"):
+            year, month = int(match["year"]), int(match["month"])
+            try:
+                date(year, month, 1)
+            except ValueError:
+                dates.add("invalid:" + match.group())
+            else:
+                dates.add(f"month:{year:04d}-{month:02d}")
+        else:
+            month, day = int(match["month"]), int(match["day"])
+            try:
+                date(2000, month, day)
+            except ValueError:
+                dates.add("invalid:" + match.group())
+            else:
+                dates.add(f"day:--{month:02d}-{day:02d}")
+        return " "
+
+    prose = re.sub(r"(?<!\d)(?P<year>\d{4})年(?P<month>\d{1,2})月", partial, prose)
+    prose = re.sub(r"(?<!\d)(?P<month>\d{1,2})月(?P<day>\d{1,2})[日号]", partial, prose)
+    return prose, dates
+
+
+def unsupported_number_details(text: str, basis: str) -> dict:
+    """Compare complete dates as dates, never assemble one from unrelated numbers."""
+    prose, dates = _date_parts(text)
+    source, source_dates = _date_parts(basis)
+    source_numbers = set(NUMBER.findall(basis))
+    for value in list(source_dates):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            source_dates.update({"month:" + value[:7], "day:--" + value[5:]})
+            source_numbers.update(str(int(part)) for part in value.split("-"))
+    source_dates = {value for value in source_dates if not value.startswith("invalid:")}
+    numbers = set(NUMBER.findall(prose))
+    measures, source_measures = measurement_values(prose), measurement_values(source)
+    return {
+        "unsupported_numbers": sorted(numbers - source_numbers),
+        "unsupported_measurements": sorted(measures - source_measures),
+        "unsupported_dates": sorted(dates - source_dates),
+        "basis_numbers": sorted(source_numbers),
+        "basis_measurements": sorted(source_measures),
+        "basis_dates": sorted(source_dates),
+        "legacy_unsupported_numbers": sorted(
+            set(NUMBER.findall(text)) - set(NUMBER.findall(basis))
+        ),
+        "legacy_unsupported_measurements": sorted(
+            measurement_values(text) - measurement_values(basis)
+        ),
+        "legacy_basis_numbers": sorted(set(NUMBER.findall(basis))),
+        "basis_date_spellings": list(
+            dict.fromkeys(match.group() for match in FULL_DATE.finditer(basis))
+        )[:24],
+    }
+
+
+def _unsupported_number(text: str, basis: str, policy: str | None) -> bool:
+    # New reports remain within reader 12's accepted numeric spelling. Calendar
+    # checks add rejection conditions; they never expand that reading contract.
+    if set(NUMBER.findall(text)) - set(NUMBER.findall(basis)) or measurement_values(
+        text
+    ) - measurement_values(basis):
+        return True
+    if policy != NUMBER_POLICY:
+        return False
+    detail = unsupported_number_details(text, basis)
+    return any(
+        detail[k] for k in ("unsupported_numbers", "unsupported_measurements", "unsupported_dates")
+    )
+
+
+def _sentence_basis(sentence: dict, context: dict) -> str:
+    facts, analyses, limits = (context[k] for k in ("facts", "analyses", "limitations"))
+    basis = [facts[r].get("text", "") for r in sentence["claim_refs"] if r in facts]
+    basis.extend(limits[r].get("text", "") for r in sentence["limitation_refs"] if r in limits)
+    for ref in sentence["analysis_refs"]:
+        if ref not in analyses:
+            continue
+        basis.append(
+            {
+                k: analyses[ref].get(k)
+                for k in (
+                    "title",
+                    "interpretation",
+                    "implication",
+                    "action",
+                    "owner",
+                    "trigger",
+                    "uncertainty",
+                    "summary",
+                    "observations",
+                    "sample_count",
+                )
+            }
+        )
+        basis.extend(
+            facts[r].get("text", "") for r in analyses[ref].get("claim_refs", []) if r in facts
+        )
+    return _prose(basis)
+
+
+def normalize_supported_number_spellings(paragraphs: Any, context: dict) -> Any:
+    """Use the cited spelling of equivalent dates and quantities before review."""
+    if not isinstance(paragraphs, list):
+        return paragraphs
+    value = deepcopy(paragraphs)
+    for paragraph in value:
+        if not isinstance(paragraph, dict) or not isinstance(paragraph.get("sentences"), list):
+            continue
+        for sentence in paragraph["sentences"]:
+            if not isinstance(sentence, dict) or not isinstance(sentence.get("text"), str):
+                continue
+            if not all(
+                _refs(sentence.get(key), context[collection])
+                for key, collection in (
+                    ("claim_refs", "facts"),
+                    ("analysis_refs", "analyses"),
+                    ("limitation_refs", "limitations"),
+                )
+            ):
+                continue
+            basis = _sentence_basis(sentence, context)
+            forms = {}
+            for match in FULL_DATE.finditer(basis):
+                try:
+                    canonical = date(
+                        *(int(match[key]) for key in ("year", "month", "day"))
+                    ).isoformat()
+                except ValueError:
+                    continue
+                forms.setdefault(canonical, match.group())
+
+            def replace(match, forms=forms):
+                try:
+                    canonical = date(
+                        *(int(match[key]) for key in ("year", "month", "day"))
+                    ).isoformat()
+                except ValueError:
+                    return match.group()
+                return forms.get(canonical, match.group())
+
+            def quantity_key(spelling):
+                return re.sub(r"\s+", "", spelling)
+
+            quantities = {}
+            for match in MEASUREMENT.finditer(basis):
+                quantities.setdefault(quantity_key(match.group()), match.group())
+            text = FULL_DATE.sub(replace, sentence["text"])
+            sentence["text"] = MEASUREMENT.sub(
+                lambda match, forms=quantities: forms.get(
+                    quantity_key(match.group()), match.group()
+                ),
+                text,
+            )
+    return value
+
+
+def number_repair_issues(paragraphs: Any, context: dict) -> list[dict]:
+    """Private repair feedback; public diagnostics deliberately omit these values."""
+    result = []
+    if not isinstance(paragraphs, list):
+        return result
+    for pi, paragraph in enumerate(paragraphs):
+        if not isinstance(paragraph, dict) or not isinstance(paragraph.get("sentences"), list):
+            continue
+        for si, sentence in enumerate(paragraph["sentences"]):
+            if not isinstance(sentence, dict) or not isinstance(sentence.get("text"), str):
+                continue
+            if any(
+                not isinstance(sentence.get(k), list)
+                for k in ("claim_refs", "analysis_refs", "limitation_refs")
+            ):
+                continue
+            if any(
+                not isinstance(r, str)
+                for k in ("claim_refs", "analysis_refs", "limitation_refs")
+                for r in sentence[k]
+            ):
+                continue
+            detail = unsupported_number_details(
+                sentence["text"], _sentence_basis(sentence, context)
+            )
+            if any(
+                detail[k]
+                for k in (
+                    "unsupported_numbers",
+                    "unsupported_measurements",
+                    "unsupported_dates",
+                    "legacy_unsupported_numbers",
+                    "legacy_unsupported_measurements",
+                )
+            ):
+                result.append({"path": f"paragraphs[{pi}].sentences[{si}]", **detail})
+    return result
 
 
 def digest(value: Any) -> str:
@@ -313,6 +533,7 @@ def check_paragraphs(
     *,
     require_headings: bool = False,
     require_roles: bool | None = None,
+    number_policy: str | None = None,
 ) -> list[str]:
     """Structural, binding, number and repetition guards; NOT semantic entailment."""
     if (
@@ -448,53 +669,33 @@ def check_paragraphs(
             ):
                 errors.append("summary_kind")
                 continue
-            basis = [facts[r].get("text", "") for r in cr] + [limits[r].get("text", "") for r in lr]
+            # Dependency presence is checked separately from numeric support.
             for ref in ar:
-                basis.append(
-                    {
-                        k: analyses[ref].get(k)
-                        for k in (
-                            "title",
-                            "interpretation",
-                            "implication",
-                            "action",
-                            "owner",
-                            "trigger",
-                            "uncertainty",
-                            "summary",
-                            "observations",
-                            "sample_count",
-                        )
-                    }
-                )
-            # Analysis dependencies remain authoritative and must still be in this report.
-            for ref in ar:
-                for claim in analyses[ref].get("claim_refs", []):
-                    if claim not in facts:
-                        errors.append("analysis_dependency")
-                    else:
-                        basis.append(facts[claim].get("text", ""))
-            prose = _prose(basis)
+                if any(claim not in facts for claim in analyses[ref].get("claim_refs", [])):
+                    errors.append("analysis_dependency")
+            prose = _sentence_basis(sentence, context)
             heading_basis.append(prose)
-            if set(NUMBER.findall(text)) - set(NUMBER.findall(prose)) or measurement_values(
-                text
-            ) - measurement_values(prose):
+            if _unsupported_number(text, prose, number_policy):
                 errors.append("unsupported_number")
-        if isinstance(heading, str) and (
-            set(NUMBER.findall(heading)) - set(NUMBER.findall(" ".join(heading_basis)))
-            or measurement_values(heading) - measurement_values(" ".join(heading_basis))
-        ):
-            errors.append("unsupported_number")
+        if isinstance(heading, str):
+            if _unsupported_number(heading, " ".join(heading_basis), number_policy):
+                errors.append("unsupported_number")
     if total > SUMMARY_LIMITS["max_characters"] or count > SUMMARY_LIMITS["max_sentences"]:
         errors.append("summary_too_long")
     return list(dict.fromkeys(errors))
 
 
 def paragraph_issues(
-    paragraphs: Any, context: dict, *, require_headings: bool = False
+    paragraphs: Any,
+    context: dict,
+    *,
+    require_headings: bool = False,
+    number_policy: str | None = None,
 ) -> list[dict]:
     """Locate structural failures without copying text or arbitrary model identifiers."""
-    errors = check_paragraphs(paragraphs, context, require_headings=require_headings)
+    errors = check_paragraphs(
+        paragraphs, context, require_headings=require_headings, number_policy=number_policy
+    )
     if not errors:
         return []
     issues = []
@@ -508,7 +709,12 @@ def paragraph_issues(
                 count += 1
                 if isinstance(sentence, dict) and isinstance(sentence.get("text"), str):
                     total += len(sentence["text"])
-                codes = check_paragraphs([{"sentences": [sentence]}], context, require_roles=False)
+                codes = check_paragraphs(
+                    [{"sentences": [sentence]}],
+                    context,
+                    require_roles=False,
+                    number_policy=number_policy,
+                )
                 if codes:
                     issues.append({"path": f"paragraphs[{pi}].sentences[{si}]", "codes": codes})
                     located.update(codes)
@@ -534,8 +740,31 @@ def review_issues(review: Any, paragraphs: list[dict]) -> list[dict]:
     if not isinstance(review, dict):
         return [{"path": "review", "codes": ["invalid_review"]}]
     issues = []
-    sentences = review.get("sentences")
     ids = sentence_ids(paragraphs)
+    if "binding_policy" in review or "basis_sentences" in review:
+        basis = review.get("basis_sentences")
+        if (
+            review.get("binding_policy") != BINDING_POLICY
+            or not isinstance(basis, dict)
+            or set(basis) != set(ids)
+        ):
+            issues.append({"path": "sentences", "codes": ["invalid_review"]})
+        else:
+            for ref in ids:
+                if basis[ref] is not True:
+                    issues.append(
+                        {
+                            "path": f"sentences.{ref}",
+                            "codes": [
+                                "sentence_not_supported"
+                                if basis[ref] is False
+                                else "invalid_review"
+                            ],
+                        }
+                    )
+        if issues and review.get("global_review_pending") is True:
+            return issues
+    sentences = review.get("sentences")
     if not isinstance(sentences, dict) or set(sentences) != set(ids):
         issues.append({"path": "sentences", "codes": ["invalid_review"]})
     else:
@@ -606,7 +835,10 @@ def narrative_errors(block: dict, report: dict) -> list[str]:
         return ["summary_not_reviewed"]
     context = summary_context(report, version=review["version"])
     paragraphs = block.get("paragraphs")
-    errors = check_paragraphs(paragraphs, context)
+    policy = review.get("number_policy")
+    if policy not in {None, NUMBER_POLICY}:
+        return ["summary_not_reviewed"]
+    errors = check_paragraphs(paragraphs, context, number_policy=policy)
     if errors:
         return errors
     if not review_accepted(review, paragraphs):

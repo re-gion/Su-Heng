@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 
 from yuqing.core.executive_summary import (
+    NUMBER_POLICY,
     SUMMARY_ERROR_LABELS,
+    SUMMARY_LIMITS,
     check_paragraphs,
     narrative_errors,
     summary_context,
@@ -19,7 +21,7 @@ def safe_summary_diagnostics(value) -> list[dict]:
     if not isinstance(value, list):
         return []
     result = []
-    for item in value[:8]:
+    for item in value[-12:]:
         if (
             not isinstance(item, dict)
             or not isinstance(item.get("stage"), str)
@@ -41,7 +43,10 @@ def safe_summary_diagnostics(value) -> list[dict]:
         if not codes:
             continue
         record = {"stage": item["stage"], "codes": list(dict.fromkeys(codes))}
-        if type(item.get("attempt")) is int and 0 <= item["attempt"] <= 2:
+        if (
+            type(item.get("attempt")) is int
+            and 0 <= item["attempt"] <= SUMMARY_LIMITS["max_draft_attempts"]
+        ):
             record["attempt"] = item["attempt"]
         issues = []
         for issue in item.get("issues", []) if isinstance(item.get("issues"), list) else []:
@@ -159,7 +164,12 @@ async def attach_executive_summary(
         errors = list(
             dict.fromkeys(
                 [
-                    *check_paragraphs(candidate.get("paragraphs"), context, require_headings=True),
+                    *check_paragraphs(
+                        candidate.get("paragraphs"),
+                        context,
+                        require_headings=True,
+                        number_policy=NUMBER_POLICY,
+                    ),
                     *narrative_errors(candidate, report),
                 ]
             )

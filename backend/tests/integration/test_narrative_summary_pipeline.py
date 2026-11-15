@@ -51,6 +51,9 @@ class SummaryGateway:
             return {"outline": json.loads(FIXTURE.read_text(encoding="utf-8"))["outline"]}
         if role == "reporter":
             return {"paragraphs": paragraphs}
+        if "阶段：逐句绑定依据审查。" in prompt:
+            sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+            return {"id": sentence["id"], "supported": True}
         return approve(paragraphs)
 
 
@@ -173,6 +176,9 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(runtime
                             return {"outline": outline}
                         if role == "reporter":
                             return {"paragraphs": paragraphs}
+                        if "阶段：逐句绑定依据审查。" in prompt:
+                            sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                            return {"id": sentence["id"], "supported": True}
                         return approve(paragraphs)
 
                 return await OpenAIReportAgent(Gateway(), "fixture").summarize(context)

@@ -8,6 +8,44 @@ from difflib import SequenceMatcher
 from typing import Any
 
 
+def historical_identity_issue(case: dict, text: str) -> str | None:
+    """Bind a case's named subject to this claim, not any entity on its source page.
+
+    Foreign-language source anchors remain unchanged and must also occur in
+    the reviewed claim. A matching translated subject in a display name alone
+    cannot establish that it is the same entity as a source-language anchor.
+    """
+
+    def compact(value):
+        return "".join(str(value or "").casefold().split())
+
+    body, name = compact(text), compact(case.get("name"))
+    background = case.get("background") or {}
+    subject = compact(background.get("subject")) if isinstance(background, dict) else ""
+    generic = {"校方", "该校", "学校", "大学", "学院", "公司", "企业", "相关单位", "监管部门"}
+    if not subject or subject in generic or subject not in body:
+        institution = compact(case.get("institution"))
+        subject = institution if institution and institution in body else ""
+    if not subject or subject in generic:
+        return "case_identity_unconfirmed"
+    at = name.find(subject)
+    if at < 0:
+        return "case_subject_mismatch"
+    # A university named as the object of an office's interview is not that
+    # office's interview event when this claim describes the university's action.
+    if re.search(
+        r"约谈|调查|督查|处罚|问责|通报|回应|起诉|召回|interview|investigat|sanction", name[:at]
+    ):
+        return "case_subject_mismatch"
+    institution = compact(case.get("institution"))
+    if institution and institution not in body:
+        # A whole page may mention several English institutions. Matching its
+        # Chinese case label to a Chinese sentence is not a trusted bilingual
+        # identity mapping for a different source-language anchor.
+        return "case_subject_alias_unconfirmed"
+    return None
+
+
 def _ambiguous_case_identity(left: dict, right: dict) -> bool:
     a = re.search(r"20\d{2}-\d{2}", str(left.get("event_time") or ""))
     b = re.search(r"20\d{2}-\d{2}", str(right.get("event_time") or ""))
@@ -47,6 +85,18 @@ def partition_distinct_history_cards(cards: list[dict]) -> tuple[list[dict], lis
     """Keep ambiguous aliases as leads; never merge their facts or assert they are identical."""
     distinct, leads = [], []
     for card in cards:
+        same_fact = next(
+            (previous for previous in distinct if _shared_history_fact(card, previous)), None
+        )
+        if same_fact:
+            leads.append(
+                {
+                    **card,
+                    "duplicate_of": same_fact.get("event_name"),
+                    "reason": "与已有案例引用相同主体的同一处置事实，但候选事件名或分类不同；保留原记录供身份复核，不重复计入另一正式案例。",
+                }
+            )
+            continue
         if any(_ambiguous_case_identity(card, previous) for previous in distinct):
             leads.append(
                 {
@@ -57,6 +107,26 @@ def partition_distinct_history_cards(cards: list[dict]) -> tuple[list[dict], lis
         else:
             distinct.append(card)
     return distinct, leads
+
+
+def _shared_history_fact(left: dict, right: dict) -> bool:
+    def texts(card):
+        return {
+            re.sub(r"[\W_]", "", str(fact.get("text") or "")).casefold()
+            for fact in card.get("background_facts", [])
+            if fact.get("text")
+        }
+
+    shared = texts(left) & texts(right)
+    if not shared or min(map(len, shared)) < 12:
+        return False
+    subjects = [
+        str(
+            (c.get("background_anchors") or {}).get("subject") or c.get("institution") or ""
+        ).strip()
+        for c in (left, right)
+    ]
+    return bool(subjects[0] and subjects[0] == subjects[1])
 
 
 def reconcile_history_card_identity(report: dict[str, Any]) -> None:
@@ -117,6 +187,16 @@ def unique_history_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
             continue
         current = merged[key]
+        # Keep each source-bound stage instead of silently replacing an earlier
+        # announcement with the longest later summary. Never synthesize prose.
+        stages = current.get("stages") or [
+            {k: deepcopy(v) for k, v in current.items() if k != "stages"}
+        ]
+        incoming = raw.get("stages") or [{k: deepcopy(v) for k, v in raw.items() if k != "stages"}]
+        for stage in incoming:
+            if stage not in stages:
+                stages.append(deepcopy(stage))
+        current["stages"] = stages
         for field in ("summary", "comparison", "outcome"):
             if len(str(raw.get(field) or "")) > len(str(current.get(field) or "")):
                 current[field] = raw[field]
@@ -136,3 +216,57 @@ def unique_history_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if value and not (current.get("background_anchors") or {}).get(field):
                 current.setdefault("background_anchors", {})[field] = value
     return list(merged.values())
+
+
+def group_history_candidates(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold near-named leads for reading without asserting they identify one case."""
+    candidates = unique_history_cards(
+        [member for card in cards for member in card.get("related_candidates", [card])]
+    )
+    groups: list[list[dict]] = []
+
+    def identity(card):
+        name = str(card.get("event_name") or "").strip()
+        institution = str(card.get("institution") or "").strip()
+        if not institution:
+            match = re.match(r"(.{2,30}?(?:大学|学院|中学|小学|学校|公司|集团|医院))", name)
+            institution = match[1] if match else ""
+        tail = name.removeprefix(institution)
+        tail = re.sub(r"(?:事件|案件|问题|案)$", "", tail)
+        return institution, tail
+
+    def close(left, right):
+        a, x = identity(left)
+        b, y = identity(right)
+        if not a or a != b or min(len(x), len(y)) < 4:
+            return False
+        if left.get("case_type", "analogous") != right.get("case_type", "analogous"):
+            return False
+        # Explicit different dates or distinct-incident markers beat title similarity.
+        dates = [
+            re.search(r"20\d{2}(?:[-年]\d{1,2})?", str(c.get("event_time") or ""))
+            for c in (left, right)
+        ]
+        if dates[0] and dates[1] and dates[0][0] != dates[1][0]:
+            return False
+        if re.search(r"另一起|另一件|第二起|不同事件", x + y):
+            return False
+        return SequenceMatcher(None, x, y, autojunk=False).ratio() >= 0.8
+
+    for card in candidates:
+        group = next((g for g in groups if all(close(card, old) for old in g)), None)
+        if group is None:
+            groups.append([card])
+        else:
+            group.append(card)
+    result = []
+    for group in groups:
+        card = deepcopy(group[0])
+        if len(group) > 1:
+            card["related_candidates"] = deepcopy(group)
+            card["identity_status"] = "unconfirmed"
+            card["evidence_refs"] = list(
+                dict.fromkeys(r for c in group for r in c.get("evidence_refs", []))
+            )
+        result.append(card)
+    return result

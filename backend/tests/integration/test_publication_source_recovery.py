@@ -419,3 +419,109 @@ async def test_source_lookup_skips_media_mirrors_and_falls_through(runtime_dir):
         assert len(await db.list_evidence(task.id)) == 2
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_source_lookup_uses_article_title_and_ignores_platform_credit(runtime_dir):
+    db, task, runner, search, _ = await setup_recovery(runtime_dir)
+    try:
+        title = "甲乙大学图书馆事件复核通报"
+        await db.execute_write(
+            "UPDATE evidence SET title=?,content_text=?,extra=? WHERE task_id=? AND local_id='E001'",
+            (
+                title + "-报道平台",
+                "澎湃Logo\n首页 热点 登录\n" + NOTICE_BODY,
+                '{"scope_status":"main","page_source_credits":'
+                '["来源：澎湃新闻·澎湃号·媒体","来源/甲乙大学官网"]}',
+                task.id,
+            ),
+        )
+        await runner._recover_publication_sources(task, await db.list_evidence(task.id))
+        assert len(search.calls) == 1
+        query = search.calls[0].query
+        assert title in query
+        assert "甲乙大学" in query
+        assert "澎湃Logo" not in query and "澎湃号" not in query
+        assert "报道平台" not in query
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sealed", [False, True])
+async def test_captured_source_date_can_be_recovered_without_refetch_or_claim_changes(
+    runtime_dir, sealed
+):
+    db, task, runner, _, fetcher = await setup_recovery(runtime_dir)
+    try:
+        raw = (
+            "<html><head></head><body><nav>" + "导航" * 18000 + "</nav>"
+            '<span id="pubtime_baidu">2025-09-20 09:53:21</span>'
+            "<article>甲乙大学图书馆事件调查结果。</article></body></html>"
+        )
+        snapshot, digest = runner.evidence.snapshots.save(task.id, "captured-original", raw)
+        old_fetched_at = "2025-09-20T10:00:00"
+        await db.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://school.example.edu/notice/captured",
+                title="甲乙大学图书馆事件调查复核通报",
+                snippet="甲乙大学发布图书馆事件调查结果。",
+                source_name="甲乙大学官网",
+                source_role="authority",
+                content_text="甲乙大学图书馆事件调查结果。",
+                fetch_status="fetched",
+                fetched_at=old_fetched_at,
+                snapshot_path=snapshot,
+                content_sha256=digest,
+                extra={"scope_status": "pending", "scope_reasons": ["date_unknown"]},
+            )
+        )
+        if sealed:
+            await db.set_task_status(task.id, "done", "finished")
+        records = await runner.evidence.refresh_task_publication_metadata(task)
+        original = next(e for e in records if e.url.endswith("/captured"))
+        assert original.published_at == (None if sealed else "2025-09-20T09:53:21")
+        assert original.extra["scope_status"] == ("pending" if sealed else "main")
+        assert not fetcher.calls
+        assert not await db.list_claims(task.id)
+        row = await db.fetch_one("SELECT fetched_at FROM evidence WHERE pk=?", (original.pk,))
+        assert row["fetched_at"] == old_fetched_at
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["wrong_hash", "outside_store"])
+async def test_metadata_replay_requires_the_original_snapshot_inside_store(runtime_dir, invalid):
+    db, task, runner, _, fetcher = await setup_recovery(runtime_dir)
+    try:
+        store = (
+            SnapshotStore(runtime_dir / "outside")
+            if invalid == "outside_store"
+            else runner.evidence.snapshots
+        )
+        path, digest = store.save(
+            task.id, "original", '<span id="pubtime_baidu">2025-09-20 09:53:21</span>'
+        )
+        await db.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://school.example.edu/notice/untrusted",
+                title="甲乙大学图书馆事件调查通报",
+                snippet="调查结果",
+                fetch_status="fetched",
+                content_text="调查结果",
+                snapshot_path=path,
+                content_sha256="modified" if invalid == "wrong_hash" else digest,
+                fetched_at="2025-09-20",
+                extra={"scope_status": "pending", "scope_reasons": ["date_unknown"]},
+            )
+        )
+        records = await runner.evidence.refresh_task_publication_metadata(task)
+        original = next(e for e in records if e.url.endswith("/untrusted"))
+        assert original.published_at is None
+        assert original.extra["scope_status"] == "pending"
+        assert not fetcher.calls
+    finally:
+        await db.close()

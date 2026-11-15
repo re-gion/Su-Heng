@@ -7,13 +7,16 @@ import pytest
 
 from yuqing.agents.reporter import OpenAIReportAgent
 from yuqing.core.executive_summary import (
+    BINDING_POLICY,
     COVERAGE_FIELDS,
+    NUMBER_POLICY,
     PARAGRAPH_REVIEW_FIELDS,
     SUMMARY_HEADINGS,
     SUMMARY_ROLES,
     check_outline,
     check_paragraphs,
     digest,
+    normalize_supported_number_spellings,
     review_accepted,
     sentence_ids,
     summary_context,
@@ -34,6 +37,21 @@ def summary_report():
 
 def paragraphs():
     return json.loads(FIXTURE.read_text(encoding="utf-8"))["paragraphs"]
+
+
+def test_summary_preserves_cited_quantity_spelling_without_changing_value(summary_report):
+    context = summary_context(summary_report)
+    ref, limit = next(iter(context["limitations"].items()))
+    limit["text"] = "8 条证据未取得原文。"
+    sentence = {
+        "kind": "limitation",
+        "text": "8条证据未取得原文。另有9条待核。",
+        "claim_refs": [],
+        "analysis_refs": [],
+        "limitation_refs": [ref],
+    }
+    result = normalize_supported_number_spellings([{"sentences": [sentence]}], context)
+    assert result[0]["sentences"][0]["text"] == "8 条证据未取得原文。另有9条待核。"
 
 
 def approval(value):
@@ -62,6 +80,9 @@ class Gateway:
         self.calls.append((role, system, prompt))
         if self.error:
             raise TimeoutError("upstream fixture")
+        if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+            value = json.loads(prompt.split("\n", 1)[1])["sentence"]
+            return {"id": value["id"], "supported": True, "reason": ""}
         if role == "reporter" and "阶段：四段摘要规划。" in prompt:
             return {"outline": json.loads(FIXTURE.read_text(encoding="utf-8"))["outline"]}
         if role == "reporter":
@@ -92,7 +113,7 @@ async def test_remove_only_located_unsupported_sentence_then_require_fresh_full_
                         "limitation_refs": [],
                     }
                 )
-            if role == "verifier":
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
                 self.checks += 1
                 payload = json.loads(prompt.split("\n", 1)[1])
                 assert all(
@@ -147,7 +168,7 @@ async def attach(report, **options):
 async def test_narrative_runs_after_whole_report_and_keeps_authoritative_facts(summary_report):
     before = copy.deepcopy(summary_report["blocks"][2])
     gateway, block = await attach(summary_report)
-    assert [call[0] for call in gateway.calls] == ["reporter", "reporter", "verifier"]
+    assert [call[0] for call in gateway.calls] == ["reporter", "reporter", *(["verifier"] * 5)]
     assert "analysis:0" in gateway.calls[0][2] and "L01" in gateway.calls[0][2]
     assert block["summary_mode"] == "narrative"
     assert summary_report["blocks"][2]["items"] == before["items"]
@@ -165,7 +186,7 @@ async def test_narrative_runs_after_whole_report_and_keeps_authoritative_facts(s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("options,expected_calls", [({"rejected": True}, 5), ({"error": True}, 1)])
+@pytest.mark.parametrize("options,expected_calls", [({"rejected": True}, 25), ({"error": True}, 1)])
 async def test_rejected_or_unavailable_summary_falls_back_without_leaking_draft(
     summary_report, options, expected_calls
 ):
@@ -349,10 +370,10 @@ async def test_only_approved_summary_is_cached_and_changed_basis_invalidates_it(
     context = summary_context(summary_report)
     await agent.summarize(context)
     await agent.summarize(context)
-    assert len(gateway.calls) == 3
+    assert len(gateway.calls) == 7
     context["limitations"]["L02"] = {"id": "L02", "text": "尚缺独立来源。"}
     await agent.summarize(context)
-    assert len(gateway.calls) == 6
+    assert len(gateway.calls) == 14
     gateway.rejected = True
     context["task"]["event_query"] = "不同事件"
     assert (await agent.summarize(context))["status"] == "rejected"
@@ -546,7 +567,7 @@ async def test_downgrade_reports_controlled_reasons_without_model_feedback(summa
     class RejectGateway(Gateway):
         async def complete_json(self, role, system, prompt, **kwargs):
             result = await super().complete_json(role, system, prompt, **kwargs)
-            if role == "verifier":
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
                 result["sentences"]["S01"] = False
                 result["feedback"] = "PRIVATE_UNREVIEWED_REJECTION_TEXT"
             return result
@@ -574,7 +595,7 @@ async def test_paragraph_headings_are_reviewed_and_displayed(summary_report):
                 for paragraph, heading in zip(value, headings, strict=True):
                     paragraph["heading"] = heading
                 return {"paragraphs": value}
-            if role == "verifier":
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
                 for heading in headings:
                     assert heading in prompt
             return await super().complete_json(role, system, prompt, **kwargs)
@@ -601,7 +622,7 @@ async def test_semantic_repair_locates_unsupported_sentence_and_missing_dispute(
                 assert {"path": "coverage.dispute", "codes": ["coverage_gap"]} in feedback["issues"]
                 assert feedback["previous_paragraphs"] and "本次是修订" in prompt
             result = await super().complete_json(role, system, prompt, **kwargs)
-            if role == "verifier":
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
                 self.reviews += 1
                 if self.reviews == 1:
                     result["sentences"]["S01"] = False
@@ -749,7 +770,7 @@ async def test_wandering_paragraphs_are_rejected_even_when_global_review_passes(
     class WanderingGateway(Gateway):
         async def complete_json(self, role, system, prompt, **kwargs):
             result = await super().complete_json(role, system, prompt, **kwargs)
-            if role == "verifier":
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
                 result["paragraphs"]["dispute"]["role_match"] = False
                 result["paragraphs"]["limits"]["focused"] = False
                 result["no_background_rewind"] = False
@@ -857,3 +878,443 @@ async def test_legacy_v2_prose_is_not_relabelled_during_migration(summary_report
     assert migrated["blocks"][1] == before
     assert validate_report(migrated).errors == []
     assert "核心判断" in render_html(migrated)
+
+
+def test_equivalent_full_dates_do_not_fail_numeric_guard(summary_report):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["text"] = "校方于2025年07月03日发布通报。"
+    value = paragraphs()
+    value[0]["sentences"][0]["text"] = "校方于2025-7-3发布通报。"
+    value = normalize_supported_number_spellings(value, context)
+    assert value[0]["sentences"][0]["text"] == "校方于2025年07月03日发布通报。"
+    assert "unsupported_number" not in check_paragraphs(
+        [{"sentences": value[0]["sentences"][:1]}],
+        context,
+        require_roles=False,
+        number_policy=NUMBER_POLICY,
+    )
+    value[0]["sentences"][0]["text"] = "校方于2025年3月7日发布通报。"
+    assert "unsupported_number" in check_paragraphs(
+        [{"sentences": value[0]["sentences"][:1]}],
+        context,
+        require_roles=False,
+        number_policy=NUMBER_POLICY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_numeric_event_sentence_gets_targeted_repair_and_full_review(summary_report):
+    class RepairGateway(Gateway):
+        drafts = 0
+        reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                if self.drafts > 1:
+                    feedback = json.loads(prompt.split("\n", 1)[1])["repair_feedback"]
+                    if self.drafts <= 3:
+                        detail = feedback["number_issues"][0]
+                        assert detail["unsupported_numbers"] == ["999"]
+                        assert "120" in detail["basis_numbers"]
+                    else:
+                        assert {"path": "coverage.event", "codes": ["coverage_gap"]} in feedback[
+                            "issues"
+                        ]
+                if self.drafts <= 2:
+                    result["paragraphs"][0]["sentences"][0]["text"] = "校方通报已收到999条诉求。"
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.reviews += 1
+                if self.reviews == 1:
+                    result["coverage"]["event"] = False
+            return result
+
+    gateway = RepairGateway()
+    await attach_executive_summary(summary_report, OpenAIReportAgent(gateway, "fixture"))
+    assert gateway.drafts == 4 and gateway.reviews == 2
+    summary = summary_report["blocks"][1]
+    assert summary["summary_mode"] == "narrative"
+    assert summary["paragraphs"][0]["sentences"][0] == paragraphs()[0]["sentences"][0]
+    assert not any(
+        "invalid_candidate_sentence_removed" in d["codes"] for d in summary["summary_diagnostics"]
+    )
+    assert (
+        safe_summary_diagnostics([{"stage": "semantic", "attempt": 4, "codes": ["coverage_gap"]}])[
+            0
+        ]["attempt"]
+        == 4
+    )
+
+
+@pytest.mark.parametrize(
+    "text,accepted",
+    [
+        ("校方于2025年07月发布通报。", True),
+        ("校方于07月03日发布通报。", True),
+        ("校方于7月7日发布通报。", False),
+        ("校方于2025年7月7日发布通报。", False),
+        ("校方于2025年2月30日发布通报。", False),
+    ],
+)
+def test_calendar_numbers_use_one_supported_date(summary_report, text, accepted):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["text"] = "校方于2025年07月03日及2025年08月07日发布通报。"
+    sentence = paragraphs()[0]["sentences"][0]
+    sentence["text"] = text
+    errors = check_paragraphs(
+        [{"sentences": [sentence]}], context, require_roles=False, number_policy=NUMBER_POLICY
+    )
+    assert ("unsupported_number" not in errors) is accepted
+
+
+def test_summary_diagnostics_retain_final_failure_and_hide_numeric_feedback():
+    values = [
+        {
+            "stage": "structure",
+            "attempt": 1,
+            "codes": ["unsupported_number"],
+            "number_issues": [{"unsupported_numbers": ["PRIVATE_VALUE"]}],
+        }
+    ] * 12
+    values.append({"stage": "semantic", "attempt": 4, "codes": ["coverage_gap"]})
+    safe = safe_summary_diagnostics(values)
+    assert safe[-1] == {"stage": "semantic", "attempt": 4, "codes": ["coverage_gap"]}
+    assert "PRIVATE_VALUE" not in json.dumps(safe)
+
+
+@pytest.mark.asyncio
+async def test_summary_stops_at_four_drafts_even_when_review_keeps_rejecting(summary_report):
+    gateway = Gateway(rejected=True)
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert result["status"] == "rejected"
+    assert len(gateway.calls) == 25
+    assert result["diagnostics"][-1]["attempt"] == 4
+
+
+@pytest.mark.asyncio
+async def test_full_date_spelling_is_normalized_before_fresh_semantic_review(summary_report):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["text"] += "校方于2025年07月03日发布通报。"
+
+    class DateGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                result["paragraphs"][0]["sentences"][0]["text"] = "校方于2025-7-3发布通报。"
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                payload = json.loads(prompt.split("\n", 1)[1])
+                assert (
+                    payload["paragraphs"][0]["sentences"][0]["text"]
+                    == "校方于2025年07月03日发布通报。"
+                )
+            return result
+
+    result = await OpenAIReportAgent(DateGateway(), "fixture").summarize(context)
+    assert result.get("status") not in {"rejected", "unavailable"}
+    assert check_paragraphs(result["paragraphs"], context) == []
+    assert check_paragraphs(result["paragraphs"], context, number_policy=NUMBER_POLICY) == []
+
+
+@pytest.mark.asyncio
+async def test_partial_date_precision_is_not_expanded_and_exact_spelling_feedback_repairs_it(
+    summary_report,
+):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["text"] += "校方于2025年07月03日发布通报。"
+
+    class DateGateway(Gateway):
+        drafts = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                if self.drafts == 1:
+                    text = "校方于2025年7月发布通报。"
+                else:
+                    detail = json.loads(prompt.split("\n", 1)[1])["repair_feedback"][
+                        "number_issues"
+                    ][0]
+                    assert detail["legacy_unsupported_numbers"] == ["7"]
+                    assert "2025年07月03日" in detail["basis_date_spellings"]
+                    text = "校方于2025年07月发布通报。"
+                result["paragraphs"][0]["sentences"][0]["text"] = text
+            return result
+
+    gateway = DateGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(context)
+    assert gateway.drafts == 2
+    assert result["paragraphs"][0]["sentences"][0]["text"] == "校方于2025年07月发布通报。"
+    assert check_paragraphs(result["paragraphs"], context) == []
+
+
+def test_date_normalization_uses_only_bound_evidence_and_preserves_input(summary_report):
+    context = summary_context(summary_report)
+    context["facts"]["C002"] = {"text": "2025年07月03日发布。"}
+    value = paragraphs()
+    value[0]["sentences"][0]["text"] = "2025-7-3发布。"
+    assert normalize_supported_number_spellings(value, context) == value
+    context["facts"]["C001"]["text"] += "2025年07月03日发布。"
+    normalized = normalize_supported_number_spellings(value, context)
+    assert normalized[0]["sentences"][0]["text"] == "2025年07月03日发布。"
+    assert value[0]["sentences"][0]["text"] == "2025-7-3发布。"
+
+
+@pytest.mark.asyncio
+async def test_cached_summary_must_still_satisfy_old_reader_numeric_guard(summary_report):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["text"] += "校方于2025年07月03日发布通报。"
+    value = paragraphs()
+    value[0]["sentences"][0]["text"] = "校方于2025-7-3发布通报。"
+    cached = {
+        "paragraphs": value,
+        "narrative_review": {
+            **approval(value),
+            "version": "narrative-v3",
+            "number_policy": NUMBER_POLICY,
+            "content_digest": digest(value),
+            "basis_digest": digest(context),
+        },
+    }
+
+    class Database:
+        saved = False
+
+        async def get_analysis_batch(self, *args):
+            return copy.deepcopy(cached)
+
+        async def save_analysis_batch(self, *args):
+            self.saved = True
+
+    gateway, database = Gateway(), Database()
+    agent = OpenAIReportAgent(gateway, "fixture")
+    agent.bind(database, "task")
+    result = await agent.summarize(context)
+    assert len(gateway.calls) == 7 and database.saved
+    assert check_paragraphs(result["paragraphs"], context) == []
+
+
+@pytest.mark.asyncio
+async def test_global_approval_cannot_borrow_an_unbound_fact_to_wash_summary_citation(
+    summary_report,
+):
+    context = summary_context(summary_report)
+    context["facts"]["C002"] = {"text": "校方撤销处分。", "badge": "verified"}
+
+    class BindingGateway(Gateway):
+        global_calls = 0
+        binding_calls = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+                self.binding_calls += 1
+                payload = json.loads(prompt.split("\n", 1)[1])
+                sentence = payload["sentence"]
+                assert "C002" not in payload["facts"]
+                assert "撤销处分" not in json.dumps(payload["facts"], ensure_ascii=False)
+                return {
+                    "id": sentence["id"],
+                    "supported": sentence["id"] != "S01",
+                    "reason": "当前绑定陈述只记载受理诉求，不能支持撤销处分。",
+                }
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                result["paragraphs"][0]["sentences"][0]["text"] = "校方撤销处分。"
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.global_calls += 1
+            return result
+
+    gateway = BindingGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(context)
+    assert result["status"] == "rejected"
+    assert gateway.binding_calls > 0 and gateway.global_calls == 0
+    assert any("sentence_not_supported" in d["codes"] for d in result["diagnostics"])
+
+
+@pytest.mark.parametrize("corruption", ["missing", "string_true", "wrong_policy", "false"])
+def test_binding_review_must_cover_every_sentence_with_strict_approval(corruption):
+    value = paragraphs()
+    review = {
+        **approval(value),
+        "binding_policy": BINDING_POLICY,
+        "basis_sentences": dict.fromkeys(sentence_ids(value), True),
+    }
+    if corruption == "missing":
+        review["basis_sentences"].pop("S01")
+    elif corruption == "string_true":
+        review["basis_sentences"]["S01"] = "true"
+    elif corruption == "wrong_policy":
+        review["binding_policy"] = "unsupported"
+    else:
+        review["basis_sentences"]["S01"] = False
+    assert not review_accepted(review, value)
+
+
+def test_global_review_projection_keeps_every_fact_and_boundary_without_citation_bodies(
+    summary_report,
+):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["citations"] = [{"quote": "PRIVATE_DUPLICATE_SOURCE_BODY"}]
+    context["facts"]["C002"] = {
+        "text": "所引材料明确否认此前说法，尚不能确认处理完成。",
+        "badge": "disputed",
+        "statement_kind": "fact",
+        "origin_agent": "fact_investigator",
+    }
+    context["timeline"] = [
+        {
+            "date": "2025-07-03",
+            "text": "机构否认处理完成。",
+            "claim_refs": ["C002"],
+            "metadata": "PRIVATE_DUPLICATE_NODE_METADATA",
+        }
+    ]
+    before = digest(context)
+    projected = OpenAIReportAgent._summary_global_context(context)
+    assert set(projected["facts"]) == set(context["facts"])
+    assert projected["facts"]["C002"]["text"] == context["facts"]["C002"]["text"]
+    assert projected["facts"]["C002"]["badge"] == "disputed"
+    assert (
+        projected["analyses"]["analysis:0"]["uncertainty"]
+        == context["analyses"]["analysis:0"]["uncertainty"]
+    )
+    assert projected["limitations"]["L01"]["text"] == context["limitations"]["L01"]["text"]
+    assert projected["timeline"][0]["text"] == context["timeline"][0]["text"]
+    assert "PRIVATE_DUPLICATE" not in json.dumps(projected)
+    assert digest(context) == before
+
+
+@pytest.mark.asyncio
+async def test_outline_draft_and_reviews_omit_duplicate_quotes_but_digest_full_basis(
+    summary_report,
+):
+    context = summary_context(summary_report)
+    context["facts"]["C001"]["citations"] = [{"quote": "PRIVATE_DUPLICATE_QUOTE_LONG_BODY"}]
+
+    class CompactGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            assert "PRIVATE_DUPLICATE_QUOTE_LONG_BODY" not in prompt
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    result = await OpenAIReportAgent(CompactGateway(), "fixture").summarize(context)
+    assert result["narrative_review"]["basis_digest"] == digest(context)
+    assert result["narrative_review"]["binding_policy"] == BINDING_POLICY
+    assert all(v is True for v in result["narrative_review"]["basis_sentences"].values())
+
+
+@pytest.mark.asyncio
+async def test_long_draft_gets_exact_length_and_binding_feedback_in_one_repair(summary_report):
+    class LongGateway(Gateway):
+        drafts = 0
+        global_calls = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+                sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                return {
+                    "id": sentence["id"],
+                    "supported": not (self.drafts == 1 and sentence["id"] == "S01"),
+                    "reason": "本句当前引用没有支持新增处置结果。",
+                }
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                if self.drafts == 1:
+                    for index, paragraph in enumerate(result["paragraphs"]):
+                        seed = paragraph["sentences"][0]
+                        paragraph["sentences"] = [
+                            {
+                                **seed,
+                                "text": seed["text"]
+                                + chr(0x4E00 + index * 4 + offset)
+                                + "相关进展仍需结合公开材料及各项证据边界完整理解。" * 5,
+                            }
+                            for offset in range(4)
+                        ]
+                else:
+                    feedback = json.loads(prompt.split("\n", 1)[1])["repair_feedback"]
+                    usage = feedback["length_usage"]
+                    assert usage["characters"] > 1400
+                    assert usage["over_characters"] == usage["characters"] - 1400
+                    assert usage["sentences"] == 16 and len(usage["paragraphs"]) == 4
+                    rejected = feedback["review"]["binding_rejections"]
+                    assert rejected[0]["id"] == "S01" and rejected[0]["claim_refs"] == ["C001"]
+            if role == "verifier":
+                self.global_calls += 1
+            return result
+
+    gateway = LongGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert gateway.drafts == 2 and gateway.global_calls == 1
+    assert "paragraphs" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    [
+        "本报告研判，不宜将已反馈处理意见等同于问题解决。",
+        "后续若出现受理回执、书面答复，应据以修正判断。 ",
+    ],
+)
+async def test_analysis_binding_uses_reviewed_judgment_and_conditional_boundary(
+    summary_report, text
+):
+    context = summary_context(summary_report)
+    context["analyses"]["analysis:0"]["interpretation"] = "不宜将已反馈处理意见等同于问题解决。"
+    context["analyses"]["analysis:0"]["uncertainty"] = "若出现受理回执、书面答复，应据以修正判断。"
+    sentence = {
+        "id": "S01",
+        "text": text,
+        "kind": "analysis",
+        "claim_refs": [],
+        "analysis_refs": ["analysis:0"],
+        "limitation_refs": [],
+    }
+
+    class AnalysisGateway:
+        async def complete_json(self, role, system, prompt, **kwargs):
+            assert "不要求facts再次直接证明建议已经执行或条件材料已经存在" in prompt
+            payload = json.loads(prompt.split("\n", 1)[1])
+            assert payload["facts"] == {}
+            assert "受理回执" in payload["analyses"]["analysis:0"]["uncertainty"]
+            return {
+                "id": "S01",
+                "supported": True,
+                "reason": "忠实保留所引已审分析的规范判断或条件边界。",
+            }
+
+    result = await OpenAIReportAgent(AnalysisGateway(), "fixture")._summary_binding_review(
+        context, sentence
+    )
+    assert result["supported"] is True
+
+
+@pytest.mark.asyncio
+async def test_analysis_cannot_use_another_unreferenced_judgments_condition(summary_report):
+    context = summary_context(summary_report)
+    context["analyses"]["analysis:1"] = {
+        "uncertainty": "若出现受理回执、书面答复，应修正判断。",
+        "claim_refs": ["C001"],
+    }
+    sentence = {
+        "id": "S01",
+        "text": "后续若出现受理回执、书面答复，应修正判断。",
+        "kind": "analysis",
+        "claim_refs": [],
+        "analysis_refs": ["analysis:0"],
+        "limitation_refs": [],
+    }
+
+    class WrongReferenceGateway:
+        async def complete_json(self, role, system, prompt, **kwargs):
+            payload = json.loads(prompt.split("\n", 1)[1])
+            assert set(payload["analyses"]) == {"analysis:0"}
+            assert "受理回执" not in json.dumps(payload["analyses"], ensure_ascii=False)
+            return {"id": "S01", "supported": False, "reason": "该条件并非当前引用的分析内容。"}
+
+    result = await OpenAIReportAgent(WrongReferenceGateway(), "fixture")._summary_binding_review(
+        context, sentence
+    )
+    assert result["supported"] is False

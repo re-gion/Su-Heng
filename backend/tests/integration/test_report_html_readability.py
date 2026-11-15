@@ -254,10 +254,11 @@ def test_long_fact_table_and_uncited_evidence_are_grouped_without_losing_targets
 
     rendered = render_html(report, view="brief")
 
-    first_card = rendered.index('id="claim-C010"')
+    first_card = rendered.index('id="claim-C001"')
     overflow = rendered.index('class="claim-overflow"')
     assert first_card < overflow
-    assert "其余陈述与核验记录（8）" in rendered
+    assert "其余陈述与核验记录（2）" in rendered
+    assert rendered.index('id="claim-C010"') > overflow
     assert 'id="claim-C001"' in rendered
     assert "未被正文引用的证据（1）" in rendered
     assert 'id="evidence-E002"' in rendered

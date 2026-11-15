@@ -17,9 +17,16 @@ from yuqing.core.comment_contract import reconcile_questions
 from yuqing.core.event_chronology import CHRONOLOGY_NOTE, earlier_event_candidates
 from yuqing.core.history_cards import (
     background_complete,
+    group_history_candidates,
+    historical_identity_issue,
     partition_distinct_history_cards,
     reconcile_history_completion,
     unique_history_cards,
+)
+from yuqing.core.publication_relations import (
+    prune_relation_conflicts,
+    publication_identity,
+    relation_type_codes,
 )
 from yuqing.core.timeline_grouping import group_timeline_events
 from yuqing.core.verification_presentation import presentation_counts
@@ -1229,6 +1236,7 @@ class FullReportBuilder:
                 json.dumps(source_context, ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
             prior_relations = await self.database.checkpoint(task_id, "report:relations") or {}
+            relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v4")
             source_fingerprints = {
                 s["evidence_ref"]: hashlib.sha256(
                     json.dumps(s, ensure_ascii=False, sort_keys=True).encode()
@@ -1237,6 +1245,7 @@ class FullReportBuilder:
             }
             if (
                 prior_relations.get("fingerprint") == fingerprint
+                and prior_relations.get("version") == relation_version
                 and prior_relations.get("status") == "complete"
             ):
                 recovered = prior_relations.get("edges", [])
@@ -1247,7 +1256,10 @@ class FullReportBuilder:
                 retained = [
                     e
                     for e in prior_relations.get("edges", [])
-                    if e.get("review_status") == "accepted"
+                    if prior_relations.get("version") == relation_version
+                    and e.get("review_status") == "accepted"
+                    and e.get("from_evidence_id") != e.get("to_evidence_id")
+                    and e.get("relation") in {"repost", "response", "follow_up"}
                     and all(
                         source_fingerprints.get(ref) is not None
                         and source_fingerprints[ref]
@@ -1265,13 +1277,24 @@ class FullReportBuilder:
                         for e in [*retained, *recovered]
                     }.values()
                 )
+                recovered, conflicts = prune_relation_conflicts(recovered)
+                if conflicts:
+                    diagnostics = [
+                        *diagnostics,
+                        {
+                            "stage": "relation_review",
+                            "category": "structural_rejected",
+                            "codes": ["conflicting_relation_type"],
+                            "message": "同一引文的关系类型冲突，未发布相关连线",
+                        },
+                    ]
                 await self.database.save_checkpoint(
                     task_id,
                     "report:relations",
                     {
                         "phase": "verified",
                         "fingerprint": fingerprint,
-                        "version": 2,
+                        "version": relation_version,
                         "source_fingerprints": source_fingerprints,
                         "candidates": getattr(self.reporter, "relation_candidates", []),
                         "edges": recovered,
@@ -1283,6 +1306,7 @@ class FullReportBuilder:
                 )
             publication_network["diagnostics"] = diagnostics
             eligible_sources = {item["evidence_ref"] for item in source_context}
+            sources_by_id = {item["evidence_ref"]: item for item in source_context}
             recovered = [
                 edge
                 for edge in recovered
@@ -1290,20 +1314,22 @@ class FullReportBuilder:
                 and edge.get("from_evidence_id") in eligible_sources
                 and edge.get("to_evidence_id") in eligible_sources
                 and edge.get("support_evidence_id") in eligible_sources
+                and not relation_type_codes(edge, sources_by_id)
             ]
             for edge in recovered:
                 for evidence_id, node_type in (
                     (edge["from_evidence_id"], "original"),
-                    (edge["to_evidence_id"], "repost"),
+                    (
+                        edge["to_evidence_id"],
+                        "repost" if edge["relation"] == "repost" else "independent",
+                    ),
                 ):
                     if evidence_id in nodes_by_id:
                         continue
                     source = evidence_by_id[evidence_id]
                     node = {
                         "evidence_id": evidence_id,
-                        "publisher": source.publisher_entity
-                        or source.source_name
-                        or source.source_domain,
+                        **publication_identity(source),
                         "published_at": source.published_at,
                         "node_type": node_type,
                         "framing": (source.title or "发布记录")[:300],
@@ -1543,6 +1569,8 @@ class FullReportBuilder:
             local_cards.append(
                 {
                     "event_name": case["name"],
+                    "institution": case.get("institution"),
+                    "case_event_time": case.get("event_time"),
                     "case_type": case.get("case_type", "analogous"),
                     "event_time": f"资料发布：{str(source.published_at)[:10]}",
                     "summary": f"{status}：{item['text']}",
@@ -1617,6 +1645,43 @@ class FullReportBuilder:
             claim = historical_claims.get(item["claim_ref"])
             if claim is None:
                 continue
+            case = (claim.analysis_data or {}).get("historical_case")
+            case = case if isinstance(case, dict) else {}
+            issue = historical_identity_issue(case, item["text"])
+            if issue:
+                refs = [
+                    c["evidence_ref"]
+                    for c in item.get("citations", [])
+                    if c.get("relation") == "support"
+                    and c["evidence_ref"] in evidence_by_id
+                    and (evidence_by_id[c["evidence_ref"]].extra or {}).get("scope_status")
+                    == "history"
+                ]
+                if refs:
+                    background = case.get("background")
+                    subject = background.get("subject") if isinstance(background, dict) else None
+                    if (
+                        not isinstance(subject, str)
+                        or not subject.strip()
+                        or subject not in item["text"]
+                    ):
+                        subject = "历史材料"
+                    reference_candidates.append(
+                        {
+                            "event_name": f"{subject}：案例归属待核",
+                            "institution": subject,
+                            "event_time": case.get("event_time"),
+                            "origin_claim_ref": item["claim_ref"],
+                            "reported_event_name": case.get("name"),
+                            "reported_institution": case.get("institution"),
+                            "identity_status": "unconfirmed",
+                            "identity_issue": issue,
+                            "summary": item["text"],
+                            "reason": "主体对应及是否属于独立历史事件尚待核实；来源整页提到相关机构不能证明本句属于该案例，也不能仅凭中文译名认定为原文机构的同一实体。保留原句与来源，暂不作为正式历史对照或建议依据。",
+                            "evidence_refs": refs,
+                        }
+                    )
+                continue
             eligible = independent_case_evidence(
                 claim,
                 evidence_by_id,
@@ -1639,6 +1704,9 @@ class FullReportBuilder:
                 reference_candidates.append(
                     {
                         "event_name": case["name"],
+                        "institution": case.get("institution"),
+                        "event_time": case.get("event_time"),
+                        "origin_claim_ref": item["claim_ref"],
                         "case_type": case.get("case_type", "analogous"),
                         "summary": item["text"],
                         "reason": "待核实参考案例：来源公开日期尚未从原网页确认，不能确认其在任务启动时已公开；不作为历史结论或建议依据。",
@@ -1719,7 +1787,7 @@ class FullReportBuilder:
             "in_brief": False,
             "title": "历史对照",
             "cards": local_cards,
-            "reference_candidates": unique_history_cards(reference_candidates),
+            "reference_candidates": group_history_candidates(reference_candidates),
             "excluded_candidates": excluded_history[:8],
             "fallback_text": (
                 f"已复查 {len(excluded_history)} 份历史席位引用材料，尚无通过独立事件、时间与可比机制审查的案例；"
@@ -2074,7 +2142,12 @@ class FullReportBuilder:
         ]
 
         def publisher_terms(item):
-            names = {item.publisher_entity, item.source_name}
+            identity = publication_identity(item)
+            names = (
+                {identity["publisher"]}
+                if identity.get("identity_status")
+                else {item.publisher_entity, item.source_name}
+            )
             # Aliases expand candidate recall only. The relation still needs a
             # literal credit, matching publication and independent review below.
             domain = (urlsplit(item.url).hostname or "").lower()
@@ -2163,21 +2236,44 @@ class FullReportBuilder:
                 parts.append(part)
             return parts
 
-        return [
-            {
-                "evidence_ref": item.local_id,
-                "title": item.title,
-                "publisher": nodes_by_id.get(item.local_id, {}).get("publisher")
-                or item.publisher_entity
-                or item.source_name
-                or item.source_domain,
-                "url": item.url,
-                "published_at": item.published_at,
-                "excerpt": "\n[…]\n".join(windows(item)),
-                "excerpt_windows": windows(item),
-            }
-            for item in [*selected, *credited, *originals]
-        ]
+        sources = []
+        seen_publications = set()
+        for item in [*selected, *credited, *originals]:
+            identity = publication_identity(item)
+            body = re.sub(r"\s+", "", item.content_text or "")
+            key = (
+                identity["publisher"],
+                identity.get("platform"),
+                item.title.strip(),
+                item.published_at,
+                hashlib.sha256(body.encode()).hexdigest(),
+            )
+            # Keep all evidence cards. Only the relation model uses one
+            # representative for exact mirrors of a dated publication.
+            if body and item.published_at and identity["publisher"]:
+                if key in seen_publications:
+                    continue
+                seen_publications.add(key)
+            excerpts = windows(item)
+            sources.append(
+                {
+                    "evidence_ref": item.local_id,
+                    "title": item.title,
+                    **publication_identity(
+                        item, fallback_publisher=nodes_by_id.get(item.local_id, {}).get("publisher")
+                    ),
+                    "source_name": identity["publisher"],
+                    "publisher_entity": identity["publisher"],
+                    "page_source_credits": (getattr(item, "extra", None) or {}).get(
+                        "page_source_credits", []
+                    ),
+                    "url": item.url,
+                    "published_at": item.published_at,
+                    "excerpt": "\n[…]\n".join(excerpts),
+                    "excerpt_windows": excerpts,
+                }
+            )
+        return sources
 
     @staticmethod
     def _publication_network(
@@ -2211,17 +2307,21 @@ class FullReportBuilder:
                 f"{source.title or ''} {(source.content_text or source.snippet or '')[:2500]}",
             ):
                 continue
+            identity = publication_identity(
+                source, fallback_publisher=str(node.get("publisher") or "")[:120]
+            )
             nodes[evidence_id] = {
                 "evidence_id": evidence_id,
-                "publisher": str(
-                    node.get("publisher")
-                    or source.publisher_entity
-                    or source.source_name
-                    or source.source_domain
-                )[:120],
+                **identity,
                 "published_at": source.published_at,
-                "node_type": node["node_type"],
-                "framing": str(node.get("framing") or claim.text)[:300],
+                "node_type": "repost"
+                if identity.get("identity_status") == "credited_source"
+                else node["node_type"],
+                "framing": (
+                    f"{source.title or '发布记录'}；页面明确署名稿源为{identity['publisher']}。"
+                    if identity.get("identity_status") == "credited_source"
+                    else str(node.get("framing") or claim.text)[:300]
+                ),
                 "claim_ref": claim.local_id,
                 "evidence_refs": [evidence_id],
             }

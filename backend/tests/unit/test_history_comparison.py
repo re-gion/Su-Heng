@@ -35,6 +35,44 @@ def claim(case):
     return SimpleNamespace(analysis_data={"historical_case": case}, evidence_ids=["E001"])
 
 
+def test_history_subject_must_belong_to_the_claim_not_another_entity_on_same_page():
+    case = {
+        "name": "中央食品办公室约谈明川大学事件",
+        "institution": "Central Food Safety Office",
+        "independent": True,
+        "similarity": "校园食品安全处置",
+        "difference": "处置程序不同",
+        "background": {"subject": "明川大学", "event": "食堂异物", "progress": "终止餐饮合同"},
+    }
+    item = claim(case)
+    item.text = "明川大学因食堂异物终止餐饮合同。"
+    evidence = source(
+        "Central Food Safety Office discussed Example University and its canteen incident."
+    )
+    assert not independent_case_evidence(item, {"E001": evidence}, "本事件", "2026-01-01")
+
+
+def test_source_language_anchor_does_not_establish_an_unknown_translated_case_alias():
+    case = {
+        "name": "Example University canteen incident",
+        "institution": "Example University",
+        "independent": True,
+        "similarity": "食堂处置",
+        "difference": "机构不同",
+        "background": {"subject": "明川大学", "event": "食堂异物", "progress": "终止餐饮合同"},
+    }
+    item = claim(case)
+    item.text = "明川大学因食堂异物终止餐饮合同。"
+    evidence = source("Example University terminates catering contract after canteen incident.")
+    assert not independent_case_evidence(item, {"E001": evidence}, "本事件", "2026-01-01")
+    # A matching Chinese display name still cannot establish a bilingual alias.
+    case["name"] = "明川大学食堂异物事件"
+    assert not independent_case_evidence(item, {"E001": evidence}, "本事件", "2026-01-01")
+    # The source-language institution must itself be bound to the reviewed claim.
+    item.text = "Example University（明川大学）因食堂异物终止餐饮合同。"
+    assert independent_case_evidence(item, {"E001": evidence}, "本事件", "2026-01-01") == {"E001"}
+
+
 def test_unresolved_case_can_be_compared_without_inventing_an_outcome():
     case = {
         "name": "另一品牌制动系统召回事件",

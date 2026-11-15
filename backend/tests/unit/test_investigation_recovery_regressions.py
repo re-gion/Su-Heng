@@ -238,6 +238,7 @@ async def test_scope_explicit_rejection_is_distinct_from_invalid_output():
             [
                 {"items": [{"id": 0, "allowed": False}]},
                 {"items": []},
+                {"items": []},
             ]
         )
     )

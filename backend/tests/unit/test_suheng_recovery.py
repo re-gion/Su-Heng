@@ -24,7 +24,7 @@ async def test_relationship_review_failure_keeps_previously_accepted_edge():
                             "to_evidence_id": ref,
                             "support_evidence_id": ref,
                             "relation": "repost",
-                            "quote": "本报道明确转载第一家媒体的原始报道。",
+                            "quote": "来源：第一家媒体原始报道",
                         }
                         for ref in ("E002", "E003")
                     ]
@@ -36,7 +36,11 @@ async def test_relationship_review_failure_keeps_previously_accepted_edge():
 
     result = await OpenAIReportAgent(Gateway(), "report").recover_relations(
         [
-            {"evidence_ref": ref, "excerpt": "本报道明确转载第一家媒体的原始报道。"}
+            {
+                "evidence_ref": ref,
+                "publisher_entity": "第一家媒体" if ref == "E001" else ref,
+                "excerpt": "来源：第一家媒体原始报道",
+            }
             for ref in ("E001", "E002", "E003")
         ]
     )
@@ -125,7 +129,7 @@ async def test_explicit_credit_review_has_original_identity_passage_but_can_reje
     gateway = Gateway()
     result = await OpenAIReportAgent(gateway, "report").recover_relations(
         [
-            {"evidence_ref": "E001", "excerpt": passage},
+            {"evidence_ref": "E001", "publisher_entity": "发布机构", "excerpt": passage},
             {"evidence_ref": "E002", "excerpt": passage + "\n" + quote},
         ]
     )
@@ -291,3 +295,160 @@ async def test_key_fact_corroboration_rechecks_new_relation_before_upgrading():
         ("C001", "E002")
     ]
     assert harness.events.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_self_loop_relation_is_diagnosed_and_repaired_before_independent_review():
+    quote = "来源：第一家媒体原始报道"
+
+    class Gateway:
+        drafts = 0
+        reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                self.drafts += 1
+                if self.drafts == 2:
+                    assert "self_loop" in prompt
+                return {
+                    "edges": [
+                        {
+                            "from_evidence_id": "E001",
+                            "to_evidence_id": "E001" if self.drafts == 1 else "E002",
+                            "support_evidence_id": "E002",
+                            "relation": "repost",
+                            "quote": quote,
+                        }
+                    ]
+                }
+            self.reviews += 1
+            return {"accepted": True}
+
+    gateway = Gateway()
+    reporter = OpenAIReportAgent(gateway, "report")
+    result = await reporter.recover_relations(
+        [
+            {
+                "evidence_ref": ref,
+                "publisher_entity": "第一家媒体" if ref == "E001" else ref,
+                "excerpt": quote,
+            }
+            for ref in ["E001", "E002"]
+        ]
+    )
+    assert gateway.drafts == 2 and gateway.reviews == 1
+    assert len(result) == 1 and result[0]["to_evidence_id"] == "E002"
+    assert any(
+        d.get("category") == "structural_rejected" and "self_loop" in d.get("codes", [])
+        for d in reporter.relation_diagnostics
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_empty_relation_cache_is_not_reused():
+    class Database:
+        async def get_analysis_batch(self, *_args):
+            return {
+                "edges": [],
+                "diagnostics": [],
+                "candidates": [
+                    {
+                        "status": "rejected",
+                        "edge": {"from_evidence_id": "E001", "to_evidence_id": "E001"},
+                    }
+                ],
+            }
+
+        async def save_analysis_batch(self, *_args):
+            pass
+
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, *args, **kwargs):
+            self.calls += 1
+            return {"edges": []}
+
+    gateway = Gateway()
+    agent = OpenAIReportAgent(gateway, "report")
+    agent.bind(Database(), "task")
+    assert await agent.recover_relations([{"evidence_ref": "E001"}, {"evidence_ref": "E002"}]) == []
+    assert gateway.calls >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [False, True])
+async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved):
+    passage = "学校公开通报复核工作的方法、材料范围和程序依据，说明已经完成的工作与尚需说明的事项。"
+
+    class Gateway:
+        reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter":
+                return {"edges": []}
+            self.reviews += 1
+            payload = json.loads(prompt.split("\n", 1)[1])
+            assert payload["identity_passage"] == passage
+            assert payload["edge"]["quote"] == "来源：示例新闻网"
+            return {"accepted": approved}
+
+    gateway = Gateway()
+    agent = OpenAIReportAgent(gateway, "report")
+    result = await agent.recover_relations(
+        [
+            {"evidence_ref": "E001", "source_name": "示例新闻网", "excerpt": passage},
+            {
+                "evidence_ref": "E002",
+                "source_name": "另家媒体",
+                "excerpt": passage + "\n来源：示例新闻网",
+            },
+        ]
+    )
+    assert gateway.reviews == 1
+    assert bool(result) is approved
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalid_relations_are_bounded_and_not_cached_as_complete():
+    class Database:
+        saved = False
+
+        async def get_analysis_batch(self, *args):
+            return None
+
+        async def save_analysis_batch(self, *args):
+            self.saved = True
+
+    class Gateway:
+        drafts = 0
+
+        async def complete_json(self, role, *args, **kwargs):
+            assert role == "reporter"
+            self.drafts += 1
+            return {
+                "edges": [
+                    {
+                        "from_evidence_id": "E001",
+                        "to_evidence_id": "E001",
+                        "support_evidence_id": "E001",
+                        "relation": "repost",
+                        "quote": "同主题不足以证明材料之间有引用关系。",
+                    }
+                ]
+            }
+
+    database, gateway = Database(), Gateway()
+    agent = OpenAIReportAgent(gateway, "report")
+    agent.bind(database, "task")
+    assert (
+        await agent.recover_relations(
+            [
+                {"evidence_ref": ref, "excerpt": "同主题不足以证明材料之间有引用关系。"}
+                for ref in ["E001", "E002"]
+            ]
+        )
+        == []
+    )
+    assert gateway.drafts == 2 and not database.saved
+    assert all(d["category"] == "structural_rejected" for d in agent.relation_diagnostics)

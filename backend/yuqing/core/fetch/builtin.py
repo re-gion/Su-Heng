@@ -16,6 +16,7 @@ import trafilatura
 
 from yuqing.core.fetch.base import FetchError, FetchResult
 from yuqing.core.fetch.security import validate_public_url
+from yuqing.core.publication_relations import extract_publication_identity
 
 __all__ = ["BuiltinFetchProvider", "FetchError"]
 
@@ -25,6 +26,7 @@ _REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 _HTML_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _TEXT_CONTENT_TYPES = frozenset({"text/plain"})
 _PDF_CONTENT_TYPES = frozenset({"application/pdf"})
+SOURCE_CREDIT_VERSION = "labelled-credit-v2"
 _CHARSET_RE = re.compile(r"(?:^|;)\s*charset\s*=\s*[\"']?\s*([^;\"'\s]+)", re.I)
 _META_CHARSET_RE = re.compile(rb"<meta\b[^>]*\bcharset\s*=\s*[\"']?\s*([^\"'\s/>]+)", re.I)
 _META_HTTP_EQUIV_RE = re.compile(
@@ -205,8 +207,29 @@ def extract_source_credits(raw_html: str) -> list[str]:
     except Exception:
         return []
     visible = _normalise_text("".join(parser._visible))
-    credits = re.findall(r"(?:^|\n)(来源\s*[：:]\s*[^\n]{1,160})", visible)
+    credits = []
+    for match in re.finditer(
+        r"(?:^|\n|[ \t　])((?:信息来源|文章来源|稿件来源|稿源|来源|本文转自|转载自|转自)"
+        r"[ \t　]*[:：/|｜][ \t　]*[^\n]{1,160})",
+        visible,
+    ):
+        credit = re.split(
+            r"(?:作者|编辑|责编|发布时间)\s*[:：]|20\d{2}[-/]\d{1,2}[-/]\d{1,2}", match.group(1)
+        )[0].strip()
+        if re.search(r"[:：/|｜]\s*\S", credit):
+            credits.append(credit)
     return list(dict.fromkeys(credits))[:6]
+
+
+def extract_page_publication_identity(raw_html: str) -> dict:
+    """Preserve an explicit hosting disclaimer and newsroom byline from the page."""
+    parser = _VisibleTextParser()
+    try:
+        parser.feed(raw_html)
+        parser.close()
+    except Exception:
+        return {}
+    return extract_publication_identity(_normalise_text("".join(parser._visible)))
 
 
 def _extract_text(value: str, *, is_html: bool) -> str:

@@ -297,7 +297,16 @@ def publication_visual(block: dict) -> tuple[str, set[str]]:
             '<div class="visual-publication"><strong>'
             + _escape(node.get("publisher"))
             + "</strong>"
-            "<span>" + _escape(node.get("published_at") or "发布时间待确认") + "</span>"
+            + (
+                '<small class="publication-platform">刊载平台：'
+                + _escape(node["platform"])
+                + "</small>"
+                if node.get("platform") and node.get("platform") != node.get("publisher")
+                else ""
+            )
+            + "<span>"
+            + _escape(node.get("published_at") or "发布时间待确认")
+            + "</span>"
             "<p>" + _escape(node.get("framing")) + "</p>" + _refs(node) + "</div>"
         )
 
@@ -309,7 +318,9 @@ def publication_visual(block: dict) -> tuple[str, set[str]]:
         for edge in edges:
             target = edge["to_evidence_id"]
             connected.add(target)
-            label = {"repost": "转载", "response": "回应", "follow_up": "跟进"}[edge["relation"]]
+            label = {"repost": "转载", "response": "回应", "follow_up": "引述/跟进"}[
+                edge["relation"]
+            ]
             targets.append(
                 '<div class="visual-relation"><div class="visual-relation-arrow"><span>'
                 + label

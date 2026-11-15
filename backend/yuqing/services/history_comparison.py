@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from yuqing.core.history_cards import historical_identity_issue
+
 
 def independent_case_evidence(
     claim: Any,
@@ -30,6 +32,9 @@ def independent_case_evidence(
     # An unresolved case can still document a comparable response mechanism.
     # A missing outcome is disclosed by the renderer, never inferred.
     if not all((name, institution, similarity, difference)):
+        return set()
+    text = getattr(claim, "text", None)
+    if isinstance(text, str) and historical_identity_issue(case, text):
         return set()
     normal_query = "".join(event_query.lower().split())
     normal_name = "".join(name.lower().split())

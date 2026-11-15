@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from yuqing.agents.runtime import GeneratedClaim, InvestigationPlan, Reflection, SearchQuery
 from yuqing.core.claim_semantics import compound_publication_details
 from yuqing.core.event_chronology import dated_action
+from yuqing.core.history_cards import historical_identity_issue
 from yuqing.core.llm.gateway import (
     LLMBudgetExhausted,
     LLMGateway,
@@ -482,7 +483,21 @@ class OpenAIInvestigationAgent:
         if self.role == "analyst_c":
             for claim in accepted:
                 self._clean_history_background(claim)
+                self._mark_history_identity(claim)
         return accepted
+
+    @staticmethod
+    def _mark_history_identity(claim: GeneratedClaim) -> None:
+        case = claim.analysis_data["historical_case"]
+        issue = historical_identity_issue(case, claim.text)
+        if issue:
+            # Keep the factual sentence for evidence review; do not silently
+            # relabel it as a different case or discard its source-bound record.
+            case["identity_status"] = "unconfirmed"
+            case["identity_issue"] = issue
+        else:
+            case.pop("identity_status", None)
+            case.pop("identity_issue", None)
 
     @logical_model_call("summarize")
     async def _summarize_uncached(
@@ -663,6 +678,9 @@ class OpenAIInvestigationAgent:
                 break
         if not claims and truncated_batches:
             raise LLMOutputTruncated(f"{truncated_batches} 个证据批次输出达到长度上限")
+        if self.role == "analyst_c":
+            for claim in claims:
+                self._mark_history_identity(claim)
         return claims
 
     @logical_model_call("reflect")

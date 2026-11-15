@@ -6,12 +6,14 @@ from html.parser import HTMLParser
 from typing import Any, Literal
 from urllib.parse import quote
 
+from yuqing.core.event_chronology import explicit_event_date
 from yuqing.core.executive_summary import (
     SUMMARY_ERROR_LABELS,
     SUMMARY_HEADINGS,
     narrative_errors,
     summary_context,
 )
+from yuqing.core.history_cards import group_history_candidates
 from yuqing.core.verification_presentation import (
     LABELS,
     NOTES,
@@ -232,7 +234,14 @@ def _summary(
 
 def _fact_table(block: dict[str, Any]) -> str:
     cards: list[tuple[str, str]] = []
-    for item in block.get("items", []):
+    items = sorted(
+        block.get("items", []),
+        key=lambda item: (
+            explicit_event_date(str(item.get("text") or "")) is None,
+            explicit_event_date(str(item.get("text") or "")) or "",
+        ),
+    )
+    for item in items:
         badge = _display_badge(item)
         citations = "".join(
             _citation_link(citation.get("evidence_ref")) for citation in item.get("citations", [])
@@ -291,23 +300,12 @@ def _fact_table(block: dict[str, Any]) -> str:
                 + f'<h3>{_escape(item.get("text"))}</h3>{rumor}{correction}<div class="claim-refs">{citations}</div></article>',
             )
         )
-    requested = list(dict.fromkeys(str(ref) for ref in block.get("priority_claim_refs", []) if ref))
-    priority_refs = set(requested[:8])
-    if requested:
-        cards_by_ref = dict(cards)
-        visible = [cards_by_ref[ref] for ref in requested[:8] if ref in cards_by_ref]
-        remaining = [card for ref, card in cards if ref not in priority_refs]
-    else:
-        visible = [card for _, card in cards[:8]]
-        remaining = [card for _, card in cards[8:]]
+    visible = [card for _, card in cards[:8]]
+    remaining = [card for _, card in cards[8:]]
     # Group only close records with the same issuer, dates, numbers and status.
     # Every original sentence, badge, citation and hash target stays available.
     facts_by_ref = {str(item.get("claim_ref") or ""): item for item in block.get("items", [])}
-    ordered = (
-        [*requested[:8], *(ref for ref, _ in cards if ref not in priority_refs)]
-        if requested
-        else [ref for ref, _ in cards]
-    )
+    ordered = [ref for ref, _ in cards]
     leaders: list[str] = []
     related: dict[str, list[str]] = {}
     for ref in ordered:
@@ -338,7 +336,7 @@ def _fact_table(block: dict[str, Any]) -> str:
                 if repeats
                 else ""
             )
-        visible_refs = set(requested[:8] if requested else [ref for ref, _ in cards[:8]])
+        visible_refs = set(leaders[:8])
         visible = [grouped_cards[ref] for ref in leaders if ref in visible_refs]
         remaining = [grouped_cards[ref] for ref in leaders if ref not in visible_refs]
     overflow = (
@@ -348,7 +346,7 @@ def _fact_table(block: dict[str, Any]) -> str:
         else ""
     )
     legend = (
-        '<p class="verification-legend">单源和转载说明表示材料支持，不等于独立证实；'
+        '<p class="verification-legend">按正文明确的动作日期从早到晚排列，同日先后不明时并列，时间未明确的记录置后；不以网页日期替代事件日期。单源和转载说明表示材料支持，不等于独立证实；'
         "“发布记录已核实”只确认机构的发布记录，不证明文件中的指控属实。"
         "部分支持、依据不足和核验未完成分别标注。</p>"
         if block.get("section") == "03"
@@ -685,6 +683,19 @@ def _history_background(card: dict[str, Any]) -> str:
             f"{_escape(fact.get('text'))}{claim}{refs}</p>"
         )
     if not paragraphs:
+        if card.get("stages"):
+            return "".join(
+                '<div class="history-stage">'
+                + (
+                    f'<p class="card-meta">{_escape(stage.get("event_time"))}</p>'
+                    if stage.get("event_time")
+                    else ""
+                )
+                + _history_background({k: v for k, v in stage.items() if k != "stages"})
+                + "".join(_citation_link(ref) for ref in stage.get("evidence_refs", []))
+                + "</div>"
+                for stage in card["stages"]
+            )
         text = card.get("summary") or card.get("one_liner")
         if text:
             paragraphs.append(f"<p>{_escape(text)}</p>")
@@ -739,6 +750,30 @@ def _history_case(card: dict[str, Any]) -> str:
     )
 
 
+def _history_reference(card: dict[str, Any]) -> str:
+    variants = card.get("related_candidates")
+    content = "".join(
+        '<div class="history-candidate-variant">'
+        + (f"<h4>{_escape(item.get('event_name'))}</h4>" if variants else "")
+        + f'<p class="fallback-note">{_escape(item.get("reason"))}</p>'
+        + _history_background(item)
+        + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
+        + "</div>"
+        for item in (variants or [card])
+    )
+    return (
+        '<article class="narrative-card history-reference">'
+        f"<h3>{_escape(card.get('event_name') or '历史案例线索')}</h3>"
+        + (
+            '<p class="source-boundary">同主体相近线索，身份待核：以下记录可能涉及同案的不同阶段，尚未确认，不合并为事实结论，也不计入正式对照。</p>'
+            if variants
+            else ""
+        )
+        + content
+        + "</article>"
+    )
+
+
 def _history_chapter(block: dict[str, Any]) -> str:
     anchors = "".join(f'<span id="{_escape(ref)}"></span>' for ref in block.get("anchors", []))
     cards = "".join(_history_case(card) for card in block.get("cards", []))
@@ -750,13 +785,8 @@ def _history_chapter(block: dict[str, Any]) -> str:
         for analysis in block.get("joint_analyses", [])
     )
     references = "".join(
-        '<article class="narrative-card history-reference">'
-        f"<h3>{_escape(card.get('event_name') or '历史案例线索')}</h3>"
-        f'<p class="fallback-note">{_escape(card.get("reason"))}</p>'
-        + _history_background(card)
-        + "".join(_citation_link(ref) for ref in card.get("evidence_refs", []))
-        + "</article>"
-        for card in block.get("reference_candidates", [])
+        _history_reference(card)
+        for card in group_history_candidates(block.get("reference_candidates", []))
     )
     excluded = "".join(
         f"<li>{_escape(item.get('title'))}：{_escape(item.get('reason'))}"
@@ -889,7 +919,7 @@ def _generic_block(block: dict[str, Any]) -> str:
             "original": "原始发布",
             "repost": "转载",
             "response": "公开回应",
-            "follow_up": "后续跟进",
+            "follow_up": "引述/跟进",
             "unknown": "类型待确认",
         }
         nodes = "".join(
@@ -897,13 +927,18 @@ def _generic_block(block: dict[str, Any]) -> str:
             f'<div class="card-meta"><span>{_escape(node_labels.get(item.get("node_type"), "类型待确认"))}</span>'
             f"<time>{_escape(item.get('published_at') or '时间待确认')}</time></div>"
             f"<h3>{_escape(item.get('publisher'))}</h3>"
-            f"<p>{_escape(item.get('framing'))}</p>"
+            + (
+                '<p class="publication-platform">刊载平台：' + _escape(item["platform"]) + "</p>"
+                if item.get("platform") and item.get("platform") != item.get("publisher")
+                else ""
+            )
+            + f"<p>{_escape(item.get('framing'))}</p>"
             + "".join(_citation_link(ref) for ref in item.get("evidence_refs", []))
             + "</article>"
             for item in block.get("nodes", [])
             if not graph or item.get("evidence_id") not in connected
         )
-        relation_labels = {"repost": "转载", "response": "回应", "follow_up": "跟进"}
+        relation_labels = {"repost": "转载", "response": "回应", "follow_up": "引述/跟进"}
         edges = "".join(
             f'<li><span class="evidence-id">{_escape(item.get("from_evidence_id"))}</span>'
             f" → {_escape(relation_labels.get(item.get('relation'), item.get('relation')))} → "
@@ -918,6 +953,11 @@ def _generic_block(block: dict[str, Any]) -> str:
         return (
             f'<section id="{_escape(block.get("block_id"))}" class="propagation-network">'
             f"<h2>{title}</h2>{fallback}{graph}"
+            + (
+                '<p class="method-note">引述/跟进表示后续报道有明确引用或跟进依据，不表示整篇稿件转载。</p>'
+                if any(e.get("relation") == "follow_up" for e in block.get("edges", []))
+                else ""
+            )
             + (
                 '<details class="visual-publication-extra"><summary>其他发布记录（未建立已审连线）</summary>'
                 f'<div class="publication-grid">{nodes}</div></details>'

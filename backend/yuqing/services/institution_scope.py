@@ -121,6 +121,27 @@ class InstitutionScopeReviewer:
     async def review(
         self, texts: Sequence[str], *, kind: str, scope: str | None = None
     ) -> list[ScopeReview]:
+        decisions = await self._review_once(texts, kind=kind, scope=scope)
+        retry_indices = [
+            index
+            for index, decision in enumerate(decisions)
+            if decision.status == "incomplete" and decision.reason == "invalid_output"
+        ]
+        # Only malformed model output gets one fresh check. A failed upstream or
+        # exhausted local budget must not trigger additional calls for this batch.
+        if retry_indices and not any(
+            decision.reason in {"call_failed", "local_budget"} for decision in decisions
+        ):
+            retries = await self._review_once(
+                [texts[index] for index in retry_indices], kind=kind, scope=scope
+            )
+            for index, decision in zip(retry_indices, retries, strict=True):
+                decisions[index] = decision
+        return decisions
+
+    async def _review_once(
+        self, texts: Sequence[str], *, kind: str, scope: str | None = None
+    ) -> list[ScopeReview]:
         scope = scope or self.scope
         decisions = [ScopeReview("incomplete", "not_reviewed", value) for value in texts]
         keys = [_scope_review_key(scope, kind, value) for value in texts]
@@ -277,6 +298,8 @@ class InstitutionScopeReviewer:
                 try:
                     if isinstance(response, Exception):
                         raise response
+                    if not isinstance(response, dict):
+                        raise ValueError("invalid scope review shape")
                     items = response.get("items")
                     if not isinstance(items, list) or len(items) != len(indices):
                         raise ValueError("incomplete scope review")

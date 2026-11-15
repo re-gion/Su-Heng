@@ -149,7 +149,8 @@ async def test_invalid_redaction_does_not_discard_other_reviewed_items():
                         },
                         {"id": 2, "allowed": False},
                     ]
-                }
+                },
+                {"items": []},
             ]
         )
     )
@@ -429,3 +430,77 @@ async def test_qualified_anonymous_roles_keep_summary_text_unchanged(cached):
     assert decision.text == original
     assert not only_anonymous_roles_changed("张某某称遭同校男生不雅行为。", changed)
     assert not only_anonymous_roles_changed(original, changed.replace("不雅行为", "违法行为"))
+
+
+@pytest.mark.asyncio
+async def test_invalid_scope_item_is_retried_once_without_repeating_accepted_or_rejected():
+    class PartialGateway:
+        calls = []
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            items = json.loads(prompt.split("\n", 1)[1])
+            self.calls.append(items)
+            if len(self.calls) == 1:
+                return {
+                    "items": [
+                        {"id": 0, "allowed": True, "redactions": []},
+                        {
+                            "id": 1,
+                            "allowed": True,
+                            "redactions": [{"text": "并不存在的姓名", "replacement": "相关个人"}],
+                        },
+                        {"id": 2, "allowed": False, "redactions": []},
+                    ]
+                }
+            assert items == [{"id": 0, "text": "这条公开回应需要审查。"}]
+            return {"items": [{"id": 0, "allowed": True, "redactions": []}]}
+
+    gateway = PartialGateway()
+    decisions = await InstitutionScopeReviewer(gateway).review(
+        ["学校公布复核结果。", "这条公开回应需要审查。", "私人指控。"],
+        kind="report_text",
+        scope="public_event",
+    )
+    assert [d.status for d in decisions] == ["accepted", "accepted", "rejected"]
+    assert len(gateway.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [None, [], {"items": []}])
+async def test_two_invalid_scope_responses_remain_incomplete_and_bounded(invalid):
+    class InvalidGateway:
+        calls = 0
+
+        async def complete_json(self, *args, **kwargs):
+            self.calls += 1
+            return invalid
+
+    gateway = InvalidGateway()
+    decision = (await InstitutionScopeReviewer(gateway).review(["公开回应。"], kind="report_text"))[
+        0
+    ]
+    assert decision.status == "incomplete" and decision.reason == "invalid_output"
+    assert gateway.calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["budget", "network", "policy", "identifier"])
+async def test_scope_retry_does_not_repeat_budget_network_policy_or_identifiers(failure):
+    from yuqing.core.llm.gateway import LLMBudgetExhausted
+
+    class Gateway:
+        calls = 0
+
+        async def complete_json(self, *args, **kwargs):
+            self.calls += 1
+            if failure == "budget":
+                raise LLMBudgetExhausted()
+            if failure == "network":
+                raise ConnectionError("unavailable")
+            return {"items": [{"id": 0, "allowed": False, "redactions": []}]}
+
+    gateway = Gateway()
+    text = "联系人手机号：13800138000。" if failure == "identifier" else "公开回应。"
+    decision = (await InstitutionScopeReviewer(gateway).review([text], kind="report_text"))[0]
+    assert not decision.allowed
+    assert gateway.calls == (0 if failure == "identifier" else 1)

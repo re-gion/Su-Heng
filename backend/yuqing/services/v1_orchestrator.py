@@ -481,6 +481,55 @@ class V1Orchestrator:
             date_from=task.time_range_from,
             date_to=task.time_range_to,
         )
+        # Old fetched snapshots may predate a metadata extractor fix. Refresh
+        # their own captured publication nodes before deciding what is missing.
+        evidence = await self.evidence.refresh_task_publication_metadata(task)
+
+        def article_title(item):
+            suffixes = {
+                item.source_name,
+                item.publisher_entity,
+                "报道平台",
+                "新闻中心",
+                "新闻频道",
+                "首页",
+            }
+            for value in [item.title, *(item.content_text or "").splitlines()[:8]]:
+                title = value.strip()
+                for suffix in suffixes - {None, ""}:
+                    title = re.sub(rf"\s*[-_|｜]\s*{re.escape(suffix)}\s*$", "", title)
+                if (
+                    len(title) < 4
+                    or re.search(
+                        r"logo|登录|注册|版权|导航|责任编辑|^来源\s*[:：/]|^首页", title, re.I
+                    )
+                    or len(title) > 100
+                ):
+                    continue
+                return title[:80]
+            return ""
+
+        def credited_issuers(text):
+            for match in re.finditer(
+                r"(?:^|\n)(?:信息来源|文章来源|稿件来源|稿源|来源)\s*[:：/|｜]\s*([^\n。；|｜]{2,80})",
+                text,
+            ):
+                for part in re.split(r"[、，,;；]", match.group(1)):
+                    issuer = re.split(r"\s|责任编辑|记者|编辑", part.strip())[0]
+                    issuer = issuer.strip("（）()，,：:")
+                    if re.search(r"(?:号|平台)[·•].*(?:媒体|政务|资讯|机构)$", issuer):
+                        continue
+                    issuer = re.sub(r"(?:官方网站|官网|微信公众号|新闻客户端)$", "", issuer)
+                    if len(issuer) < 3 or issuer in {
+                        "互联网",
+                        "本网站",
+                        "客户端",
+                        "新闻中心",
+                        "微信公众号",
+                    }:
+                        continue
+                    yield issuer
+
         targets = {}
         for item in evidence:
             if (
@@ -492,16 +541,12 @@ class V1Orchestrator:
             text = "\n".join(
                 [item.content_text or "", *(item.extra or {}).get("page_source_credits", [])]
             )
-            for match in re.finditer(r"(?:^|\n)来源\s*[：:]\s*([^\n。；|]{2,60})", text):
-                issuer = re.split(r"\s|责任编辑|记者", match.group(1).strip())[0]
-                issuer = issuer.strip("（）()，,：:").removesuffix("官网").removesuffix("官方网站")
-                if len(issuer) < 3:
-                    continue
+            title = article_title(item)
+            if not title:
+                continue
+            for issuer in credited_issuers(text):
                 # Several mirrors of the same release produce one source lookup.
                 date = str(item.published_at)[:10]
-                title = (item.content_text or item.title).splitlines()[0][:60]
-                if "情况通报" in title:
-                    title = "情况通报"
                 body_id = fingerprint(re.sub(r"\s+", "", item.content_text or "")[:500])
                 targets.setdefault((issuer, date, body_id), (title, item))
         ordered = sorted(

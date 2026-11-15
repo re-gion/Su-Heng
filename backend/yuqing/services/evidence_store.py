@@ -1,23 +1,155 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import html
+import json
 import re
 from datetime import datetime
 from difflib import SequenceMatcher
-from urllib.parse import urlsplit
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 from yuqing.core.fetch.base import FetchProvider
-from yuqing.core.fetch.builtin import extract_source_credits
+from yuqing.core.fetch.builtin import (
+    SOURCE_CREDIT_VERSION,
+    extract_page_publication_identity,
+    extract_source_credits,
+)
 from yuqing.core.fetch.chain import FetchChain
 from yuqing.core.search.base import SearchResult
 from yuqing.storage.db import Database
-from yuqing.storage.models import EvidenceCreate, EvidenceRecord
+from yuqing.storage.models import EvidenceCreate, EvidenceRecord, TaskRecord
 from yuqing.storage.snapshots import SnapshotStore
 
 from .investigation_scope import InvestigationScope, ScopePhase
 from .source_tiers import SourceTierClassifier
+
+
+class _PublicationMarkup(HTMLParser):
+    """Keep article metadata independently of its offset, excluding page furniture."""
+
+    _VOID = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "wbr",
+    }
+    _NON_ARTICLE = {
+        "nav",
+        "navigation",
+        "aside",
+        "sidebar",
+        "footer",
+        "related",
+        "recommend",
+        "breadcrumb",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.stack = []
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        markers = {
+            token.lower()
+            for key, value in attrs
+            if key in {"class", "id"} and value
+            for token in re.split(r"[\s_-]+", value)
+        }
+        blocked = (
+            bool(self.stack and self.stack[-1][1])
+            or tag in self._NON_ARTICLE
+            or bool(markers & self._NON_ARTICLE)
+        )
+        if tag not in self._VOID:
+            self.stack.append((tag, blocked))
+        if not blocked:
+            self.parts.append(self.get_starttag_text())
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        blocked = bool(self.stack and self.stack[-1][1])
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+        if not blocked:
+            self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self.stack or not self.stack[-1][1]:
+            self.parts.append(data)
+
+    def handle_entityref(self, name):
+        self.handle_data(f"&{name};")
+
+    def handle_charref(self, name):
+        self.handle_data(f"&#{name};")
+
+
+def _article_json_date(markup: str, source_url: str | None) -> str | None:
+    for match in re.finditer(
+        r'<script\b[^>]*\btype=["\']application/ld\+json["\'][^>]*>(.*?)</script\s*>',
+        markup,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            data = json.loads(match.group(1))
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("@graph"), list):
+            nodes = data["@graph"]
+        else:
+            nodes = data if isinstance(data, list) else [data]
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            kinds = node.get("@type", [])
+            kinds = kinds if isinstance(kinds, list) else [kinds]
+            if kinds and not set(k for k in kinds if isinstance(k, str)) & {
+                "Article",
+                "NewsArticle",
+                "BlogPosting",
+                "Report",
+                "ScholarlyArticle",
+            }:
+                continue
+            # Do not recurse into ItemList / related content. Legacy publisher
+            # JSON without @type is accepted only as a flat publication record.
+            if not kinds and any(isinstance(value, (dict, list)) for value in node.values()):
+                continue
+            identity = node.get("url") or node.get("mainEntityOfPage")
+            if isinstance(identity, dict):
+                identity = identity.get("@id")
+            if source_url and isinstance(identity, str):
+                candidate = urlsplit(urljoin(source_url, identity))
+                target = urlsplit(source_url)
+                if (candidate.hostname or "").removeprefix("www.") != (
+                    target.hostname or ""
+                ).removeprefix("www.") or candidate.path.rstrip("/") != target.path.rstrip("/"):
+                    continue
+            for key in ("datePublished", "pubDate", "publishDate", "publishedAt"):
+                if isinstance(node.get(key), str):
+                    normalized = _normalize_page_date(node[key])
+                    if normalized:
+                        return normalized
+    return None
 
 
 def extract_page_published_at(
@@ -25,34 +157,36 @@ def extract_page_published_at(
 ) -> tuple[str | None, str | None]:
     """Extract only dates visibly carried by the fetched page or its structured metadata."""
 
-    decoded = html.unescape(raw_html)
-    header = decoded.split("</head>", 1)[0][:20000]
+    markup = _PublicationMarkup()
+    markup.feed(raw_html)
+    markup.close()
+    decoded = html.unescape("".join(markup.parts))
     structured_patterns = (
-        r'["\'](?:datePublished|pubDate|publishDate|publishedAt)["\']\s*:\s*["\']([^"\']+)',
         r'<meta[^>]+(?:property|name|itemprop)=["\'](?:article:published_time|datePublished|pubdate|publishdate|publish_time)["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name|itemprop)=["\'](?:article:published_time|datePublished|pubdate|publishdate|publish_time)["\']',
-        r'<time[^>]+datetime=["\']([^"\']+)',
+        r'<time\b(?=[^>]*\bitemprop=["\']datePublished["\'])[^>]*\bdatetime=["\']([^"\']+)',
     )
-    # Some publishers place article JSON immediately after </head>.
-    for region in (header, decoded[:8000]):
-        for pattern in structured_patterns:
-            match = re.search(pattern, region, re.IGNORECASE)
-            if match:
-                normalized = _normalize_page_date(match.group(1))
-                if normalized:
-                    return normalized, "page_metadata"
+    for pattern in structured_patterns:
+        match = re.search(pattern, decoded, re.IGNORECASE)
+        if match:
+            normalized = _normalize_page_date(match.group(1))
+            if normalized:
+                return normalized, "page_metadata"
     publisher_search_metadata = re.search(
         r'<span\b[^>]*\bid=["\']pubtime_baidu["\'][^>]*>\s*([^<]{8,40})\s*</span>',
-        decoded[:30000],
+        decoded,
         re.IGNORECASE,
     )
     if publisher_search_metadata:
         normalized = _normalize_page_date(publisher_search_metadata.group(1))
         if normalized:
             return normalized, "page_metadata"
+    json_date = _article_json_date(decoded, source_url)
+    if json_date:
+        return json_date, "page_metadata"
     # An e-paper edition script is page metadata only if it agrees with the
     # edition date embedded in this article URL, not merely a sidebar clock.
-    edition = re.search(r'showdate\(\s*["\']([^"\']+)["\']\s*\)', decoded[:20000])
+    edition = re.search(r'showdate\(\s*["\']([^"\']+)["\']\s*\)', decoded)
     if edition and source_url:
         normalized = _normalize_page_date(edition.group(1))
         if normalized and normalized[:10].replace("-", "") in urlsplit(source_url).path:
@@ -63,7 +197,7 @@ def extract_page_published_at(
     article_header_date = re.search(
         r'<span\b[^>]*class=["\'][^"\']*\btimer\b[^"\']*["\'][^>]*>'
         r"\s*(20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2})?)\s*</span>",
-        decoded[:16000],
+        decoded,
         re.IGNORECASE,
     )
     if article_header_date:
@@ -73,14 +207,14 @@ def extract_page_published_at(
     article_date_with_source = re.search(
         r"<span>\s*(20\d{2}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)"
         r"\s*</span>.{0,250}?<span>\s*来源[：:]",
-        decoded[:12000],
+        decoded,
         re.IGNORECASE | re.DOTALL,
     )
     article_time_header = re.search(
         r'<div\b[^>]*class=["\'][^"\']*\btime\b[^"\']*["\'][^>]*>\s*'
         r"<span>\s*(20\d{2}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)"
         r"\s*</span>",
-        decoded[:12000],
+        decoded,
         re.IGNORECASE,
     )
     for match in (article_date_with_source, article_time_header):
@@ -95,16 +229,27 @@ def extract_page_published_at(
         r'.{0,900}?<span\b[^>]*class=["\'][^"\']*\bsource\b[^"\']*["\'][^>]*>'
         r"[^<]{1,100}</span>\s*<span\b[^>]*>\s*"
         r"(20\d{2}年\d{1,2}月\d{1,2}日\s+\d{1,2}:\d{2}(?::\d{2})?)\s*</span>",
-        decoded[:16000],
+        decoded,
         re.IGNORECASE | re.DOTALL,
     )
     if chinese_header:
         normalized = _normalize_page_date(chinese_header.group(1))
         if normalized:
             return normalized, "page_visible"
+    named_article_time = re.search(
+        r'<div\b[^>]*class=["\'][^"\']*\bcontent_left_time\b[^"\']*["\'][^>]*>\s*'
+        r"(20\d{2}年\d{1,2}月\d{1,2}日\s+\d{1,2}:\d{2}(?::\d{2})?)\s+来源\s*[：:]",
+        decoded,
+        re.IGNORECASE,
+    )
+    if named_article_time:
+        normalized = _normalize_page_date(named_article_time.group(1))
+        if normalized:
+            return normalized, "page_visible"
     visible = re.search(
-        r"(?:发布时间|发布日期|发布于|时间)\s*[：:]?\s*(20\d{2})[年\-/\.](\d{1,2})[月\-/\.](\d{1,2})日?",
-        content_text[:12000],
+        r"^\s*(?:发布时间|发布日期|发布于|时间)\s*[：:]?\s*(20\d{2})[年\-/\.](\d{1,2})[月\-/\.](\d{1,2})日?",
+        "\n".join(content_text.splitlines()[:6]),
+        re.MULTILINE,
     )
     if visible:
         normalized = _normalize_page_date("-".join(visible.groups()))
@@ -132,6 +277,111 @@ def _normalize_page_date(value: str) -> str | None:
 
 class EvidenceStore:
     PROVIDER_TEXT_MIN_CHARS = 320
+
+    async def refresh_task_publication_metadata(self, task: TaskRecord) -> list[EvidenceRecord]:
+        """Re-evaluate previously undated captured sources before bounded recovery."""
+        scope = InvestigationScope(
+            event_query=task.resolved_event_query or task.event_query,
+            languages=tuple(task.source_languages),
+            source_scope=task.effective_source_scope,
+            date_from=task.time_range_from,
+            date_to=task.time_range_to,
+        )
+        return [
+            await self.refresh_publication_metadata(item, scope=scope)
+            for item in await self.database.list_evidence(task.id)
+        ]
+
+    async def refresh_publication_metadata(
+        self,
+        evidence: EvidenceRecord,
+        *,
+        scope: InvestigationScope | None = None,
+        agent: str = "media_propagation",
+        phase: ScopePhase = "primary",
+    ) -> EvidenceRecord:
+        """Revisit an undated captured page without another fetch or claim re-verdict."""
+        extra = dict(evidence.extra or {})
+        trusted_date = extra.get("date_provenance") in {"page_metadata", "page_visible"}
+        if (
+            evidence.fetch_status != "fetched"
+            or (
+                trusted_date
+                and "page_publication_identity" in extra
+                and extra.get("source_credit_version") == SOURCE_CREDIT_VERSION
+            )
+            or not evidence.snapshot_path
+            or not evidence.content_sha256
+        ):
+            return evidence
+
+        def captured_metadata():
+            path = Path(evidence.snapshot_path).resolve()
+            if not path.is_relative_to(self.snapshots.root.resolve()):
+                return None
+            with gzip.open(path, "rb") as stream:
+                payload = stream.read()
+            if hashlib.sha256(payload).hexdigest() != evidence.content_sha256:
+                return None
+            raw_html = payload.decode("utf-8")
+            date = (
+                (evidence.published_at, extra.get("date_provenance"))
+                if trusted_date
+                else extract_page_published_at(raw_html, evidence.content_text or "", evidence.url)
+            )
+            return (
+                *date,
+                extract_page_publication_identity(raw_html),
+                extract_source_credits(raw_html),
+            )
+
+        try:
+            metadata = await asyncio.to_thread(captured_metadata)
+        except (OSError, EOFError, UnicodeError):
+            return evidence
+        if metadata is None:
+            return evidence
+        published_at, provenance, identity, source_credits = metadata
+        extra["page_publication_identity"] = identity
+        extra["page_source_credits"] = source_credits
+        extra["source_credit_version"] = SOURCE_CREDIT_VERSION
+        if provenance:
+            extra["date_provenance"] = provenance
+        if scope is not None and published_at and provenance and not trusted_date:
+            result = SearchResult(
+                url=evidence.url,
+                title=evidence.title,
+                snippet=evidence.snippet or (evidence.content_text or "")[:500],
+                published_at=datetime.fromisoformat(published_at),
+                source_name=evidence.source_name,
+                provider=evidence.provider or "fetch",
+                lang=evidence.lang or "unknown",
+                raw={"date_provenance": provenance},
+            )
+            extra.update(
+                scope.classify_result(
+                    result,
+                    agent=agent,
+                    phase=phase,
+                    search_query=evidence.retrieval_query,
+                    body_text=evidence.content_text,
+                ).as_extra()
+            )
+        # A metadata replay must preserve the original fetch time and snapshot.
+        # Sealed investigations remain read-only, as with normal evidence writes.
+        await self.database.execute_write(
+            """UPDATE evidence SET published_at=COALESCE(?,published_at),extra=?
+               WHERE pk=? AND content_sha256=? AND fetch_status='fetched'
+               AND EXISTS (SELECT 1 FROM task WHERE id=evidence.task_id
+                           AND status NOT IN ('stopping','done'))""",
+            (
+                published_at,
+                json.dumps(extra, ensure_ascii=False),
+                evidence.pk,
+                evidence.content_sha256,
+            ),
+        )
+        return await self.database.get_evidence(evidence.task_id, evidence.local_id) or evidence
 
     async def confirm_credited_publication(
         self,
@@ -324,7 +574,9 @@ class EvidenceStore:
         allow_external_fallback: bool = False,
     ) -> EvidenceRecord:
         if evidence.fetch_status == "fetched":
-            return evidence
+            return await self.refresh_publication_metadata(
+                evidence, scope=scope, agent=agent, phase=phase
+            )
         try:
             if isinstance(self.fetcher, FetchChain):
                 result = await self.fetcher.fetch(
@@ -341,6 +593,8 @@ class EvidenceStore:
             extra = dict(evidence.extra or {})
             # Credit belongs to this snapshot, including an explicit empty result.
             extra["page_source_credits"] = extract_source_credits(result.html)
+            extra["page_publication_identity"] = extract_page_publication_identity(result.html)
+            extra["source_credit_version"] = SOURCE_CREDIT_VERSION
             # A successful target-page response supersedes search-provider text.
             extra["content_origin"] = "direct_fetch"
             if provenance:
