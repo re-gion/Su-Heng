@@ -378,7 +378,8 @@ async def test_invalid_empty_relation_cache_is_not_reused():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [False, True])
-async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved):
+@pytest.mark.parametrize("carrier_credit", [False, True])
+async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved, carrier_credit):
     passage = "学校公开通报复核工作的方法、材料范围和程序依据，说明已经完成的工作与尚需说明的事项。"
 
     class Gateway:
@@ -395,12 +396,23 @@ async def test_credited_common_text_is_only_a_candidate_until_reviewed(approved)
 
     gateway = Gateway()
     agent = OpenAIReportAgent(gateway, "report")
+    carrier = (
+        {
+            "identity_status": "credited_source",
+            "platform": "示例新闻网",
+            "source_name": "示例通讯社",
+            "article_body_sha256": "fixture-sha",
+        }
+        if carrier_credit
+        else {}
+    )
     result = await agent.recover_relations(
         [
-            {"evidence_ref": "E001", "source_name": "示例新闻网", "excerpt": passage},
+            {"evidence_ref": "E001", "source_name": "示例新闻网", "excerpt": passage, **carrier},
             {
                 "evidence_ref": "E002",
                 "source_name": "另家媒体",
+                "article_body_sha256": "fixture-sha",
                 "excerpt": passage + "\n来源：示例新闻网",
             },
         ]

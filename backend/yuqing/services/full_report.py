@@ -343,8 +343,27 @@ class FullReportBuilder:
             "report_header",
         }
         units = []
+        publication_units = set()
         for block in report["blocks"]:
             if block["type"] in protected_types:
+                continue
+            if block["type"] in {"propagation_network", "history_compare"}:
+                fields = (
+                    ("nodes", "edges")
+                    if block["type"] == "propagation_network"
+                    else ("cards", "reference_candidates", "excluded_candidates")
+                )
+                for field in fields:
+                    entries = block.get(field, [])
+                    if block["type"] == "propagation_network":
+                        publication_units.add(id(entries))
+                    for entry in entries:
+                        part = collect(entry)
+                        units.append((entries, entry, part))
+                        texts.update(part)
+                metadata = collect({k: v for k, v in block.items() if k not in fields})
+                units.append((block, None, metadata))
+                texts.update(metadata)
                 continue
             if block["type"] == "comment_insight" and block.get("analysis_version") == 5:
                 for field in ("observations", "samples", "collections"):
@@ -446,7 +465,8 @@ class FullReportBuilder:
                         value[key] = apply_redactions(child)
                     return value
                 if isinstance(value, list):
-                    return [apply_redactions(child) for child in value]
+                    value[:] = [apply_redactions(child) for child in value]
+                    return value
                 if isinstance(value, str):
                     return approved_text.get(value, value)
                 return value
@@ -485,6 +505,21 @@ class FullReportBuilder:
             if not (b["type"] in {"analysis", "action_plan", "metric_cards"} and not b.get("items"))
         ]
         quality = report.setdefault("quality", {})
+        for network in (b for b in report["blocks"] if b["type"] == "propagation_network"):
+            node_refs = {node["evidence_id"] for node in network["nodes"]}
+            network["edges"] = [
+                edge
+                for edge in network["edges"]
+                if {edge["from_evidence_id"], edge["to_evidence_id"]} <= node_refs
+            ]
+            if not network["edges"]:
+                network["in_brief"] = False
+                network["fallback_text"] = (
+                    "已保留通过范围审查的发布记录；当前没有可公开的已审传播连线。"
+                )
+                missing = quality.setdefault("release_gate_missing", [])
+                if "media_propagation" not in missing:
+                    missing.append("media_propagation")
         reconcile_history_completion(report)
         quality["analysis_items"] = sum(
             len(b.get("items", []))
@@ -518,7 +553,7 @@ class FullReportBuilder:
             ) or any(
                 part - safe
                 for owner, item, part in units
-                if isinstance(owner, list) and id(owner) in core_lists
+                if isinstance(owner, list) and id(owner) in core_lists | publication_units
             )
             if core_removed or not report["metrics"]["key_claims_rendered"]:
                 quality["release_label"] = (
@@ -2507,6 +2542,9 @@ class FullReportBuilder:
                     "source_name": identity["publisher"],
                     "publisher_entity": identity["publisher"],
                     "candidate_publisher_names": sorted(publisher_terms(item)),
+                    "article_body_sha256": hashlib.sha256(body.encode()).hexdigest()
+                    if len(body) >= 240
+                    else None,
                     "page_source_credits": credits,
                     "url": item.url,
                     "published_at": item.published_at,

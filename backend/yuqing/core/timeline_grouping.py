@@ -319,13 +319,13 @@ _DATED_TIME = (
     r"\d{1,2}时(?:\d{1,2}分)?)?"
 )
 _PUBLISHED_MATERIAL = re.compile(
-    rf"^(?P<actor>[\w]{{2,32}}?)(?:相关账号|官方账号|官网|网站)?(?:于)?"
-    rf"{_DATED_TIME}(?:当日|同日)?(?:(?P<video>发布(?:的)?(?:测试)?视频|测试视频(?=称|显示))|"
+    rf"^(?P<actor>[\w]{{2,32}}?)(?:相关账号|官方账号|有关人员|官网|网站)?(?:于)?"
+    rf"{_DATED_TIME}(?:当日|同日)?(?:(?P<video>发布(?:的)?(?:场地|封闭场地)?(?:测试|实测|试验|评测|测评)?视频|(?:测试|实测|试验)视频(?=称|显示))|"
     r"(?P<notice>发布(?:了)?(?:情况|调查复核)?通报|(?:情况|调查复核)?通报(?=称|载明|公布|显示|已))|"
-    r"(?P<reply>发布(?:了)?(?:情况说明|声明)|情况说明(?=称|载明|公布|显示)|(?:回应|声明)(?=称)))"
+    r"(?P<reply>发布(?:了)?(?:情况说明|声明)|情况说明(?=称|载明|公布|显示)|(?:在回应中|回应|声明)(?=称)))"
 )
 _REPORTED = re.compile(
-    r"^(?:据)?[^，,。]{2,32}?(?:(?:综合)?报道(?:称|指出|显示)?|转载的|稿件[，,]\s*(?:报道称|称))"
+    r"^(?:据)?[^，,。]{2,32}?(?:(?:综合)?报道(?:称|指出|显示)?|转载的|转述|稿件[，,]\s*(?:报道称|称))"
     r"[，,\s]*"
 )
 _DIFFERENT_RELEASE = re.compile(r"另行|另一份|第二份|第二次|再次|补充通报|[《》]")
@@ -350,7 +350,7 @@ def publication_reading_parts(text: str) -> tuple[str, str, str, str] | None:
     match = _PUBLISHED_MATERIAL.match(candidate)
     if not match:
         return None
-    actor = match["actor"]
+    actor = re.sub(r"^(?:汽车|科技|财经|体育)?(?:资讯|评测|测评)平台(?=.{2})", "", match["actor"])
     if actor.startswith(("某", "据", "一段", "一则", "网传")) or actor in {
         "校方",
         "学校",
@@ -379,6 +379,7 @@ def publication_fact_key(parts: tuple[str, str, str, str]) -> str:
     detail = re.sub(r"([一二两三四五六七八九])(?:台|辆)", lambda m: counts[m[1]] + "辆", detail)
     detail = re.sub(r"(\d+)台", r"\1辆", detail)
     detail = re.sub(r"(制动)(?:测试)?(?:中|时)", r"\1", detail)
+    detail = detail.replace("km/h至0的", "km/h至0")
     if re.match(r"\s*\d+辆", detail):
         detail = re.sub(r"(?<!平)均(?![值衡等匀数分])", "", detail)
     detail = re.sub(r"(?<!\d)[.:-]|[.:-](?!\d)", "", detail).replace("％", "%")

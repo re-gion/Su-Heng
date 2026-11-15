@@ -209,7 +209,10 @@ async def test_scope_redaction_preserves_canonical_analysis_observation(
 
 
 @pytest.mark.asyncio
-async def test_removed_history_chapter_cannot_keep_completed_status(analytical_report, runtime_dir):
+@pytest.mark.parametrize("has_safe_case", [False, True])
+async def test_history_review_keeps_only_approved_cards(
+    analytical_report, runtime_dir, has_safe_case
+):
     report = copy.deepcopy(analytical_report[0])
     report["blocks"] = [b for b in report["blocks"] if b["type"] != "history_compare"]
     report["blocks"].append(
@@ -217,7 +220,8 @@ async def test_removed_history_chapter_cannot_keep_completed_status(analytical_r
             "block_id": "fixture-history",
             "type": "history_compare",
             "section": "06",
-            "cards": [{"summary": "待审历史案例"}],
+            "cards": [{"summary": "待审历史案例"}]
+            + ([{"summary": "已审案例经过"}] if has_safe_case else []),
         }
     )
     report["quality"].setdefault("chapter_status", {})["history"] = {
@@ -244,8 +248,11 @@ async def test_removed_history_chapter_cannot_keep_completed_status(analytical_r
     await FullReportBuilder(None, runtime_dir, scope_reviewer=Reviewer())._retain_reviewed_blocks(
         report, SimpleNamespace(id="fixture", investigation_scope="public_event")
     )
-    assert not any(b["type"] == "history_compare" for b in report["blocks"])
-    assert report["quality"]["chapter_status"]["history"]["status"] == "missing"
+    history = next(b for b in report["blocks"] if b["type"] == "history_compare")
+    assert history["cards"] == ([{"summary": "已审案例经过"}] if has_safe_case else [])
+    assert report["quality"]["chapter_status"]["history"]["status"] == (
+        "complete" if has_safe_case else "missing"
+    )
 
 
 def test_old_report_reading_copy_downgrades_stale_history_completion():

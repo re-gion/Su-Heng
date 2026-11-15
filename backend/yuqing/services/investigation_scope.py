@@ -387,6 +387,14 @@ class InvestigationScope:
         subject_anchors = anchors
         normalized_text = text.casefold()
         if agent == "history_insight":
+            if not anchors:
+                anchors = tuple(
+                    m.group().casefold()
+                    for m in re.finditer(
+                        r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9-]*\d[A-Za-z0-9-]*(?![A-Za-z0-9])",
+                        self.event_query,
+                    )
+                )
             history_text = f"{normalized_text} {body_lead.casefold()}"
             event_anchors = _event_context_anchors(self.event_query, anchors)
             if (

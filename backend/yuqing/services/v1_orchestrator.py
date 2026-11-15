@@ -485,6 +485,40 @@ class V1Orchestrator:
         # Old fetched snapshots may predate a metadata extractor fix. Refresh
         # their own captured publication nodes before deciding what is missing.
         evidence = await self.evidence.refresh_task_publication_metadata(task)
+        key = "report:cited_authority_sources"
+        if not await self.database.checkpoint(task.id, key):
+            cited = {
+                ref
+                for claim in await self.database.list_claims(task.id)
+                if claim.verification_state == "complete" and claim.verdict == "support"
+                for ref in claim.evidence_ids
+            }
+            originals = [
+                item
+                for item in evidence
+                if item.local_id in cited
+                and item.source_role == "authority"
+                and (item.extra or {}).get("scope_status") in {"main", "event_context"}
+                and self.evidence.needs_direct_fetch(item)
+            ][:2]
+            if originals:
+                await self.database.save_checkpoint(
+                    task.id,
+                    key,
+                    {"phase": "verified", "refs": [item.local_id for item in originals]},
+                )
+                for original in originals:
+                    current = await self.database.get_task(task.id)
+                    if not current or current.status != "running":
+                        break
+                    if (
+                        await self._fetch_once(
+                            original, scope=scope, agent="media_propagation", phase="primary"
+                        )
+                        is None
+                    ):
+                        break
+                evidence = await self.database.list_evidence(task.id)
 
         def article_title(item):
             suffixes = {
@@ -3646,6 +3680,11 @@ class V1Orchestrator:
             # first draft; later recovery reuses these persisted lookup attempts.
             await self._recover_publication_sources(
                 task, await self.database.list_evidence(task_id)
+            )
+            await self._fetch_history_case_leads(
+                task,
+                await self.database.list_claims(task_id),
+                {item.local_id: item for item in await self.database.list_evidence(task_id)},
             )
             await self._emit_budget(task_id, task.depth)
         current_task = await self.database.get_task(task_id)

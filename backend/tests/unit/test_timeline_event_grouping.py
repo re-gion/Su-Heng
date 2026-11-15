@@ -64,7 +64,7 @@ def test_reading_fact_key_normalizes_speed_units_and_chinese_count_without_chang
         ),
         record(
             "C002",
-            "2026年10月8日，乙媒体报道称“甲机构”测试视频显示三辆甲型汽车在100-0km/h制动时踏板支架断裂。",
+            "2026年10月8日，乙媒体报道称“甲机构”实测视频显示三辆甲型汽车在100-0km/h制动时踏板支架断裂。",
         ),
         record(
             "C003", "2026年10月8日，甲机构发布测试视频称4台甲型汽车在100km/h至0制动中踏板支架断裂。"

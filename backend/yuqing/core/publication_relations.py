@@ -146,6 +146,9 @@ def relation_type_codes(edge: dict, by_id: dict) -> list[str]:
     ):
         return ["outside_confirmed_publication_citation"]
     names = [original.get(key) for key in ("publisher_entity", "source_name", "publisher")]
+    original_body = original.get("article_body_sha256")
+    if original_body and original_body == target.get("article_body_sha256"):
+        names.append(original.get("platform"))
     names = [name for name in names if isinstance(name, str) and len(name) >= 2]
     doc_credit = any(
         any(name in match.group() for name in names)

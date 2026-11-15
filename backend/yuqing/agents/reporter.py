@@ -47,8 +47,8 @@ from yuqing.core.publication_relations import (
 
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "reader-decision-v5"
-    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v11"
-    RELATION_VERSION = "source-identity-v7"
+    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v12"
+    RELATION_VERSION = "source-identity-v8"
 
     @staticmethod
     def _analysis_limit(context: dict[str, Any]) -> int:
@@ -375,7 +375,9 @@ class OpenAIReportAgent:
             "数据库事实正文、徽章、裁判结论及引文不能修改。只输出指定JSON。",
             "面向第一次接触事件的读者，写一份2至3分钟内可独立读懂全局的执行摘要。"
             "严格写四个自然段，通常600至900字。材料不足也保留该段，用短句写明可确认部分及具体缺口，不合并、不凑字数。"
-            "建议每段2至4句、全文约12至16句，正文目标600至900字符；材料列表与规划引用不要求逐条复述。"
+            "先用每段2至3句写足四段职责，通常600至750字符；只有遗漏重大事项才加句子。材料列表与规划引用不要求逐条复述。"
+            "第二段每句交代一方主张及对应回应；第三段直接使用最相关已审分析的判断和限定语；末段从已审分析选取具体后续触发条件。"
+            "若引用只能支撑其中一半，就只写获支持的一半。不得为段落过渡另写缺少依据的总括、状态判断或比较。"
             f"硬上限：最多{SUMMARY_LIMITS['max_paragraphs']}段、每段{SUMMARY_LIMITS['max_sentences_per_paragraph']}句、"
             f"全文{SUMMARY_LIMITS['max_sentences']}句/{SUMMARY_LIMITS['max_characters']}字符、单句{SUMMARY_LIMITS['max_sentence_characters']}字符。不要逐条复述全部事实，先筛出主线、转折、当前状态与关键分歧。"
             "按已校验summary_outline先确定的四段主旨及依据写正文，role顺序必须为event、dispute、findings、limits；"
@@ -950,10 +952,21 @@ class OpenAIReportAgent:
                                 or target.get("publisher")
                                 or target.get("source_name")
                             )
+                            credited_carrier = (
+                                credited == original.get("platform")
+                                and bool(original.get("article_body_sha256"))
+                                and original["article_body_sha256"]
+                                == target.get("article_body_sha256")
+                            )
                             attributed = (
                                 bool(credited)
-                                and credited in names
-                                and original.get("identity_status") != "credited_source"
+                                and (
+                                    credited_carrier
+                                    or (
+                                        credited in names
+                                        and original.get("identity_status") != "credited_source"
+                                    )
+                                )
                                 and bool(carrier)
                                 and carrier != credited
                             )
@@ -1037,6 +1050,8 @@ class OpenAIReportAgent:
             "两端是否为不同发布节点，以publication_identity中的carrier与host为准。"
             "同稿从原发机构到另一家媒体网站时，两端publisher可以相同，这与不同carrier构成转载相容。"
             "目标页明确署名单一稿源、实际刊载方不同且正文对应同一整篇稿件时可认定转载。"
+            "若目标页明确署名原节点的刊载平台，且两页article_body_sha256一致，也可证明目标页以该平台所刊稿件为来源。"
+            "仍须核对署名和日期方向；不能推断该平台是稿件的最初作者。"
             "同刊载方镜像、综合稿、仅共同引用第三方通报仍应拒绝。"
             + (
                 "本次专审稿源与刊载方区别。重新核对两端载体、时序、署名和同稿证据，按这些材料重新作出独立判定。"
