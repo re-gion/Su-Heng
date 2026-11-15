@@ -867,12 +867,17 @@ class OpenAIReportAgent:
                             )
                         else:
                             credited = document_credit_publisher(match.group())
+                            carrier = (
+                                target.get("platform")
+                                or target.get("publisher")
+                                or target.get("source_name")
+                            )
                             attributed = (
                                 bool(credited)
                                 and credited in names
                                 and original.get("identity_status") != "credited_source"
-                                and target.get("publisher") == credited
-                                and bool(target.get("platform"))
+                                and bool(carrier)
+                                and carrier != credited
                             )
                         if not attributed:
                             continue
