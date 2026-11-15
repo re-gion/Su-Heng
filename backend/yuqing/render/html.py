@@ -1534,6 +1534,7 @@ window.addEventListener('hashchange',()=>revealTarget(location.hash));
         "verifiable_key_claim": "可核验关键陈述",
         "event_timeline": "事件时间线",
         "in_window_timeline": "事件时间线",
+        "event_chronology": "事件起始脉络",
         "media_propagation": "已审传播关系",
         "executive_summary": "完整执行摘要",
         "evidence_bound_recommendation": "有依据的行动建议",

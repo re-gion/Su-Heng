@@ -16,6 +16,9 @@ _NESTED_OR_CUTOFF_DATE = re.compile(
 DISCLOSURE = re.compile(
     r"发帖|发文|发布.{0,12}(?:测试视频|评测|测评|帖文|文章)|首次.{0,8}(?:公开|曝光|披露)"
 )
+_LETTER_FIELD = re.compile(
+    r"(?m)(?:^|\|)\s*(写信人|来信人|写信时间|来信时间|信件内容|来信内容)\s*(?=[:：|]|$)"
+)
 CHRONOLOGY_NOTE = (
     "按陈述正文明确写出的事件或发布日期排列，不以网页发布日期替代事件日期；"
     "同日先后不明时仅并列展示。保留有引用的节点，不按每日数量或总数截断。"
@@ -122,7 +125,18 @@ def earlier_event_candidates(facts: list[dict], sources) -> list[dict]:
             "foreign_supplement",
         }:
             continue
-        for passage in re.split(r"[。！？\n]", source.content_text or ""):
+        text = source.content_text or ""
+        # A public mailbox can be hosted on an authority's domain while its
+        # dated allegations are still a submission by a member of the public.
+        fields = set(_LETTER_FIELD.findall(text[:2000]))
+        if fields & {"信件内容", "来信内容"} and fields & {
+            "写信人",
+            "来信人",
+            "写信时间",
+            "来信时间",
+        }:
+            continue
+        for passage in re.split(r"[。！？\n]", text):
             stamp = dated_action(passage.strip())
             if not stamp or stamp > earliest:
                 continue

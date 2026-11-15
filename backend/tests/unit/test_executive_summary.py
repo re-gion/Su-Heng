@@ -1057,6 +1057,39 @@ def test_saved_fact_brief_renders_by_action_date(summary_report):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("still_unavailable", [False, True])
+async def test_summary_resumes_the_failed_binding_after_transient_gateway_error(
+    summary_report, still_unavailable
+):
+    class IntermittentGateway(Gateway):
+        bindings = []
+        cooldowns = []
+
+        async def wait_for_recovery(self, role):
+            self.cooldowns.append(role)
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if "阶段：逐句绑定依据审查。" in prompt:
+                sid = json.loads(prompt.split("\n", 1)[1])["sentence"]["id"]
+                self.bindings.append(sid)
+                if sid == "S02" and (still_unavailable or self.bindings.count(sid) == 1):
+                    raise ConnectionError("simulated provider outage")
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    gateway = IntermittentGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert gateway.bindings.count("S01") == 1
+    assert gateway.bindings.count("S02") == 2
+    assert gateway.cooldowns == ["verifier"]
+    if still_unavailable:
+        assert result["status"] == "unavailable"
+        assert result["diagnostics"][-1]["codes"] == ["summary_upstream_unavailable"]
+        assert "narrative_review" not in result
+    else:
+        assert result["narrative_review"]["basis_sentences"]["S02"] is True
+
+
+@pytest.mark.asyncio
 async def test_full_date_spelling_is_normalized_before_fresh_semantic_review(summary_report):
     context = summary_context(summary_report)
     context["facts"]["C001"]["text"] += "校方于2025年07月03日发布通报。"

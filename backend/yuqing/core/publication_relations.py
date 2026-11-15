@@ -9,6 +9,19 @@ DOCUMENT_CREDIT = re.compile(
     r"(?:信息来源|文章来源|稿件来源|稿源|来源|转载自|转自)\s*[:：/|｜]\s*[^\n。；;]{2,100}"
 )
 INLINE_CITATION = re.compile(r"(?:另?据|援引|引述|引用)[^\n，,。；：:]{2,45}(?:消息|报道)[，,：:]")
+_COMBINED_CREDIT = re.compile(r"综合|整理自|[、，,]|等(?:媒体|报道)?$")
+
+
+def document_credit_publisher(quote: str) -> str | None:
+    """Read one explicit document credit, excluding composite bylines."""
+    match = DOCUMENT_CREDIT.match(quote.strip())
+    if not match:
+        return None
+    credit = re.split(r"[:：/|｜]", match.group(), maxsplit=1)[1].strip()
+    credit = re.split(r"[|｜（(]|\s*(?=20\d{2}[年-])", credit, maxsplit=1)[0].strip()
+    if not credit or _COMBINED_CREDIT.search(credit):
+        return None
+    return credit
 
 
 def inline_citation_passage(text: str, match: re.Match) -> str:
@@ -115,6 +128,15 @@ def relation_type_codes(edge: dict, by_id: dict) -> list[str]:
     )
     if edge.get("relation") == "repost" and not doc_credit:
         return ["repost_requires_document_credit"]
+    credit = DOCUMENT_CREDIT.match(quote.strip())
+    if edge.get("relation") == "repost" and credit:
+        publisher = document_credit_publisher(credit.group())
+        if publisher is None:
+            return ["repost_requires_single_document_credit"]
+        if original.get("identity_status") == "credited_source" and publisher == original.get(
+            "publisher"
+        ):
+            return ["credit_points_to_upstream_publisher"]
     if edge.get("relation") == "follow_up" and doc_credit and not inline_reference:
         return ["source_credit_is_not_follow_up"]
     return []

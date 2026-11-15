@@ -45,6 +45,38 @@ def edge(quote, relation):
 
 
 @pytest.mark.asyncio
+async def test_signed_repost_pairs_the_publisher_with_its_carrier_not_another_reprint():
+    quote = "文章来源：甲新闻网"
+    examples = sources(quote)
+    original, target = examples
+    target.update(
+        title=original["title"],
+        publisher="甲新闻网",
+        source_name="甲新闻网",
+        platform="乙报",
+        identity_status="credited_source",
+    )
+    target["excerpt_windows"].append(original["excerpt_windows"][0])
+    composite = {**target, "evidence_ref": "E003", "url": "https://third.example/composite"}
+    composite["excerpt_windows"] = [
+        "来源：甲新闻网综合自发行机构、其他媒体等",
+        original["excerpt_windows"][0],
+    ]
+
+    class Gateway:
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier":
+                return {"accepted": True}
+            return {"edges": []}
+
+    agent = OpenAIReportAgent(Gateway(), "fixture")
+    result = await agent.recover_relations([composite, target, original])
+    assert [(item["from_evidence_id"], item["to_evidence_id"]) for item in result] == [
+        ("E001", "E002")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_explicit_statement_citation_survives_mirrors_and_empty_model_draft():
     passage = "针对网络反映的制动安全问题，三个主管部门在前期调查工作基础上，联合成立调查组开展核查并依法依规处理，有关情况将及时公布。"
 

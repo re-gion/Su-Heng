@@ -114,6 +114,24 @@ def test_earlier_source_record_requires_extraction_instead_of_fabricating_node()
     assert earlier_event_candidates(facts, [source]) == []
 
 
+def test_personal_letters_hosted_by_an_official_site_do_not_block_chronology():
+    from types import SimpleNamespace
+
+    from yuqing.core.event_chronology import earlier_event_candidates
+
+    source = SimpleNamespace(
+        local_id="E001",
+        fetch_status="fetched",
+        extra={"scope_status": "event_context"},
+        content_text=(
+            "| 写信人 | | 写信时间 | 2026-04-21 |\n"
+            "| 信件内容 | 一份个人举报。2023年7月11日，当事人据称举报了有关情况。 |"
+        ),
+    )
+    facts = [fact("C001", "2023年10月11日，当事人发帖披露此事。")]
+    assert earlier_event_candidates(facts, [source]) == []
+
+
 def test_earlier_source_candidates_exclude_history_background_and_unfetched_text():
     from types import SimpleNamespace
 

@@ -49,6 +49,7 @@ SUMMARY_ERROR_LABELS = {
     "invalid_review": "摘要审查结果不完整或格式不符合要求",
     "budget_exhausted": "摘要写作或审查额度不足",
     "model_call_unavailable": "摘要写作或审查调用未完成",
+    "summary_upstream_unavailable": "摘要写作或审查遇到模型服务故障",
     "scope_review_incomplete": "摘要范围与隐私审查未完成或需要重新核验",
     "sentence_not_supported": "摘要中有句子未获所引材料支持",
     "coverage_gap": "摘要遗漏关键内容或后续关注",

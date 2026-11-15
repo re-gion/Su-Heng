@@ -1254,7 +1254,7 @@ class FullReportBuilder:
                 json.dumps(source_context, ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
             prior_relations = await self.database.checkpoint(task_id, "report:relations") or {}
-            relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v5")
+            relation_version = getattr(self.reporter, "RELATION_VERSION", "source-identity-v6")
             source_fingerprints = {
                 s["evidence_ref"]: hashlib.sha256(
                     json.dumps(s, ensure_ascii=False, sort_keys=True).encode()

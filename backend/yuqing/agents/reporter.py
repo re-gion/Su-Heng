@@ -37,6 +37,7 @@ from yuqing.core.llm.gateway import (
 from yuqing.core.publication_relations import (
     DOCUMENT_CREDIT,
     INLINE_CITATION,
+    document_credit_publisher,
     inline_citation_passage,
     prune_relation_conflicts,
     relation_type_codes,
@@ -45,8 +46,8 @@ from yuqing.core.publication_relations import (
 
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "question-led-v4"
-    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v9"
-    RELATION_VERSION = "source-identity-v5"
+    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v10"
+    RELATION_VERSION = "source-identity-v6"
 
     @staticmethod
     def _analysis_limit(context: dict[str, Any]) -> int:
@@ -151,11 +152,7 @@ class OpenAIReportAgent:
                     "diagnostics": [{"stage": "outline", "attempt": 1, "codes": errors}],
                 }
         except Exception as exc:
-            code = (
-                "budget_exhausted"
-                if isinstance(exc, LLMBudgetExhausted)
-                else "model_call_unavailable"
-            )
+            code = self._summary_failure_code(exc)
             return {
                 "status": "unavailable",
                 "diagnostics": [{"stage": "outline", "attempt": 1, "codes": [code]}],
@@ -320,14 +317,19 @@ class OpenAIReportAgent:
                 }
             except Exception as exc:
                 # Budget exhaustion, malformed review and upstream failures never publish a draft.
-                code = (
-                    "budget_exhausted"
-                    if isinstance(exc, LLMBudgetExhausted)
-                    else "model_call_unavailable"
-                )
+                code = self._summary_failure_code(exc)
                 diagnostics.append({"attempt": attempt + 1, "stage": stage, "codes": [code]})
                 return {"status": "unavailable", "diagnostics": diagnostics}
         return {"status": "rejected", "diagnostics": diagnostics}
+
+    @staticmethod
+    def _summary_failure_code(exc: Exception) -> str:
+        category = upstream_diagnostic(exc)["category"]
+        if category == "local_budget":
+            return "budget_exhausted"
+        if category in {"upstream_unavailable", "connection"}:
+            return "summary_upstream_unavailable"
+        return "model_call_unavailable"
 
     @logical_model_call("report_summary")
     async def _summary_outline(self, context: dict) -> dict:
@@ -512,6 +514,7 @@ class OpenAIReportAgent:
         # Each request sees one sentence only. A neighbouring sentence's sources
         # must not become an accidental substitute for this sentence's references.
         start = 0
+        retried_upstream = False
         while start < len(pending):
             width = 2
             limit = getattr(self.gateway, "token_limit", None)
@@ -529,13 +532,26 @@ class OpenAIReportAgent:
                 for _, sentence in batch
             ]
             try:
-                responses = await asyncio.gather(*tasks)
+                responses = await asyncio.gather(*tasks, return_exceptions=True)
             finally:
                 for task in tasks:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
             for (key, sentence), response in zip(batch, responses, strict=True):
+                if (
+                    isinstance(response, Exception)
+                    and self._summary_failure_code(response) == "summary_upstream_unavailable"
+                    and not retried_upstream
+                ):
+                    # The gateway has its own retries. Give one interrupted
+                    # binding an extra opportunity without redrafting the summary.
+                    retried_upstream = True
+                    if hasattr(self.gateway, "wait_for_recovery"):
+                        await self.gateway.wait_for_recovery("verifier")
+                    response = await self._summary_binding_review(context, sentence)
+                if isinstance(response, BaseException):
+                    raise response
                 valid = (
                     isinstance(response, dict)
                     and response.get("id") == sentence["id"]
@@ -824,7 +840,7 @@ class OpenAIReportAgent:
         """Attribution plus common source text produces leads, never approvals."""
         candidates, comparisons = [], 0
         seen = set()
-        for relation, pattern in (("follow_up", INLINE_CITATION), ("repost", DOCUMENT_CREDIT)):
+        for relation, pattern in (("repost", DOCUMENT_CREDIT), ("follow_up", INLINE_CITATION)):
             for target in sources:
                 windows = target.get("excerpt_windows", [target.get("excerpt", "")])
                 matches = (
@@ -842,13 +858,23 @@ class OpenAIReportAgent:
                         names = [original.get(key) for key in ("publisher_entity", "source_name")]
                         if relation == "follow_up":
                             names.extend(original.get("candidate_publisher_names", []))
-                        if not any(
-                            isinstance(name, str)
-                            and len(name) >= 3
-                            and name not in {"公开来源", "unknown"}
-                            and name in match.group()
-                            for name in names
-                        ):
+                            attributed = any(
+                                isinstance(name, str)
+                                and len(name) >= 3
+                                and name not in {"公开来源", "unknown"}
+                                and name in match.group()
+                                for name in names
+                            )
+                        else:
+                            credited = document_credit_publisher(match.group())
+                            attributed = (
+                                bool(credited)
+                                and credited in names
+                                and original.get("identity_status") != "credited_source"
+                                and target.get("publisher") == credited
+                                and bool(target.get("platform"))
+                            )
+                        if not attributed:
                             continue
                         if original.get("url") and original.get("url") == target.get("url"):
                             continue
