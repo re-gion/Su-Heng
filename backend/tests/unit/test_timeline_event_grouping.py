@@ -87,13 +87,36 @@ def test_fact_group_preserves_distinct_decimal_values_in_the_same_notice():
     assert len(groups) == 2
 
 
+def test_fact_group_folds_shortened_description_of_the_same_screening():
+    groups = fact_event_groups(
+        [
+            record(
+                "C001",
+                "甲大学2025年9月20日通报称，2024年4月送学术不端检测的硕士论文总文字复制比为1.9%，符合学院要求。",
+            ),
+            record(
+                "C002",
+                "甲大学2025年9月20日通报称，2024年4月送检的硕士论文总文字复制比为1.9%，符合其所在学院要求。",
+            ),
+            record(
+                "C003",
+                "甲大学2025年9月20日通报称，2024年4月送检的硕士论文总文字复制比为1.9%，不符合其所在学院要求。",
+            ),
+        ]
+    )
+    assert [[item["claim_ref"] for item in group] for group in groups] == [
+        ["C001", "C002"],
+        ["C003"],
+    ]
+
+
 def test_fact_group_resolves_same_day_notice_across_reposts():
     groups = fact_event_groups(
         [
             record("C001", "甲大学2025年9月20日发布通报称已组建工作组复核论文和处分。"),
             record("C002", "乙报2025年9月20日报道，甲大学当日通报称已组建工作组复核论文和处分。"),
             record(
-                "C003", "丙平台2025年9月20日发布乙报稿件，称甲大学通报已组建工作组复核论文和处分。"
+                "C003", "丙平台2025年9月20日发布乙报稿件称，甲大学通报已组建工作组复核论文和处分。"
             ),
             record("C004", "甲大学2025年9月20日另行发布通报称已组建工作组复核论文和处分。"),
         ]

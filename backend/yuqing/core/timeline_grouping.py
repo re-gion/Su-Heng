@@ -325,7 +325,7 @@ _PUBLISHED_MATERIAL = re.compile(
     r"(?P<reply>发布(?:了)?(?:情况说明|声明)|情况说明(?=称|载明|公布|显示)|(?:在回应中|回应|声明)(?=称)))"
 )
 _REPORTED = re.compile(
-    r"^(?:据)?[^，,。]{2,32}?(?:(?:综合)?报道(?:称|指出|显示)?|转载的|转述|稿件[，,]\s*(?:报道称|称))"
+    r"^(?:据)?[^，,。]{2,32}?(?:(?:综合)?报道(?:称|指出|显示)?|转载的|转述|稿件[，,]?\s*(?:报道称|称))"
     r"[，,\s]*"
 )
 _DIFFERENT_RELEASE = re.compile(r"另行|另一份|第二份|第二次|再次|补充通报|[《》]")
@@ -379,6 +379,7 @@ def publication_fact_key(parts: tuple[str, str, str, str]) -> str:
     detail = re.sub(r"([一二两三四五六七八九])(?:台|辆)", lambda m: counts[m[1]] + "辆", detail)
     detail = re.sub(r"(\d+)台", r"\1辆", detail)
     detail = re.sub(r"(制动)(?:测试)?(?:中|时)", r"\1", detail)
+    detail = re.sub(r"送(?:交)?(?:学术不端|重复率|相似度)检测", "送检", detail)
     detail = detail.replace("km/h至0的", "km/h至0")
     if re.match(r"\s*\d+辆", detail):
         detail = re.sub(r"(?<!平)均(?![值衡等匀数分])", "", detail)
