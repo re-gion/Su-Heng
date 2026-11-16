@@ -143,7 +143,7 @@ def publication_fact_identity(item: dict) -> tuple | None:
     parts = publication_reading_parts(text)
     date = explicit_event_date(text)
     if parts and date and parts[3]:
-        return ("publication_fact", date, *parts[:3], publication_fact_key(parts))
+        return ("publication_fact", date, *parts[:3], publication_fact_key(parts[3]))
     return None
 
 

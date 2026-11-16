@@ -369,3 +369,50 @@ def test_institutional_post_and_named_response_share_one_timeline_and_fact_group
         ["C001", "C002"],
         ["C003"],
     ]
+
+
+def test_same_disclosure_can_keep_added_evidence_details_without_another_event_card():
+    short = "2023年10月11日，一名女生发帖称，她同年7月在明川大学图书馆自习时，受到该校外语学院一名男生骚扰。"
+    precise = "2023年10月11日，一名女生在社交平台发帖称，她同年7月11日在明川大学图书馆自习时遭同校外语学院一名男生骚扰。"
+    details = "2023年10月11日，一名女生发帖称当年7月在明川大学图书馆自习时遭同校外语学院男生骚扰，并拍摄留取5段视频。"
+    conflicting_count = details.replace("5段", "2段")
+    other_institution = details.replace("同校外语学院", "海岭大学外语学院")
+    facts = [
+        fact(f"C{i:03d}", text, f"E{i:03d}")
+        for i, text in enumerate((short, precise, details, conflicting_count, other_institution), 1)
+    ]
+
+    timeline = timeline_reading_groups(event_timeline(facts))
+    assert [node["claim_refs"] for node in timeline] == [
+        ["C001", "C002", "C003"],
+        ["C004"],
+        ["C005"],
+    ]
+    assert timeline[0]["evidence_refs"] == ["E001", "E002", "E003"]
+    assert [[item["claim_ref"] for item in group] for group in fact_event_groups(facts)] == [
+        ["C001", "C002", "C003"],
+        ["C004"],
+        ["C005"],
+    ]
+
+
+def test_same_article_wording_and_named_video_are_grouped_without_losing_sources():
+    texts = (
+        "地方新闻网2026年10月17日发稿称，晚报当日专文分析，三部门联合调查明川V800踏板支架断裂事件的重点在于测试条件。",
+        "地方新闻网2026年10月17日报道称，晚报当日专文分析三部门联合调查明川V800踏板支架断裂的重点在于测试条件。",
+        "2026年10月8日，某汽车平台发布《明川V800刹车踏板支架》测试视频，称车辆100km/h至0紧急制动时支架断裂，三车断裂位置相同。",
+        "2026年10月8日上午，某汽车平台发布《明川V800刹车踏板支架》测试视频，称车辆在100km/h-0紧急制动测试中刹车踏板支架断裂。",
+    )
+    facts = [
+        fact(f"C{i:03d}", text, source)
+        for i, (text, source) in enumerate(
+            zip(texts, ("E001", "E001", "E002", "E003"), strict=True), 1
+        )
+    ]
+    timeline = timeline_reading_groups(event_timeline(facts))
+    assert [node["claim_refs"] for node in timeline] == [["C003", "C004"], ["C001", "C002"]]
+    assert timeline[0]["evidence_refs"] == ["E002", "E003"]
+    assert [[item["claim_ref"] for item in group] for group in fact_event_groups(facts)] == [
+        ["C003", "C004"],
+        ["C001", "C002"],
+    ]

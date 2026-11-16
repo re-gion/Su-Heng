@@ -101,7 +101,7 @@ async def test_unresolved_independent_case_is_formal_or_date_uncertain_reference
         history = next(block for block in report["blocks"] if block["type"] == "history_compare")
         if date_confirmed and has_background and not wrong_case_identity:
             assert len(history["cards"]) == 1
-            assert "未记载最终处理结果" in history["cards"][0]["outcome"]
+            assert "是否为最终处理仍待确认" in history["cards"][0]["outcome"]
             assert not history["reference_candidates"]
             tampered = copy.deepcopy(report)
             changed = next(b for b in tampered["blocks"] if b["type"] == "history_compare")

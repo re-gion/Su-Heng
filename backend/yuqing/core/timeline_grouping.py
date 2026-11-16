@@ -107,6 +107,8 @@ def _profile(node: dict) -> dict:
     normalized = _ROLE.sub("学生", content)
     normalized = re.sub(r"受到|遭到|遭受", "遭", normalized)
     normalized = normalized.replace("进行调查", "调查")
+    if kind == "发帖":
+        normalized = normalized.replace("同校", "该校")
     normalized = (
         normalized.replace("疑似为", "疑似").replace("事发当日", "当日").replace("涉事", "")
     )
@@ -120,9 +122,13 @@ def _profile(node: dict) -> dict:
         else "",
         "subjects": sorted(
             set(
-                re.sub(r"^(?:(?:一名|涉事)?学生在|称|据|在|由|于|至)+", "", name)
+                re.sub(
+                    r"^(?:受到|遭到|遭受|遭)?(?:同|该)校",
+                    "该校",
+                    re.sub(r"^(?:(?:一名|涉事)?学生在|称|据|在|由|于|至)+", "", name),
+                )
                 for name in re.findall(
-                    r"(?:^|[，,。；;]|在|由|于|至|称)([\u4e00-\u9fff]{2,18}?(?:大学|学院|医院|公司|学校))",
+                    r"(?:^|[，,。；;]|在|由|于|至|称|遭受|遭到|遭|受到)([\u4e00-\u9fff]{2,18}?(?:大学|学院|医院|公司|学校))",
                     without_date if direct_event else content,
                 )
             )
@@ -175,7 +181,16 @@ def _compatible(left: dict, right: dict, a: dict, b: dict) -> bool:
     if a["topic"] and b["topic"] and a["topic"] != b["topic"]:
         return False
     if a["subjects"] and b["subjects"] and a["subjects"] != b["subjects"]:
-        return False
+        left_subjects, right_subjects = set(a["subjects"]), set(b["subjects"])
+        relative_department = r"^(?:遭受|受到|遭到|遭)?(?:该|同)校.{2,20}(?:学院|系)$"
+        if not (
+            a["kind"] == b["kind"] == "发帖"
+            and (left_subjects < right_subjects or right_subjects < left_subjects)
+            and all(
+                re.match(relative_department, extra) for extra in left_subjects ^ right_subjects
+            )
+        ):
+            return False
     if a["object_genders"] and b["object_genders"] and a["object_genders"] != b["object_genders"]:
         return False
     if a["numbers"] and b["numbers"] and a["numbers"] != b["numbers"]:
@@ -206,6 +221,29 @@ def _same_event(left: dict, right: dict, a: dict, b: dict) -> bool:
         return False
     if a["text"] == b["text"]:
         return True
+    if (
+        not a["kind"]
+        and not b["kind"]
+        and a["negative"] == b["negative"]
+        and a["numbers"] == b["numbers"]
+        and set(left["evidence_refs"]) & set(right["evidence_refs"])
+        and _similar(a["text"], b["text"])
+    ):
+        return True
+    if (
+        a["kind"] == b["kind"] == "测试视频"
+        and a["title"]
+        and a["title"] == b["title"]
+        and a["actor"]
+        and a["actor"] == b["actor"]
+        and a["negative"] == b["negative"]
+        and a["numbers"] == b["numbers"]
+        and _similar(
+            publication_fact_key(left["text"]),
+            publication_fact_key(right["text"]),
+        )
+    ):
+        return True
     actors_match = a["actor"] == b["actor"] or bool(
         a["actor_root"]
         and b["actor_root"]
@@ -228,35 +266,34 @@ def _same_event(left: dict, right: dict, a: dict, b: dict) -> bool:
             and a["numbers"] == b["numbers"]
             and _similar(a["body"], b["body"])
         )
-    if (
-        a["negative"] == b["negative"]
-        and a["numbers"] == b["numbers"]
-        and (
-            _similar(a["body"], b["body"])
-            or (
-                a["kind"] == "发帖"
-                and min(len(a["body"]), len(b["body"])) >= 10
-                and sum(
-                    m.size
-                    for m in SequenceMatcher(
-                        None, a["body"], b["body"], autojunk=False
-                    ).get_matching_blocks()
-                )
-                >= 0.95 * min(len(a["body"]), len(b["body"]))
-                and SequenceMatcher(None, a["body"], b["body"], autojunk=False)
-                .find_longest_match()
-                .size
-                >= 5
-            )
-        )
-    ):
-        return True
+    if a["negative"] == b["negative"]:
+        if a["numbers"] == b["numbers"] and _similar(a["body"], b["body"]):
+            return True
+        if a["kind"] == "发帖" and _same_disclosure_wording(a, b):
+            return True
     return bool(
         a["document"]
         and b["document"]
         and set(left["evidence_refs"]) & set(right["evidence_refs"])
         and SequenceMatcher(None, a["body"], b["body"], autojunk=False).find_longest_match().size
         >= 8
+    )
+
+
+def _same_disclosure_wording(left: dict, right: dict) -> bool:
+    shorter = min(len(left["body"]), len(right["body"]))
+    matcher = SequenceMatcher(None, left["body"], right["body"], autojunk=False)
+    covered = sum(part.size for part in matcher.get_matching_blocks())
+    longest = matcher.find_longest_match().size
+    if left["numbers"] == right["numbers"]:
+        return shorter >= 10 and covered >= 0.95 * shorter and longest >= 5
+    # One account may add a count to the same disclosure. Conflicting counts
+    # stay separate; extra details require a substantial matching account.
+    return (
+        (not left["numbers"] or not right["numbers"])
+        and shorter >= 24
+        and covered >= 0.87 * shorter
+        and longest >= max(20, 0.65 * shorter)
     )
 
 
@@ -383,9 +420,9 @@ def publication_reading_parts(text: str) -> tuple[str, str, str, str] | None:
     return actor, kind, slot, detail
 
 
-def publication_fact_key(parts: tuple[str, str, str, str]) -> str:
+def publication_fact_key(text: str) -> str:
     """Normalize attribution and equivalent units in the displayed proposition only."""
-    detail = parts[3].casefold()
+    detail = text.casefold()
     detail = re.sub(
         r"(\d+(?:\.\d+)?)\s*km/h\s*(?:至|[-—~－])\s*(?:零|静止|0)(?:km/h)?"
         r"|(\d+(?:\.\d+)?)\s*[-—~－]\s*0\s*km/h",
@@ -408,7 +445,7 @@ def same_publication_fact(a: tuple[str, str, str, str], b: tuple[str, str, str, 
     """Keep the date and all decision, number and polarity markers while grouping."""
     if a[:3] != b[:3] or not a[3] or not b[3]:
         return False
-    left, right = publication_fact_key(a), publication_fact_key(b)
+    left, right = publication_fact_key(a[3]), publication_fact_key(b[3])
     if left == right:
         return True
     markers = (
@@ -465,5 +502,5 @@ def timeline_publication_details(item: dict) -> list[tuple[str, dict]]:
         if not parts or not parts[3]:
             details.setdefault(_compact(member["text"]), (member["text"], member))
             continue
-        details.setdefault(publication_fact_key(parts), (parts[3], member))
+        details.setdefault(publication_fact_key(parts[3]), (parts[3], member))
     return list(details.values())

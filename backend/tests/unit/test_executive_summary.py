@@ -1441,6 +1441,43 @@ async def test_outline_draft_and_reviews_omit_duplicate_quotes_but_digest_full_b
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("coverage_passes", [False, True])
+async def test_final_draft_can_remove_a_located_non_event_number_and_recheck_coverage(
+    summary_report, coverage_passes
+):
+    class FinalNumberGateway(Gateway):
+        drafts = 0
+        coverage_checks = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                if self.drafts < 4:
+                    result["paragraphs"][0]["sentences"] = []
+                else:
+                    result["paragraphs"][1]["sentences"].append(
+                        {
+                            "text": "本案已有999份申诉材料。",
+                            "kind": "fact",
+                            "claim_refs": ["C001"],
+                            "analysis_refs": [],
+                            "limitation_refs": [],
+                        }
+                    )
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.coverage_checks += 1
+                result["no_material_omission"] = coverage_passes
+            return result
+
+    gateway = FinalNumberGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+
+    assert gateway.drafts == 4 and gateway.coverage_checks == 1
+    assert (result.get("paragraphs") == paragraphs()) is coverage_passes
+
+
+@pytest.mark.asyncio
 async def test_exact_duplicates_do_not_consume_a_draft_before_full_review(summary_report):
     class RepeatedGateway(Gateway):
         drafts = 0

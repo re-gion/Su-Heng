@@ -1589,7 +1589,7 @@ class FullReportBuilder:
                     card.get("outcome") and card["outcome"] in fact["text"]
                     for fact in card.get("background_facts", [])
                 ):
-                    card["outcome"] = "截至调查时，本次已获支持陈述未记载最终处理结果"
+                    card["outcome"] = "已公开的处置见案例简介，是否为最终处理仍待确认"
                     card["dimensions"]["公开结果（来源记载）"] = card["outcome"]
                 ready_cards.append(card)
             else:

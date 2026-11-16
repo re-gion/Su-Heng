@@ -268,6 +268,7 @@ class OpenAIReportAgent:
             }
         writing_context = {**context, "summary_outline": outline}
         approved_bindings: set[str] = set()
+        rejected_drafts: set[str] = set()
         for attempt in range(SUMMARY_LIMITS["max_draft_attempts"]):
             stage = "generation"
             try:
@@ -396,10 +397,10 @@ class OpenAIReportAgent:
                         continue
                     pruned = (
                         self._remove_located_invalid_sentences(paragraphs, context, errors)
-                        if attempt == 1
+                        if attempt in {1, SUMMARY_LIMITS["max_draft_attempts"] - 1}
                         else None
                     )
-                    if pruned is None:
+                    if pruned is None or digest(pruned) in rejected_drafts:
                         continue
                     paragraphs = pruned
                     diagnostics.append(
@@ -441,6 +442,7 @@ class OpenAIReportAgent:
                     return await self._save_accepted_summary(
                         context, paragraphs, review, diagnostics=diagnostics, repaired=bool(attempt)
                     )
+                rejected_drafts.add(digest(paragraphs))
                 issues = review_issues(review, paragraphs)
                 codes = list(
                     dict.fromkeys(
@@ -1669,6 +1671,7 @@ class OpenAIReportAgent:
             "07优先回应已识别的争议与证据缺口，不能只写加强关注、统一口径等通用建议。"
             "06必须同时引用当前事件和历史案例的claim，写清相似机制、关键差异与适用边界；同一事件回顾不算历史对照。"
             "06围绕提供的一个历史案例和本案给出一条对照，集中说明最有借鉴价值的机制与边界。"
+            "相似机制中的每个具体步骤必须同时见于两案依据；只发生于一案的暂停、调查、复核或处置只能作为差异，标题也须符合。"
             "历史案例的介绍由已获支持的陈述回填，不在解释中补写未引用的背景；背景不足的线索不能进入启示或建议。"
             "每条围绕一个不同的可回答问题，解释须包含依据、可能机制及解释边界。"
             "04回答谁发布了什么、发布框架如何变化、具体回应缺口是什么；不重写处分与裁判的制度建议。"
@@ -1876,6 +1879,7 @@ class OpenAIReportAgent:
                 "propagation_edges为0时，是否仍把扩散、焦点转向或声誉成本写成已发生的效果，"
                 "是否把提交材料时间当受理时间，是否无传播数据却断言议题降温路径，"
                 "历史对照是否确为不同事件且说明关键差异，建议是否对应真实决策问题。"
+                "历史对照宣称两案共有的具体步骤须分别有两案依据；只出现在一案的动作不能写成两案共有，标题也须核对。"
                 "已完成核验不能写成未经核验；单源支持可以保留互证不足说明。"
                 "不得把不同程序的结论直接等同，或推定原处分违法；已完成处置不能重复建议立即执行。"
                 "核查本条有无问题、机制与影响的信息增量，是否只是复述事实或covered_analyses；"
