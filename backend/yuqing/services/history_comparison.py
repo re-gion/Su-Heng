@@ -5,19 +5,39 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Mapping
+from difflib import SequenceMatcher
 from typing import Any
 
 from yuqing.core.history_cards import historical_identity_issue
 
+_MODEL_IDENTIFIER = re.compile(r"(?<![a-z0-9])[a-z]{1,8}[ -]?\d[a-z0-9]*(?![a-z0-9])")
+
 
 def same_investigation_event(event_query: str, case_name: str) -> bool:
     def identity(label: str) -> str:
-        folded = unicodedata.normalize("NFKC", label).casefold()
-        compact = re.sub(r"[\W_]", "", folded)
+        compact = re.sub(r"[\W_]", "", label)
         return re.sub(r"(?:问题|事件|案件|舆情|争议)+$", "", compact)
 
-    topic, name = identity(event_query), identity(case_name)
-    return bool(topic) and (topic == name or len(topic) >= 6 and topic in name)
+    query, title = (
+        unicodedata.normalize("NFKC", value).casefold() for value in (event_query, case_name)
+    )
+    topic, name = identity(query), identity(title)
+    if not topic:
+        return False
+    if topic == name or len(topic) >= 6 and topic in name:
+        return True
+
+    def models(value: str) -> set[str]:
+        return {re.sub(r"[ -]", "", item) for item in _MODEL_IDENTIFIER.findall(value)}
+
+    # Shared concrete identifiers plus near-identical incident descriptions
+    # catch regional spelling and minor heading edits. Similarity alone does
+    # not reject an independent case involving another model.
+    return bool(
+        min(len(topic), len(name)) >= 10
+        and models(query) & models(title)
+        and SequenceMatcher(None, topic, name, autojunk=False).ratio() >= 0.72
+    )
 
 
 def independent_case_evidence(

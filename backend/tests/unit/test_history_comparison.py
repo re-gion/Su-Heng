@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from yuqing.core.history_cards import unique_history_cards
-from yuqing.services.history_comparison import independent_case_evidence
+from yuqing.services.history_comparison import independent_case_evidence, same_investigation_event
 
 
 def test_repeated_claims_about_one_case_make_one_card_with_all_refs():
@@ -105,6 +105,16 @@ def test_changing_the_event_suffix_does_not_create_a_historical_case():
     assert independent_case_evidence(
         item, {"E001": source(case["name"] + "。" + item.text)}, current, "2026-01-01"
     ) == {"E001"}
+
+
+def test_shared_product_and_close_action_words_reject_locale_variants_of_same_event():
+    assert same_investigation_event(
+        "示例B800刹车踏板支架断裂问题", "示例B800煞車踏板支架實測斷裂事件"
+    )
+    assert not same_investigation_event("示例B800刹车踏板支架断裂问题", "示例B800转向助力失效召回")
+    assert not same_investigation_event(
+        "示例B800刹车踏板支架断裂问题", "示例B700煞車踏板支架實測斷裂事件"
+    )
 
 
 def test_history_subject_must_belong_to_the_claim_not_another_entity_on_same_page():
