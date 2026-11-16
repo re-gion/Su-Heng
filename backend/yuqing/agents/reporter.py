@@ -521,6 +521,27 @@ class OpenAIReportAgent:
                         review = await self._summary_review(
                             writing_context, paragraphs, approved_bindings
                         )
+                if attempt + 1 == SUMMARY_LIMITS["max_draft_attempts"]:
+                    issues = review_issues(review, paragraphs)
+                    if {code for issue in issues for code in issue["codes"]} == {
+                        "summary_redundant"
+                    }:
+                        candidate = await self._repair_summary_repetition(
+                            {"previous_paragraphs": paragraphs, "review": review}, context
+                        )
+                        if candidate is not None and digest(candidate) not in rejected_drafts:
+                            diagnostics.append(
+                                {
+                                    "attempt": attempt + 1,
+                                    "stage": stage,
+                                    "codes": ["summary_redundant"],
+                                    "issues": issues,
+                                }
+                            )
+                            paragraphs = candidate
+                            review = await self._summary_review(
+                                writing_context, paragraphs, approved_bindings
+                            )
                 if review_accepted(review, paragraphs):
                     return await self._save_accepted_summary(
                         context, paragraphs, review, diagnostics=diagnostics, repaired=bool(attempt)

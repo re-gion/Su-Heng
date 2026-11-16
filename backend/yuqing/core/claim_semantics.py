@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import re
 
+UNDATED_NEWS_ATTRIBUTION = re.compile(
+    r"^(?:据)?[^，,。；;！？\n]{2,32}?(?:报道(?:称|指出|显示)?|转述(?:称)?|回顾(?:称)?)[，,]\s*"
+)
+
 
 def publication_actor(text: str) -> str | None:
     """Only recognize an explicit issuer followed by a publication action."""

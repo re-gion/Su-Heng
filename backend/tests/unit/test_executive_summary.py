@@ -1197,6 +1197,45 @@ async def test_summary_only_removes_located_redundancy_and_reviews_coverage_agai
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("coverage_passes", [True, False])
+async def test_last_draft_removes_reviewed_redundancy_without_another_draft(
+    summary_report, coverage_passes
+):
+    class GatewayWithLateRepeat(Gateway):
+        drafts = 0
+        checks = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                p = result["paragraphs"][0]
+                if self.drafts < 4:
+                    p["sentences"] = []
+                else:
+                    p["sentences"].append(
+                        {**p["sentences"][0], "text": "学校公开说明称，已受理该诉求。"}
+                    )
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.checks += 1
+                current = json.loads(prompt.split("\n", 1)[1])["paragraphs"]
+                result = approval(current)
+                if self.checks == 1:
+                    result.update(
+                        non_redundant=False, duplicate_pairs=[{"keep": "S01", "remove": "S02"}]
+                    )
+                else:
+                    result["no_material_omission"] = coverage_passes
+            return result
+
+    gateway = GatewayWithLateRepeat()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+
+    assert gateway.drafts == 4 and gateway.checks == 2
+    assert (result.get("paragraphs") == paragraphs()) is coverage_passes
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("still_unavailable", [False, True])
 async def test_summary_resumes_the_failed_binding_after_transient_gateway_error(
     summary_report, still_unavailable

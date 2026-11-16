@@ -450,3 +450,17 @@ def test_timeline_can_fold_one_disclosure_with_additional_demands_without_hiding
     assert [node["claim_refs"] for node in result] == [["C001", "C002", "C003"], ["C004"]]
     assert [item["text"] for item in result[0]["related_claims"]] == [short, longer, retelling]
     assert result[0]["evidence_refs"] == ["E001", "E002", "E003"]
+
+
+def test_undated_media_credits_do_not_duplicate_a_first_disclosure():
+    short = "据媒体回顾，2023年10月11日明川大学一名女生发文称在实训室准备器材时遭男同学推搡。"
+    fuller = "据地方日报报道，2023年10月11日下午一名女生在社交平台发帖称，当年7月在明川大学实训室准备器材时遭同校一名男生推搡。"
+    later = "地方日报2025年9月20日报道，回顾2023年10月11日的发帖并披露后续复核结果。"
+    facts = [
+        fact(f"C{i:03d}", text, f"E{i:03d}") for i, text in enumerate((short, fuller, later), 1)
+    ]
+
+    groups = timeline_reading_groups(event_timeline(facts))
+
+    assert [node["claim_refs"] for node in groups] == [["C001", "C002"], ["C003"]]
+    assert [node["date"] for node in groups] == ["2023-10-11", "2025-09-20"]

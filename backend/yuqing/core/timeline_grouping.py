@@ -5,14 +5,16 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from yuqing.core.claim_semantics import publication_actor
+from yuqing.core.claim_semantics import UNDATED_NEWS_ATTRIBUTION, publication_actor
 
 _DATE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 _ACTION = re.compile(r"发布|公布|发文|发帖|作出|成立|启动|宣布|提交|提起")
 _DOCUMENT = re.compile(r"测试视频|检测报告|测试报告|情况说明|通报|声明|评测|测评|判决|裁定")
 _POST_DOCUMENT = re.compile(r"(?:自述|求助|公开)?(?:文章|帖文|帖子)")
 _INCIDENT_DATE = re.compile(r"(?P<year>\d{4})年(?P<month>\d{1,2})月(?:(?P<day>\d{1,2})日)?")
-_ROLE = re.compile(r"(?:该校|同校)?(?:一名|涉事|当事)?(?:女学生|男学生|女生|男生|学生)")
+_ROLE = re.compile(
+    r"(?:该校|同校)?(?:一名|涉事|当事)?(?:女学生|男学生|女同学|男同学|女生|男生|学生)"
+)
 _NUMBER = re.compile(
     r"\d+(?:\.\d+)?(?:\s*(?:km/h|mm|N|%|％|台|次|人|份|辆|项))?"
     r"|[零〇一二两三四五六七八九十百千万亿]+(?:台|次|人|份|辆|项|部门)"
@@ -25,6 +27,9 @@ def _compact(text: str) -> str:
 
 def _profile(node: dict) -> dict:
     text = node["text"]
+    attribution = UNDATED_NEWS_ATTRIBUTION.match(text)
+    if attribution and _DATE.match(text, attribution.end()):
+        text = text[attribution.end() :]
     dated = _DATE.search(text)
     timing = (
         re.match(r"\s*(上午|下午|晚间|夜间|晚|\d{1,2}时)", text[dated.end() :]) if dated else None
@@ -85,8 +90,8 @@ def _profile(node: dict) -> dict:
         kind = "发帖"
         if post_document:
             content = body[post_document.end() :]
-        female = re.search(r"女生|女学生", actor)
-        male = re.search(r"男生|男学生", actor)
+        female = re.search(r"女生|女学生|女同学", actor)
+        male = re.search(r"男生|男学生|男同学", actor)
         if female or male:
             institution = re.match(r"(.{2,30}?(?:大学|学院|学校))", actor)
             actor = (institution[1] if institution else "") + ("女生" if female else "男生")
@@ -136,7 +141,7 @@ def _profile(node: dict) -> dict:
         "object_genders": sorted(
             {
                 "女" if "女" in role else "男"
-                for role in re.findall(r"女学生|男学生|女生|男生", content)
+                for role in re.findall(r"女学生|男学生|女同学|男同学|女生|男生", content)
             }
         ),
         "kind": kind,
