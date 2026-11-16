@@ -2,6 +2,8 @@
 
 本文给出单台 Linux 服务器运行舆情 Agent 的 Compose 部署步骤，不要求把整个代码仓库放到服务器。日常生产发布更适合“构建带版本号的镜像并推送到镜像仓库，服务器拉取后启动”；第一次练习或偶尔更新也可以用 `docker save` + SCP + `docker load`，不必先开镜像仓库。把源码传到服务器再构建也能运行，但会让服务器依赖 Node、Python、apt 等构建环境和下载网络，不作为本教程的默认发布方式。本教程先演示免仓库的镜像归档方式，再列出镜像仓库步骤。它适合作为首版测试环境，不是高可用方案，也不代表公网开放前的全部产品与合规准备已完成。
 
+服务器已经在运行时，从[更新与数据保护](#更新与数据保护)开始。
+
 ## 先确认公开上线条件
 
 若服务器选择新加坡、曼谷等中国大陆以外地域，腾讯云当前说明可直接解析域名，通常无需为该境外实例办理大陆 ICP 备案；若之后迁到中国大陆地域，则需先完成备案。境外部署不代表自动免除其他适用要求：个人信息保护法也适用于以向境内自然人提供产品或服务为目的、在境外处理其个人信息的情形。项目面向中国大陆用户处理邮箱、账号和研究任务数据，公开开放前仍需完成隐私说明、服务条款、数据保存和投诉处理等准备。以办理时腾讯云与主管部门的最新要求为准。
@@ -38,7 +40,8 @@
 先在本机 Windows 工作区构建新镜像。确保代码已更新到准备部署的版本后，在项目根目录运行：
 
 ```powershell
-docker build -t opc-agent-app:production .
+$revision = git rev-parse HEAD
+docker build --platform linux/amd64 --build-arg "VCS_REF=$revision" -t opc-agent-app:production .
 docker pull caddy:2.10-alpine
 docker image inspect opc-agent-app:production --format '{{.Os}}/{{.Architecture}}'
 $archive = Join-Path $env:TEMP 'opc-agent-deploy-images.tar'
@@ -76,12 +79,17 @@ nano .env.production
 
 如果希望以后从服务器直接拉取新版本，推荐改用 Docker Hub 或腾讯云 TCR 的镜像仓库。这是把构建与服务器运行分开的常见发布方式，Docker 官方也以“构建、打标签、推送到仓库”作为共享镜像的发布流程。镜像仓库不是 Compose 运行所必需的，它只负责分发镜像；使用 tar/SCP 时可以不配置它。
 
-如果选择 Docker Hub，先在本机登录并推送一个固定版本标签：
+如果选择 Docker Hub，从已提交且与构建输入一致的工作区发布。用 Git 短提交号区分每次构建，镜像标签内另记完整提交号。下面以本项目维护者的镜像仓库为例，自部署维护者可换成自己的仓库。
 
 ```powershell
+$revision = git rev-parse HEAD
+$shortRevision = git rev-parse --short=7 HEAD
+$image = "docker.io/regionyj0906/opc-yuqing-agent-app:0.3.0-$shortRevision"
+docker build --platform linux/amd64 --build-arg "VCS_REF=$revision" -t $image .
+if ($LASTEXITCODE -ne 0) { throw '镜像构建失败' }
+docker image inspect $image --format '{{.Os}}/{{.Architecture}} {{ index .Config.Labels "org.opencontainers.image.revision" }}'
 docker login
-docker tag opc-agent-app:production YOUR_DOCKERHUB_NAME/yuqing-agent:0.3.0
-docker push YOUR_DOCKERHUB_NAME/yuqing-agent:0.3.0
+docker push $image
 ```
 
 然后在服务器登录镜像仓库（私有仓库需要登录），并在 `.env.production` 中将 `YUQING_APP_IMAGE` 改为相同地址。版本标签建议每次发布都换一个，不要反复覆盖同一个版本号。服务器拉取 app 镜像后，Compose 启动时还会按需拉取 `caddy:2.10-alpine`：
@@ -132,13 +140,122 @@ sudo docker compose --env-file .env.production -f compose.production.yml logs --
 
 ## 更新与数据保护
 
-代码更新后，在本机从经审查的版本重新构建镜像，再用 `docker save`/SCP/`docker load` 传入服务器；或者推送新版本到镜像仓库、更新 `YUQING_APP_IMAGE` 并先拉取新镜像。部署目录不需要完整源代码。准备好新镜像后运行：
+以下步骤适用于已经运行的单机生产服务。使用现有部署目录和原来的 Compose 项目名，否则 Compose 会创建新的命名卷，应用可能显示空数据。示例用 `/opt/opc-agent`，`sudo -i` 后在同一个 Bash 会话执行。选没有调查任务运行的时间窗口。应用停止后无法接收请求，新版健康检查通过后恢复服务。
+
+### 1. 核对当前服务并提前拉取
 
 ```bash
-sudo docker compose --env-file .env.production -f compose.production.yml up -d
+cd /opt/opc-agent
+dc() { docker compose --env-file .env.production -f compose.production.yml "$@"; }
+dc config -q
+dc ps
+uname -m
+df -h / /var/lib/docker
 ```
 
-数据库、报告和证据快照都保存在 `yuqing-data` 命名卷中。`docker compose down` 会停止容器但保留该卷；不要使用 `down -v`，除非明确要删除全部持久数据。上线前设置并演练该卷的定期异机备份与恢复。Caddy 的证书状态也由命名卷保存。
+确认 `dc ps` 列出当前的 `app` 和 `gateway`。若当时用 `-p` 指定了项目名，在 `dc` 中加回同一个 `-p` 参数。先确认 Docker 存储目录和备份目录有足够空间，再使用发布时给出的完整镜像地址替换下方标签。如果拿到的是镜像归档，用 `docker load -i 文件名.tar` 载入，将 `release` 设为归档里的镜像标签并跳过 `docker pull`。
+
+```bash
+release='docker.io/regionyj0906/opc-yuqing-agent-app:0.3.0-替换为发布提交号'
+docker pull "$release"
+docker image inspect "$release" --format '{{.Os}}/{{.Architecture}} {{ index .Config.Labels "org.opencontainers.image.revision" }}'
+```
+
+### 2. 保存现有配置、镜像和业务数据
+
+先保存旧配置和旧镜像的本地标签。归档可能包含用户数据和服务密钥，应放在仅管理员可读的目录。Caddy 的 HTTPS 状态继续由现有命名卷保存。
+
+```bash
+umask 077
+backup=$(mktemp -d /root/opc-agent-backup.XXXXXXXX)
+old_app=$(dc ps -q app)
+old_image=$(docker inspect "$old_app" --format '{{.Image}}')
+data_volume=$(docker inspect "$old_app" --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}')
+rollback_image="opc-agent-app:rollback-${backup##*.}"
+docker image tag "$old_image" "$rollback_image"
+cp .env.production compose.production.yml deploy/Caddyfile.production "$backup/"
+printf '%s\n' "$rollback_image" > "$backup/rollback-image"
+printf '备份目录 %s，业务数据卷 %s\n' "$backup" "$data_volume"
+```
+
+核对输出中的数据卷名称和备份目录。编辑现有 `.env.production`，把 `YUQING_APP_IMAGE` 改为上一步拉取的地址，保留现有域名、会话密钥、SMTP、白名单及其他生产配置。然后停应用并备份整个数据卷。停机可以同时保护 SQLite 和关联的报告、证据快照；如果归档失败，命令会尝试启动原应用容器。
+
+```bash
+nano .env.production
+```
+
+```bash
+(
+  set -e
+  test -n "$data_volume"
+  test -s "$backup/.env.production"
+  test -s "$backup/rollback-image"
+  dc config -q
+  test "$(dc config --images app)" = "$release"
+  docker image inspect "$release" > /dev/null
+  trap 'dc start app' EXIT
+  dc stop -t 30 app
+  docker run --rm --network none --user 0:0 \
+    --mount "type=volume,source=$data_volume,target=/app/data,readonly" \
+    --entrypoint tar "$rollback_image" -C /app/data -czf - . > "$backup/yuqing-data.tar.gz"
+  tar -tzf "$backup/yuqing-data.tar.gz" > /dev/null
+  trap - EXIT
+)
+```
+
+### 3. 启动新版并验收
+
+上一步成功后再执行。单独更新 `app`，继续使用当前的 Caddy、域名和预览口令。若另外安排了 Compose 或 Caddy 配置变更，先在服务器比较差异和校验配置。仓库里的 Caddyfile 是部署模板，服务器使用自定义预览口令时要保留对应的认证配置。
+
+```bash
+dc up -d --no-deps --pull never --wait --wait-timeout 120 app
+dc ps
+dc logs --tail=80 app
+docker inspect "$(dc ps -q app)" --format '{{.Config.Image}} {{ index .Config.Labels "org.opencontainers.image.revision" }} {{.State.Health.Status}}'
+```
+
+确认 `app` 是 `healthy`，提交号匹配后，从站点访问 `/api/health`。若 Caddy 启用了预览口令，在浏览器通过认证后检查。登录原有账号，打开历史台账和一份旧专报，再跑一项快速任务，检查搜索和报告能否正常完成。
+
+### 4. 需要时回退
+
+若旧版能读取当前业务卷，恢复备份的 `.env.production`，把镜像地址改为保存的本地回退标签，再重建 `app`。如新版已经写过数据，先确认旧版能读取这些数据。
+
+```bash
+cat "$backup/rollback-image"
+cp "$backup/.env.production" .env.production
+nano .env.production
+dc up -d --no-deps --pull never --wait --wait-timeout 120 app
+dc ps
+```
+
+若要恢复升级前的数据，先按上方步骤将 `.env.production` 指向回退镜像，然后直接执行下面这段命令。命令将备份解包到一个新卷，再启动旧版应用。保留原卷，以便核对或补回发布后产生的数据。
+
+```bash
+(
+  set -e
+  rollback_image=$(cat "$backup/rollback-image")
+  test "$(dc config --images app)" = "$rollback_image"
+  restored_volume="opc-agent-restored-${backup##*.}"
+  if docker volume inspect "$restored_volume" > /dev/null 2>&1; then
+    echo "恢复卷已存在，请先核对该卷。"
+    exit 1
+  fi
+  docker volume create "$restored_volume"
+  docker run --rm -i --network none --user 0:0 \
+    --mount "type=volume,source=$restored_volume,target=/app/data" \
+    --entrypoint tar "$rollback_image" -C /app/data -xzf - < "$backup/yuqing-data.tar.gz"
+  cat > "$backup/compose.restored-data.yml" <<EOF
+volumes:
+  yuqing-data:
+    external: true
+    name: $restored_volume
+EOF
+  dc -f "$backup/compose.restored-data.yml" config -q
+  dc -f "$backup/compose.restored-data.yml" up -d --no-deps --pull never --wait --wait-timeout 120 app
+)
+```
+
+恢复后继续为 Compose 命令传入这个覆盖文件，直到将已恢复卷登记到生产 Compose 中。更新期间避免运行 `docker compose down -v`，该命令会删除项目管理的命名卷。[Docker 数据卷备份和恢复](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes)
 
 ## 当前验收边界
 
