@@ -573,6 +573,62 @@ async def test_missing_history_can_recover_once_before_assembling_the_report(run
 
 
 @pytest.mark.asyncio
+async def test_history_fetch_tries_next_case_when_top_case_has_no_fetchable_sources(runtime_dir):
+    db, task, runner, _, _ = await setup_recovery(runtime_dir)
+    try:
+        sources, claims, fetched = {}, [], []
+        for index, (institution, description, captured) in enumerate(
+            (("乙校", "图书馆事件复核", True), ("丙校", "考试处分复核", False))
+        ):
+            text = f"{institution}{description}，公开材料记载处分已撤销。"
+            evidence = await db.add_evidence(
+                EvidenceCreate(
+                    task_id=task.id,
+                    url=f"https://history{index}.example/notice",
+                    title=text,
+                    snippet=text,
+                    fetch_status="fetched" if captured else "discovered",
+                    content_text=text if captured else None,
+                    fetched_at="2026-01-01" if captured else None,
+                    snapshot_path="history.html" if captured else None,
+                    content_sha256="history" if captured else None,
+                    published_at="2025-04-15",
+                    extra={"scope_status": "history", "date_provenance": "search_provider"},
+                )
+            )
+            sources[evidence.local_id] = evidence
+            claims.append(
+                SimpleNamespace(
+                    agent="history_insight",
+                    verdict="support",
+                    text=text,
+                    evidence_ids=[evidence.local_id],
+                    analysis_data={
+                        "historical_case": {
+                            "name": institution + description,
+                            "institution": institution,
+                            "independent": True,
+                            "similarity": description,
+                            "difference": "机构与原决定不同",
+                        }
+                    },
+                )
+            )
+
+        async def fetch(record, **_kwargs):
+            fetched.append(record.local_id)
+            return record
+
+        runner._fetch_once = fetch
+        runner.agents["history_insight"] = SimpleNamespace()
+        await runner._fetch_history_case_leads(task, claims, sources)
+        await runner._fetch_history_case_leads(task, claims, sources)
+        assert fetched == [claims[1].evidence_ids[0]]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sealed", [False, True])
 async def test_captured_source_date_can_be_recovered_without_refetch_or_claim_changes(
     runtime_dir, sealed

@@ -820,7 +820,12 @@ class V1Orchestrator:
 
     async def _fetch_history_case_leads(self, task, claims, evidence_by_id) -> None:
         key = "report:history_case_sources"
-        if "history_insight" not in self.agents or await self.database.checkpoint(task.id, key):
+        if "history_insight" not in self.agents:
+            return
+        checkpoint = await self.database.checkpoint(task.id, key) or {}
+        attempted = checkpoint.get("refs", [])
+        remaining = 2 - len(attempted)
+        if remaining <= 0:
             return
         topic = task.resolved_event_query or task.event_query
         by_case: dict[str, dict] = {}
@@ -830,6 +835,11 @@ class V1Orchestrator:
             refs = independent_case_evidence(
                 claim, evidence_by_id, topic, task.created_at, require_confirmed_date=False
             )
+            refs = {
+                ref
+                for ref in refs
+                if ref not in attempted and self.evidence.needs_direct_fetch(evidence_by_id[ref])
+            }
             if not refs:
                 continue
             case = claim.analysis_data["historical_case"]
@@ -843,21 +853,17 @@ class V1Orchestrator:
             return
         best = max(by_case.values(), key=lambda item: (item["rank"], len(item["references"])))
         leads = sorted(
-            (
-                evidence_by_id[ref]
-                for ref in best["references"]
-                if self.evidence.needs_direct_fetch(evidence_by_id[ref])
-            ),
+            (evidence_by_id[ref] for ref in best["references"]),
             key=lambda source: (
                 source.source_role != "authority",
                 source.source_tier or 9,
                 source.local_id,
             ),
-        )[:2]
-        if not leads:
-            return
+        )[:remaining]
         await self.database.save_checkpoint(
-            task.id, key, {"phase": "verified", "refs": [lead.local_id for lead in leads]}
+            task.id,
+            key,
+            {"phase": "verified", "refs": [*attempted, *(lead.local_id for lead in leads)]},
         )
         scope = InvestigationScope(
             event_query=topic,
@@ -1110,6 +1116,12 @@ class V1Orchestrator:
                     {"phase": "verified", "spent": retry_spent},
                 )
             await self.verification.verify_claim(claim, reuse_completed=retry_incomplete)
+        if "history_insight" in goals:
+            await self._fetch_history_case_leads(
+                task,
+                await self.database.list_claims(task_id),
+                {item.local_id: item for item in await self.database.list_evidence(task_id)},
+            )
         await self._repair_history_comparison(task_id)
 
     async def _repair_history_comparison(self, task_id: str, *, allow_new_case=False) -> None:
