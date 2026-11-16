@@ -2190,26 +2190,22 @@ class FullReportBuilder:
             await self._review_publication_network(
                 task, reviewed, evidence, evidence, retry_empty=True
             )
-            old_nodes = {node["evidence_id"] for node in network["nodes"]}
-            if (
-                reviewed["edges"]
-                and len(reviewed["nodes"]) >= 2
-                and (
-                    not scope_required
-                    or await self._scope_report_is_safe(
-                        {
-                            "nodes": [
-                                node
-                                for node in reviewed["nodes"]
-                                if node["evidence_id"] not in old_nodes
-                            ],
-                            "edges": reviewed["edges"],
-                        }
-                    )
+            recovery_scope = {}
+            if scope_required and reviewed["edges"]:
+                reviewed, recovery_scope = await self._screen_recovered_network(
+                    task, candidate, reviewed
                 )
-            ):
+            if reviewed and reviewed["edges"] and len(reviewed["nodes"]) >= 2:
                 network.update(reviewed)
                 self._activate_reviewed_publication(network, blocks["limitations"])
+                if recovery_scope.get("rejected_texts") or recovery_scope.get("incomplete_texts"):
+                    blocks["limitations"]["items"].append(
+                        {
+                            "id": "L_SCOPE_RELATION_RECOVERY",
+                            "category": "范围与隐私审查",
+                            "text": "传播关系补审只展示通过范围与隐私检查的发布记录和关系，部分候选材料未纳入。",
+                        }
+                    )
                 missing.remove("media_propagation")
                 new_relations = True
 
@@ -2235,6 +2231,24 @@ class FullReportBuilder:
             refresh_summary_release(candidate)
         prune_citation_backlinks(candidate)
         return validate_report(candidate).report
+
+    async def _screen_recovered_network(self, task, report, network):
+        if self.scope_reviewer is None:
+            return None, {}
+        snapshot = {
+            "task": dict(report["task"]),
+            "blocks": [network],
+            "metrics": report["metrics"],
+            "quality": {"release_label": report["quality"]["release_label"]},
+        }
+        self._hide_scoped_source_text(snapshot)
+        await self._retain_reviewed_blocks(snapshot, task)
+        if "media_propagation" in snapshot["quality"].get("release_gate_missing", []):
+            return None, snapshot["quality"]["scope_review"]
+        return (
+            next((b for b in snapshot["blocks"] if b["type"] == "propagation_network"), None),
+            snapshot["quality"]["scope_review"],
+        )
 
     async def _retry_action_review(self, task, candidate, blocks, scope_required):
         if scope_required and self.scope_reviewer is None:

@@ -268,6 +268,81 @@ async def test_scope_rejection_affects_gate_only_for_reviewed_publication_edges(
 
 
 @pytest.mark.asyncio
+async def test_relation_recovery_keeps_safe_edges_and_drops_unapproved_source_text(
+    analytical_report, runtime_dir, monkeypatch
+):
+    report = copy.deepcopy(analytical_report[0])
+    report["quality"]["release_gate_missing"] = ["media_propagation", "executive_summary"]
+    appendix = next(b for b in report["blocks"] if b["type"] == "evidence_appendix")
+    for ref in ("E002", "E003"):
+        appendix["items"].append({**appendix["items"][0], "evidence_ref": ref, "citations": []})
+    task = SimpleNamespace(id="fixture", investigation_scope="public_event")
+
+    class DatabaseStub:
+        async def get_task(self, _task_id):
+            return task
+
+        async def list_evidence(self, _task_id):
+            return []
+
+    class Reviewer:
+        def bind(self, *_args):
+            pass
+
+        async def review(self, texts, **_kwargs):
+            return [
+                SimpleNamespace(
+                    allowed=text not in {"待隐私审查的来源", "尚未公开审查的原文"},
+                    status="rejected"
+                    if text in {"待隐私审查的来源", "尚未公开审查的原文"}
+                    else "accepted",
+                    text=text,
+                    diagnostic=None,
+                )
+                for text in texts
+            ]
+
+        async def accepted(self, texts, **kwargs):
+            return [d.allowed for d in await self.review(texts, **kwargs)]
+
+    builder = FullReportBuilder(
+        DatabaseStub(),
+        runtime_dir,
+        reporter=SimpleNamespace(recover_relations=True),
+        scope_reviewer=Reviewer(),
+    )
+
+    async def recover(_task, network, *_args, **_kwargs):
+        network["nodes"] = [
+            {
+                "evidence_id": ref,
+                "framing": "待隐私审查的来源" if ref == "E003" else "公开发布",
+                "evidence_refs": [ref],
+            }
+            for ref in ("E001", "E002", "E003")
+        ]
+        network["edges"] = [
+            {
+                "from_evidence_id": "E001",
+                "to_evidence_id": ref,
+                "review_status": "accepted",
+                "relation": "follow_up",
+                "quote": "尚未公开审查的原文",
+            }
+            for ref in ("E002", "E003")
+        ]
+
+    monkeypatch.setattr(builder, "_review_publication_network", recover)
+    result = await builder.retry_missing_reviews("fixture", report, review_summary=False)
+
+    assert "media_propagation" not in result["quality"]["release_gate_missing"]
+    network = next(b for b in result["blocks"] if b["type"] == "propagation_network")
+    assert [node["evidence_id"] for node in network["nodes"]] == ["E001", "E002"]
+    assert [edge["to_evidence_id"] for edge in network["edges"]] == ["E002"]
+    assert network["edges"][0].get("quote") is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("has_safe_case", [False, True])
 async def test_history_review_keeps_only_approved_cards(
     analytical_report, runtime_dir, has_safe_case
