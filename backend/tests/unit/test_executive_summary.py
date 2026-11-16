@@ -1507,6 +1507,27 @@ async def test_exact_duplicates_do_not_consume_a_draft_before_full_review(summar
 
 
 @pytest.mark.asyncio
+async def test_exact_duplicate_across_roles_is_removed_before_review(summary_report):
+    class RepeatedGateway(Gateway):
+        drafts = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                original = result["paragraphs"][0]["sentences"][0]
+                result["paragraphs"][1]["sentences"].append(copy.deepcopy(original))
+            return result
+
+    gateway = RepeatedGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+
+    assert gateway.drafts == 1
+    assert result["paragraphs"] == paragraphs()
+    assert review_accepted(result["narrative_review"], result["paragraphs"])
+
+
+@pytest.mark.asyncio
 async def test_long_draft_gets_exact_length_and_binding_feedback_in_one_repair(summary_report):
     class LongGateway(Gateway):
         drafts = 0

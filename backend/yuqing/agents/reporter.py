@@ -123,8 +123,8 @@ class OpenAIReportAgent:
         paragraphs: list[dict], context: dict
     ) -> list[dict] | None:
         candidate = []
+        seen = set()
         for paragraph in paragraphs:
-            seen = set()
             sentences = []
             for sentence in paragraph["sentences"]:
                 key = digest(sentence)

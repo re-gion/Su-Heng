@@ -701,6 +701,7 @@ def paragraph_issues(
         return []
     issues = []
     located = set()
+    seen_sentences = set()
     total = count = 0
     if isinstance(paragraphs, list):
         for pi, paragraph in enumerate(paragraphs):
@@ -716,6 +717,11 @@ def paragraph_issues(
                     require_roles=False,
                     number_policy=number_policy,
                 )
+                if isinstance(sentence, dict) and isinstance(sentence.get("text"), str):
+                    normalized = re.sub(r"\W", "", sentence["text"])
+                    if normalized in seen_sentences and "duplicate_sentence" in errors:
+                        codes.append("duplicate_sentence")
+                    seen_sentences.add(normalized)
                 if codes:
                     issues.append({"path": f"paragraphs[{pi}].sentences[{si}]", "codes": codes})
                     located.update(codes)
