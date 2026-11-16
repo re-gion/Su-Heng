@@ -117,6 +117,11 @@ def test_shared_product_and_close_action_words_reject_locale_variants_of_same_ev
     )
 
 
+def test_a_component_alias_and_shorter_title_do_not_make_a_second_case():
+    assert same_investigation_event("示例B800刹车支架断裂", "示例汽车B800制动踏板支架底座争议")
+    assert not same_investigation_event("示例B800刹车支架断裂", "示例汽车B800制动助力器失效召回")
+
+
 def test_history_subject_must_belong_to_the_claim_not_another_entity_on_same_page():
     case = {
         "name": "中央食品办公室约谈明川大学事件",

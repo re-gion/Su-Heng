@@ -30,13 +30,19 @@ def same_investigation_event(event_query: str, case_name: str) -> bool:
     def models(value: str) -> set[str]:
         return {re.sub(r"[ -]", "", item) for item in _MODEL_IDENTIFIER.findall(value)}
 
+    def product_event(value: str) -> str:
+        value = re.sub(r"刹车|剎車|煞車|煞车|制動", "制动", value)
+        value = re.sub(r"制动(?:踏板)?支架(?:底座)?", "制动支架", value)
+        return value.replace("汽车", "").replace("汽車", "")
+
     # Shared concrete identifiers plus near-identical incident descriptions
     # catch regional spelling and minor heading edits. Similarity alone does
     # not reject an independent case involving another model.
     return bool(
         min(len(topic), len(name)) >= 10
         and models(query) & models(title)
-        and SequenceMatcher(None, topic, name, autojunk=False).ratio() >= 0.72
+        and SequenceMatcher(None, product_event(topic), product_event(name), autojunk=False).ratio()
+        >= 0.72
     )
 
 
