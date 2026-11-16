@@ -155,12 +155,66 @@ class OpenAIReportAgent:
                     return cached
         return {}
 
+    async def review_redacted_summary(self, context: dict, original: dict, paragraphs: list[dict]):
+        """Check changed language against its own evidence and reassess the whole narrative."""
+        previous = original["paragraphs"]
+        approval = original["narrative_review"]
+        if (
+            not review_accepted(approval, previous)
+            or approval.get("content_digest") != digest(previous)
+            or approval.get("basis_digest") != digest(context)
+            or check_paragraphs(
+                paragraphs, context, require_headings=True, number_policy=NUMBER_POLICY
+            )
+        ):
+            return {}
+        bindings = {digest(s) for p in previous for s in p["sentences"]}
+        review = await self._summary_review(context, paragraphs, bindings)
+        if not review_accepted(review, paragraphs):
+            return {}
+        return await self._save_accepted_summary(
+            context, paragraphs, review, diagnostics=original.get("diagnostics", []), repaired=True
+        )
+
+    async def _save_accepted_summary(self, context, paragraphs, review, *, diagnostics, repaired):
+        result = {
+            "paragraphs": paragraphs,
+            "diagnostics": diagnostics,
+            "narrative_review": {
+                # Review fields are copied only from the verifier response.
+                **{
+                    k: review[k]
+                    for k in (
+                        "sentences",
+                        "coverage",
+                        "coherent",
+                        "non_redundant",
+                        "no_material_omission",
+                        "paragraphs",
+                        "no_background_rewind",
+                        "binding_policy",
+                        "basis_sentences",
+                    )
+                },
+                "version": SUMMARY_VERSION,
+                "number_policy": NUMBER_POLICY,
+                "content_digest": digest(paragraphs),
+                "basis_digest": digest(context),
+                "repair_used": repaired,
+            },
+        }
+        if self.database and self.task_id:
+            fingerprint = digest([self.SUMMARY_DRAFT_VERSION, SUMMARY_VERSION, context])
+            await self.database.save_analysis_batch(
+                self.task_id, "reporter:summary", fingerprint, result
+            )
+        return result
+
     async def summarize(self, context: dict[str, Any]) -> dict[str, Any]:
         """Draft after assembly and independently review the complete narrative."""
         cached = await self.cached_summary(context)
         if cached:
             return cached
-        fingerprint = digest([self.SUMMARY_DRAFT_VERSION, SUMMARY_VERSION, context])
         feedback: dict[str, Any] = {}
         diagnostics = []
         try:
@@ -351,37 +405,9 @@ class OpenAIReportAgent:
                                 writing_context, paragraphs, approved_bindings
                             )
                 if review_accepted(review, paragraphs):
-                    result = {
-                        "paragraphs": paragraphs,
-                        "diagnostics": diagnostics,
-                        "narrative_review": {
-                            # Review fields are copied ONLY from the verifier response.
-                            **{
-                                k: review[k]
-                                for k in (
-                                    "sentences",
-                                    "coverage",
-                                    "coherent",
-                                    "non_redundant",
-                                    "no_material_omission",
-                                    "paragraphs",
-                                    "no_background_rewind",
-                                    "binding_policy",
-                                    "basis_sentences",
-                                )
-                            },
-                            "version": SUMMARY_VERSION,
-                            "number_policy": NUMBER_POLICY,
-                            "content_digest": digest(paragraphs),
-                            "basis_digest": digest(context),
-                            "repair_used": bool(attempt),
-                        },
-                    }
-                    if self.database and self.task_id:
-                        await self.database.save_analysis_batch(
-                            self.task_id, "reporter:summary", fingerprint, result
-                        )
-                    return result
+                    return await self._save_accepted_summary(
+                        context, paragraphs, review, diagnostics=diagnostics, repaired=bool(attempt)
+                    )
                 issues = review_issues(review, paragraphs)
                 codes = list(
                     dict.fromkeys(

@@ -186,11 +186,32 @@ async def attach_executive_summary(
             if scope_reviewer is not None:
                 texts = [s["text"] for p in paragraphs for s in p["sentences"]]
                 decisions = await scope_reviewer.review(texts, kind="report_text")
-                if len(decisions) != len(texts) or any(
-                    not d.allowed or d.text != text
-                    for d, text in zip(decisions, texts, strict=True)
-                ):
-                    # A redacted sentence needs a fresh semantic review; never reuse its approval.
+                allowed = len(decisions) == len(texts) and all(d.allowed for d in decisions)
+                if allowed and [d.text for d in decisions] != texts:
+                    allowed = False
+                    recheck = getattr(reporter, "review_redacted_summary", None)
+                    if recheck is not None and not cached_only:
+                        replacements = iter(d.text for d in decisions)
+                        revised = [
+                            {
+                                **p,
+                                "sentences": [
+                                    {**s, "text": next(replacements)} for s in p["sentences"]
+                                ],
+                            }
+                            for p in paragraphs
+                        ]
+                        checked = await recheck(context, result, revised)
+                        if checked.get("paragraphs") == revised:
+                            revised_candidate = {
+                                **candidate,
+                                "paragraphs": revised,
+                                "narrative_review": checked.get("narrative_review"),
+                            }
+                            if not narrative_errors(revised_candidate, report):
+                                allowed = True
+                                candidate, paragraphs = revised_candidate, revised
+                if not allowed:
                     fact_brief(block, reason="scope_review_incomplete")
                     block["summary_diagnostics"] = [
                         *diagnostics,

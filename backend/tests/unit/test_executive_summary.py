@@ -348,18 +348,50 @@ async def test_replay_rejects_changed_text_or_basis(summary_report, change):
 
 
 @pytest.mark.asyncio
-async def test_scope_redaction_invalidates_semantic_approval(summary_report):
+@pytest.mark.parametrize("rejected_after_redaction", [False, True])
+async def test_scope_redaction_requires_new_binding_and_overall_approval(
+    summary_report, rejected_after_redaction
+):
+    original = paragraphs()[0]["sentences"][0]["text"]
+    redacted = original.replace("校方", "有关部门")
+    assert original != redacted
+
     class ScopeReviewer:
         async def review(self, texts, **_kwargs):
             return [
-                SimpleNamespace(allowed=True, text=t.replace("校方", "有关部门")) for t in texts
+                SimpleNamespace(allowed=True, text=redacted if t == original else t) for t in texts
             ]
 
+    class ReviewGateway(Gateway):
+        bound = []
+        full_reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+                sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                self.bound.append(sentence["text"])
+                if sentence["text"] == redacted:
+                    result["supported"] = not rejected_after_redaction
+            elif role == "verifier":
+                self.full_reviews += 1
+                if self.full_reviews == 2:
+                    assert redacted in prompt
+            return result
+
+    gateway = ReviewGateway()
     await attach_executive_summary(
-        summary_report, OpenAIReportAgent(Gateway(), "fixture"), scope_reviewer=ScopeReviewer()
+        summary_report, OpenAIReportAgent(gateway, "fixture"), scope_reviewer=ScopeReviewer()
     )
-    assert summary_report["blocks"][1]["summary_mode"] == "fact_brief"
-    assert summary_report["blocks"][1]["summary_status"] == "scope_review_incomplete"
+    block = summary_report["blocks"][1]
+    assert gateway.bound == [*(p["sentences"][0]["text"] for p in paragraphs()), redacted]
+    assert gateway.full_reviews == (1 if rejected_after_redaction else 2)
+    if rejected_after_redaction:
+        assert block["summary_mode"] == "fact_brief"
+    else:
+        assert block["summary_mode"] == "narrative"
+        assert block["paragraphs"][0]["sentences"][0]["text"] == redacted
+        assert validate_report(summary_report).errors == []
 
 
 @pytest.mark.asyncio
