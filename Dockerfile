@@ -8,13 +8,8 @@ RUN npm run build
 
 FROM python:3.13-slim-bookworm AS runtime
 
-ARG VCS_REF=unknown
-LABEL org.opencontainers.image.source="https://github.com/re-gion/Su-Heng" \
-      org.opencontainers.image.revision="${VCS_REF}"
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    YUQING_CONTAINER=true \
     YUQING_DATA_DIR=/app/data \
     YUQING_PDF_BROWSER=/usr/bin/chromium
 
@@ -31,6 +26,11 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/data \
     && chown -R appuser:appuser /app/data
+
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.source="https://github.com/re-gion/Su-Heng" \
+      org.opencontainers.image.revision="${VCS_REF}"
+ENV YUQING_CONTAINER=true
 
 USER appuser
 
