@@ -1014,6 +1014,10 @@ class V1Orchestrator:
                 {"agent": name, "phase": "quality_recovery", "inner_round": 1},
             )
             try:
+                if name == "history_insight":
+                    wait = getattr(self.usage, "wait_for_recovery", None)
+                    if wait is not None:
+                        await wait("analyst_c")
                 await self._run_agent(
                     task_id=task_id,
                     event_query=event_query + "\n【章节缺口专项补查】" + goal,
@@ -4047,13 +4051,14 @@ class V1Orchestrator:
             )
             self._set_llm_phase_limit(token_limit, "verification")
             try:
-                await self._recover_report_gaps(
-                    task_id,
-                    investigation_query,
-                    board,
-                    recovery_round=recovery_round,
-                    missing=missing,
-                )
+                if set(missing) != {"evidence_bound_recommendation"}:
+                    await self._recover_report_gaps(
+                        task_id,
+                        investigation_query,
+                        board,
+                        recovery_round=recovery_round,
+                        missing=missing,
+                    )
                 if "verifiable_key_claim" in missing:
                     await self._corroborate_key_fact(task_id, task.depth)
             finally:
@@ -4063,7 +4068,11 @@ class V1Orchestrator:
                 end_reason = "user_stop"
                 break
             if prior_material == await material_state():
-                if review_round < 2 and set(missing) & {"executive_summary", "media_propagation"}:
+                if review_round < 2 and set(missing) & {
+                    "executive_summary",
+                    "media_propagation",
+                    "evidence_bound_recommendation",
+                }:
                     review_round += 1
                     progress["review_round"] = review_round
                     await self.database.save_checkpoint(

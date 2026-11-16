@@ -2203,7 +2203,13 @@ class FullReportBuilder:
                 missing.remove("media_propagation")
                 new_relations = True
 
-        if review_summary and ("executive_summary" in missing or new_relations):
+        new_actions = False
+        if "evidence_bound_recommendation" in missing and hasattr(self.reporter, "repair_actions"):
+            new_actions = await self._retry_action_review(task, candidate, blocks, scope_required)
+            if new_actions:
+                missing.remove("evidence_bound_recommendation")
+        restored = new_relations or new_actions
+        if review_summary and ("executive_summary" in missing or restored):
             await attach_executive_summary(
                 candidate,
                 self.reporter,
@@ -2215,10 +2221,71 @@ class FullReportBuilder:
                 and candidate["quality"]["executive_summary"]["status"] != "complete"
             ):
                 return report
-        elif new_relations:
+        elif restored:
             refresh_summary_release(candidate)
         prune_citation_backlinks(candidate)
         return validate_report(candidate).report
+
+    async def _retry_action_review(self, task, candidate, blocks, scope_required):
+        if scope_required and self.scope_reviewer is None:
+            return False
+        facts = [
+            fact
+            for fact in blocks.get("fact_check_table", {}).get("items", [])
+            if fact.get("verification_state") == "complete"
+            and (fact.get("badge") == "verified" or fact.get("verdict") == "support")
+        ]
+        if not facts:
+            return False
+        appendix = {
+            item["evidence_ref"]: item
+            for item in blocks.get("evidence_appendix", {}).get("items", [])
+        }
+        refs = {c["evidence_ref"] for fact in facts for c in fact.get("citations", [])}
+        sources = [
+            item
+            for item in await self.database.list_evidence(task.id)
+            if item.local_id in refs and item.local_id in appendix
+        ]
+        if scope_required:
+            sources = [
+                item.model_copy(
+                    update={
+                        "title": appendix[item.local_id]["title"],
+                        "source_name": appendix[item.local_id]["source_name"],
+                        "publisher_entity": None,
+                        "content_text": None,
+                        "snippet": None,
+                    }
+                )
+                for item in sources
+            ]
+        context = report_context(candidate["task"], facts, sources, ())
+        edges = len(blocks.get("propagation_network", {}).get("edges", []))
+        context["propagation_edges"] = edges
+        if hasattr(self.reporter, "bind"):
+            self.reporter.bind(self.database, task.id)
+        wait = getattr(getattr(self.reporter, "gateway", None), "wait_for_recovery", None)
+        if wait is not None:
+            await wait("reporter")
+        repaired = await self.reporter.repair_actions(context, {"action_chapter_missing": 1})
+        summary, analysis, _ = assemble_analysis(
+            repaired, facts, sources, propagation_edges=edges, reuse_reviewed_actions=False
+        )
+        action = next((block for block in analysis if block.get("section") == "07"), None)
+        if action is None or (scope_required and not await self._scope_report_is_safe(action)):
+            return False
+        candidate["blocks"] = [b for b in candidate["blocks"] if b.get("section") != "07"]
+        before_limits = candidate["blocks"].index(blocks["limitations"])
+        candidate["blocks"].insert(before_limits, action)
+        blocks["executive_summary"]["so_what"] = summary["so_what"]
+        candidate["quality"]["analysis_items"] = sum(
+            len(b["items"])
+            for b in candidate["blocks"]
+            if b.get("type") in {"analysis", "action_plan"}
+        )
+        candidate["quality"]["action_repair"] = {"status": "accepted", "basis": "screened_report"}
+        return True
 
     @staticmethod
     def _activate_reviewed_publication(network, limitations) -> None:

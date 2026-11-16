@@ -75,6 +75,48 @@ async def add_fact(db, task, text, *, history=False, date="2025-09-20", scope_st
 
 
 @pytest.mark.asyncio
+async def test_missing_actions_are_retried_without_redrafting_other_chapters(runtime_dir):
+    db = Database(runtime_dir / "action-review.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(TaskCreate(event_query="甲校复核"))
+        fact = await add_fact(db, task, "2025年9月20日，甲校发布复核结果。")
+        _, report, _ = await FullReportBuilder(db, runtime_dir / "reports").build(task.id)
+        assert "evidence_bound_recommendation" in report["quality"]["release_gate_missing"]
+
+        class Reporter:
+            async def repair_actions(self, context, feedback):
+                assert [f["claim_ref"] for f in context["facts"]] == [fact.local_id]
+                return {
+                    "analyses": [
+                        {
+                            "section": "07",
+                            "title": "按公开材料核对复核结论",
+                            "interpretation": "已有可回查的公开复核记录。",
+                            "implication": "可以依据文件逐项核对处置范围。",
+                            "uncertainty": "尚需比对后续公开通知。",
+                            "action": "核对甲校通报各项处置记录。",
+                            "owner": "关注复核进展的读者",
+                            "trigger": "校方发布后续通知时复查。",
+                            "claim_refs": [fact.local_id],
+                        }
+                    ]
+                }
+
+        builder = FullReportBuilder(db, runtime_dir / "reports", reporter=Reporter())
+        repaired = await builder.retry_missing_reviews(task.id, report, review_summary=False)
+        assert "evidence_bound_recommendation" not in repaired["quality"]["release_gate_missing"]
+        assert (
+            report["quality"]["release_gate_missing"] != repaired["quality"]["release_gate_missing"]
+        )
+        action = next(b for b in repaired["blocks"] if b["section"] == "07")
+        assert action["items"][0]["claim_refs"] == [fact.local_id]
+        assert action["items"][0]["evidence_refs"] == fact.evidence_ids
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_earlier_admitted_passage_is_a_recovery_gap_until_it_has_a_claim(runtime_dir):
     db = Database(runtime_dir / "chronology.db")
     await db.initialize()
