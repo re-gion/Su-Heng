@@ -14,6 +14,7 @@ from yuqing.core.executive_summary import (
     BINDING_POLICY,
     NUMBER_POLICY,
     SUMMARY_ERROR_LABELS,
+    SUMMARY_HEADINGS,
     SUMMARY_LIMITS,
     SUMMARY_ROLES,
     SUMMARY_VERSION,
@@ -241,16 +242,51 @@ class OpenAIReportAgent:
             )
         return result
 
-    async def summarize(self, context: dict[str, Any]) -> dict[str, Any]:
+    async def retry_scoped_summary(
+        self, context: dict[str, Any], original: dict, approved_texts: set[str]
+    ) -> dict[str, Any]:
+        fields = ("claim_refs", "analysis_refs", "limitation_refs")
+        outline = [
+            {
+                "role": p["role"],
+                "focus": SUMMARY_HEADINGS[p["role"]],
+                "availability": p["availability"],
+                **{
+                    field: list(dict.fromkeys(r for s in p["sentences"] for r in s[field]))
+                    for field in fields
+                },
+            }
+            for p in original.get("paragraphs", [])
+        ]
+        retained = {
+            p["role"]: p
+            for p in original.get("paragraphs", [])
+            if all(s["text"] in approved_texts for s in p["sentences"])
+        }
+        return await self.summarize(
+            context, scope_repair=True, reviewed_outline=outline, retained=retained
+        )
+
+    async def summarize(
+        self,
+        context: dict[str, Any],
+        *,
+        scope_repair: bool = False,
+        reviewed_outline: list[dict] | None = None,
+        retained: dict[str, dict] | None = None,
+    ) -> dict[str, Any]:
         """Draft after assembly and independently review the complete narrative."""
-        cached = await self.cached_summary(context)
+        cached = {} if scope_repair else await self.cached_summary(context)
         if cached:
             return cached
         feedback: dict[str, Any] = {}
         diagnostics = []
+        retained = retained or {}
         try:
-            proposed = await self._summary_outline(context)
-            outline = proposed.get("outline") if isinstance(proposed, dict) else None
+            outline = reviewed_outline
+            if check_outline(outline, context):
+                proposed = await self._summary_outline(context)
+                outline = proposed.get("outline") if isinstance(proposed, dict) else None
             if isinstance(outline, list):
                 fields = {
                     "role",
@@ -278,8 +314,13 @@ class OpenAIReportAgent:
                 "status": "unavailable",
                 "diagnostics": [{"stage": "outline", "attempt": 1, "codes": [code]}],
             }
-        writing_context = {**context, "summary_outline": outline}
-        approved_bindings: set[str] = set()
+        writing_context = {
+            **context,
+            "summary_outline": outline,
+            "scope_repair": scope_repair,
+            "scope_retained": retained,
+        }
+        approved_bindings = {digest(s) for p in retained.values() for s in p["sentences"]}
         rejected_drafts: set[str] = set()
         for attempt in range(SUMMARY_LIMITS["max_draft_attempts"]):
             stage = "generation"
@@ -314,6 +355,13 @@ class OpenAIReportAgent:
                             for revised, original in zip(
                                 paragraphs, feedback["previous_paragraphs"], strict=True
                             )
+                        ]
+                    if retained and isinstance(paragraphs, list):
+                        paragraphs = [
+                            retained.get(role, p)
+                            if isinstance(p, dict) and isinstance((role := p.get("role")), str)
+                            else p
+                            for p in paragraphs
                         ]
                 paragraphs = normalize_supported_number_spellings(paragraphs, context)
                 errors = check_paragraphs(
@@ -498,6 +546,8 @@ class OpenAIReportAgent:
                     "length_usage": self._summary_length_usage(paragraphs),
                     "issues": issues,
                 }
+                for role in feedback["repair_roles"]:
+                    retained.pop(role, None)
             except Exception as exc:
                 # Budget exhaustion, malformed review and upstream failures never publish a draft.
                 code = self._summary_failure_code(exc)
@@ -542,7 +592,15 @@ class OpenAIReportAgent:
             "数据库事实正文、徽章、裁判结论及引文不能修改。只输出指定JSON。",
             "面向第一次接触事件的读者，写一份2至3分钟内可独立读懂全局的执行摘要。"
             "严格写四个自然段，通常600至900字。材料不足也保留该段，用短句写明可确认部分及具体缺口，不合并、不凑字数。"
-            "先用每段2至3句写足四段职责，通常600至750字符；只有遗漏重大事项才加句子。材料列表与规划引用不要求逐条复述。"
+            + (
+                "上一稿未通过范围与隐私审查。这一稿只从已审正文重新写公开事件主线，"
+                "每段优先两句，统一沿用正文的匿名角色。涉及具体个人的争执只保留理解公开处置所必需的归属和程序，"
+                "不复述私人指控细节、网名或身份线索。不能用隐去身份为由改变证据边界。"
+                "scope_retained中已通过内容与隐私审查的段落应逐字保留。"
+                if context.get("scope_repair")
+                else ""
+            )
+            + "先用每段2至3句写足四段职责，通常600至750字符；只有遗漏重大事项才加句子。材料列表与规划引用不要求逐条复述。"
             "第二段每句交代一方主张及对应回应；第三段直接使用最相关已审分析的判断和限定语；末段从已审分析选取具体后续触发条件。"
             "若引用只能支撑其中一半，就只写获支持的一半。不得为段落过渡另写缺少依据的总括、状态判断或比较。"
             f"硬上限：最多{SUMMARY_LIMITS['max_paragraphs']}段、每段{SUMMARY_LIMITS['max_sentences_per_paragraph']}句、"
@@ -582,7 +640,11 @@ class OpenAIReportAgent:
             '"analysis_refs":[],"limitation_refs":[]}]}]}。'
             "三个引用数组必须都有，用不到时留空；引用编号只写数组，不写进正文。禁止输出审查状态或其他字段。\n"
             + json.dumps(
-                {"report": self._summary_global_context(context), "repair_feedback": feedback},
+                {
+                    "report": self._summary_global_context(context),
+                    "scope_retained": context.get("scope_retained", {}),
+                    "repair_feedback": feedback,
+                },
                 ensure_ascii=False,
             ),
             max_tokens=8192,

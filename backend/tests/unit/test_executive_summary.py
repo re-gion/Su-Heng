@@ -1652,6 +1652,66 @@ async def test_global_focus_repair_keeps_paragraphs_the_reviewer_already_approve
 
 
 @pytest.mark.asyncio
+async def test_scope_recovery_redrafts_from_screened_report_instead_of_reusing_rejected_prose(
+    summary_report,
+):
+    private_draft_text = paragraphs()[1]["sentences"][0]["text"]
+    safe_draft_text = "现有记录仍需区分公开受理与各项处理结果。"
+
+    class ScopeGateway(Gateway):
+        drafts = 0
+        plans = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "outline" in result:
+                self.plans += 1
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                if self.drafts == 2:
+                    assert "上一稿未通过范围与隐私审查" in prompt
+                    assert set(json.loads(prompt.split("\n", 1)[1])["scope_retained"]) == {
+                        "event",
+                        "findings",
+                        "limits",
+                    }
+                    result["paragraphs"][0]["sentences"][0]["text"] = "不应替换已审通过的开头。"
+                    result["paragraphs"][1]["sentences"][0]["text"] = safe_draft_text
+            return result
+
+    class ScopeReviewer:
+        async def review(self, texts, **_kwargs):
+            return [
+                SimpleNamespace(allowed=text != private_draft_text, text=text) for text in texts
+            ]
+
+    class CachedReporter(OpenAIReportAgent):
+        saved = {}
+
+        async def cached_summary(self, context):
+            return self.saved
+
+        async def _save_accepted_summary(self, *args, **kwargs):
+            self.saved = await super()._save_accepted_summary(*args, **kwargs)
+            return self.saved
+
+    gateway = ScopeGateway()
+    reporter = CachedReporter(gateway, "fixture")
+    reviewer = ScopeReviewer()
+    await attach_executive_summary(summary_report, reporter, scope_reviewer=reviewer)
+    assert summary_report["quality"]["executive_summary"]["reason"] == "scope_review_incomplete"
+
+    await attach_executive_summary(summary_report, reporter, scope_reviewer=reviewer)
+
+    block = next(b for b in summary_report["blocks"] if b["type"] == "executive_summary")
+    assert gateway.drafts == 2 and gateway.plans == 1
+    assert summary_report["quality"]["executive_summary"]["status"] == "complete"
+    assert block["paragraphs"][0] == paragraphs()[0]
+    assert block["paragraphs"][1]["sentences"][0]["text"] == safe_draft_text
+    assert private_draft_text not in render_html(summary_report)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("coverage_passes", [True, False])
 async def test_multiple_unsupported_sentences_in_final_draft_require_complete_recheck(
     summary_report, coverage_passes

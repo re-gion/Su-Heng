@@ -127,6 +127,7 @@ async def attach_executive_summary(
         # Privacy filtering may have removed it. Do not silently regenerate a rejected block.
         refresh_summary_release(report)
         return
+    scope_retry = block.get("summary_status") == "scope_review_incomplete" and not cached_only
     fact_brief(block, reason="unavailable")
     if reporter is not None and hasattr(reporter, "summary_model_notice"):
         notice = reporter.summary_model_notice()
@@ -145,11 +146,24 @@ async def attach_executive_summary(
             limits["items"].append({"id": "LS01", "category": "摘要审查独立性", "text": notice})
     context = summary_context(report)
     summarize = getattr(reporter, "cached_summary" if cached_only else "summarize", None)
+    retry_scope = getattr(reporter, "retry_scoped_summary", None) if scope_retry else None
     if not context["facts"] or summarize is None or (scope_required and scope_reviewer is None):
         refresh_summary_release(report)
         return
     try:
-        result = await summarize(context)
+        if retry_scope and scope_reviewer is not None:
+            read_cache = getattr(reporter, "cached_summary", None)
+            original = await read_cache(context) if read_cache else {}
+            texts = [s["text"] for p in original.get("paragraphs", []) for s in p["sentences"]]
+            decisions = await scope_reviewer.review(texts, kind="report_text") if texts else []
+            approved_texts = {
+                text
+                for text, d in zip(texts, decisions, strict=True)
+                if d.allowed and d.text == text
+            }
+            result = await retry_scope(context, original, approved_texts)
+        else:
+            result = await summarize(context)
         if cached_only and not result:
             refresh_summary_release(report)
             return

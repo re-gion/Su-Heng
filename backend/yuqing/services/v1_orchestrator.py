@@ -4152,9 +4152,9 @@ class V1Orchestrator:
                 report = await self.reports.finalize_summary(task_id, report, cached_only=True)
             for attempt in range(summary_round, 2):
                 summary = report["quality"].get("executive_summary", {})
-                if (
-                    summary.get("status") == "complete"
-                    or summary.get("reason") == "scope_review_incomplete"
+                if summary.get("status") == "complete" or (
+                    summary.get("reason") == "scope_review_incomplete"
+                    and not hasattr(self.reports.reporter, "retry_scoped_summary")
                 ):
                     break
                 if await self._emit_budget(task_id, task.depth):
