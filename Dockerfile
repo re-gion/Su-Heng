@@ -27,6 +27,12 @@ RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/data \
     && chown -R appuser:appuser /app/data
 
+# Playwright's bundled Node driver needs libatomic at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m playwright --version
+
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.source="https://github.com/re-gion/Su-Heng" \
       org.opencontainers.image.revision="${VCS_REF}"
