@@ -433,3 +433,20 @@ def test_a_retrospective_report_keeps_its_date_without_misidentifying_the_publis
     assert timeline[0]["publication_title"] == "明川大学回应"
     assert [node["date"] for node in timeline] == ["2025-09-17", "2025-09-20", "2025-09-20"]
     assert all(not node.get("publication_title") for node in timeline[1:])
+
+
+def test_timeline_can_fold_one_disclosure_with_additional_demands_without_hiding_originals():
+    short = "2023年10月11日，明川大学一名涉事学生发文称，她在实训室准备器材时被另一名学生推搡。"
+    longer = "2023年10月11日，明川大学一名女生发文称，在实训室准备器材时遭同校一名男生推搡，要求其道歉并承担医药费。"
+    retelling = "据地方日报报道，2023年10月11日下午一名女生在社交平台发帖称，她当年7月在明川大学实训室准备器材时遭同校一名男生推搡，并提交视频。"
+    other = longer.replace("推搡", "言语威胁")
+    facts = [
+        fact(f"C{i:03d}", text, f"E{i:03d}")
+        for i, text in enumerate((short, longer, retelling, other), 1)
+    ]
+
+    result = timeline_reading_groups(event_timeline(facts))
+
+    assert [node["claim_refs"] for node in result] == [["C001", "C002", "C003"], ["C004"]]
+    assert [item["text"] for item in result[0]["related_claims"]] == [short, longer, retelling]
+    assert result[0]["evidence_refs"] == ["E001", "E002", "E003"]

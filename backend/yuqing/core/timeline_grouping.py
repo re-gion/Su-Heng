@@ -250,6 +250,10 @@ def _same_event(left: dict, right: dict, a: dict, b: dict) -> bool:
         and (a["actor"] == b["actor_root"] or b["actor"] == a["actor_root"])
     )
     if a["kind"] == b["kind"] == "发帖":
+        left_claim = _disclosure_reading_key(left, a)
+        right_claim = _disclosure_reading_key(right, b)
+        if left_claim and right_claim and left_claim[0] != right_claim[0]:
+            return False
         # A role may be written with or without the already-named institution.
         actors_match = (
             actors_match
@@ -462,11 +466,88 @@ def same_publication_fact(a: tuple[str, str, str, str], b: tuple[str, str, str, 
     return min(len(left), len(right)) >= 24 and _similar(left, right)
 
 
+def _disclosure_reading_key(item: dict, profile: dict | None = None) -> tuple | None:
+    profile = profile or _profile(item)
+    if profile["kind"] != "发帖" or not item.get("claim_ref"):
+        return None
+    institutions = {
+        name
+        for name in [profile["actor_root"], *profile["subjects"]]
+        if name.endswith(("大学", "公司", "集团", "医院", "学校"))
+    }
+    if len(institutions) != 1:
+        return None
+    institution = institutions.pop()
+    lead = re.split(
+        r"要求|并(?:拍摄|提交|提供|附上|留存|保留|展示)|因.{1,30}(?:选择|决定)(?:公开|披露|曝光)",
+        profile["body"],
+        maxsplit=1,
+    )[0]
+    date_pattern = r"(?:于)?(?:(\d{4})年)?(\d{1,2})月(?:(\d{1,2})日)?"
+    dates = list(re.finditer(date_pattern, lead))
+    if len(dates) > 1:
+        return None
+    incident = tuple(int(value) if value else 0 for value in dates[0].groups()) if dates else ()
+    if dates:
+        lead = lead[: dates[0].start()] + lead[dates[0].end() :]
+    lead = lead.replace(institution, "")
+    lead = re.sub(r"^(?:她|他|自己)", "", lead)
+    lead = re.sub(r"被(?=(?:另|一)?学生)", "遭", lead)
+    lead = re.sub(r"(?<=遭)(?:该校|同校)?[^遭]{2,20}(?:学院|系)(?=(?:一名?|另)?学生)", "", lead)
+    lead = re.sub(r"(?<=遭)(?:一名?|另)(?=学生)", "", lead)
+    if len(lead) < 10:
+        return None
+    numbers = tuple(_NUMBER.findall(re.sub(date_pattern, "", profile["body"])))
+    return (item["date"], institution, lead), profile["timing"], incident, numbers
+
+
+def _extend_related_claims(group: dict, item: dict) -> None:
+    for field in ("claim_refs", "evidence_refs"):
+        group[field] = list(dict.fromkeys([*group[field], *item[field]]))
+    group["related_claims"].extend(item.get("related_claims", [item]))
+
+
 def timeline_reading_groups(nodes: list[dict]) -> list[dict]:
-    """Present one publication with its separate details, without synthesizing claims."""
+    """Present one publication with each original claim and source available to expand."""
     result: list[dict] = []
     publications: dict[tuple, list[dict]] = {}
+    disclosures: dict[tuple, list[tuple[list[tuple], dict]]] = {}
     for item in group_timeline_events(nodes):
+        disclosure = _disclosure_reading_key(item)
+        if disclosure:
+            key, slot, incident, numbers = disclosure
+            timings = [
+                signature[1:]
+                for member in item.get("related_claims", [item])
+                if (signature := _disclosure_reading_key(member)) and signature[0] == key
+            ] or [(slot, incident, numbers)]
+            buckets = disclosures.setdefault(key, [])
+            match = next(
+                (
+                    (dates, group)
+                    for dates, group in buckets
+                    if all(
+                        (not slot or not previous_slot or slot == previous_slot)
+                        and all(
+                            not a or not b or a == b
+                            for a, b in zip(incident, previous, strict=False)
+                        )
+                        and (not numbers or not prior_numbers or numbers == prior_numbers)
+                        for previous_slot, previous, prior_numbers in dates
+                        for slot, incident, numbers in timings
+                    )
+                ),
+                None,
+            )
+            if match:
+                dates, group = match
+                dates.extend(timings)
+                _extend_related_claims(group, item)
+            else:
+                group = {**item, "related_claims": list(item.get("related_claims", [item]))}
+                buckets.append((timings, group))
+                result.append(group)
+            continue
         parts = publication_reading_parts(item["text"])
         if not parts or not item.get("claim_ref"):
             result.append(item)
@@ -493,9 +574,7 @@ def timeline_reading_groups(nodes: list[dict]) -> list[dict]:
             result.append(group)
         else:
             group["publication_time"] = group["publication_time"] or slot
-            for field in ("claim_refs", "evidence_refs"):
-                group[field] = list(dict.fromkeys([*group[field], *item[field]]))
-            group["related_claims"].extend(item.get("related_claims", [item]))
+            _extend_related_claims(group, item)
     return result
 
 

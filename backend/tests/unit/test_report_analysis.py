@@ -713,3 +713,34 @@ async def test_empty_history_draft_can_retry_one_grounded_comparison():
 
     assert gateway.history_drafts == 2 and gateway.reviews == 1
     assert result["analyses"] == [comparison]
+
+
+@pytest.mark.asyncio
+async def test_action_review_sees_later_disposition_even_if_draft_omits_it():
+    facts, sources, draft = inputs()
+    facts[0]["text"] = "明川大学2025年8月1日宣布成立复核专班。"
+    latest = {
+        **facts[0],
+        "claim_ref": "C024",
+        "text": "明川大学2025年9月20日公布复核结论并撤销原处理决定。",
+    }
+    many = [{**facts[0], "claim_ref": f"C{i:03d}", "citations": []} for i in range(2, 24)]
+    context = report_context({}, [*facts, *many, latest], sources, [])
+
+    class Gateway:
+        async def complete_json(self, role, _system, user, **_kwargs):
+            assert role == "verifier"
+            packet = json.loads(user)
+            assert set(packet["facts_by_ref"]) == {"C001"}
+            assert [item["claim_ref"] for item in packet["current_status"]] == ["C024"]
+            return {
+                "accepted_indexes": [],
+                "rejections": [{"index": 0, "reason": "忽略已公布的复核结论"}],
+            }
+
+    agent = OpenAIReportAgent(Gateway(), "system")
+    context = agent._chapter_context(context, "07")
+    assert "C024" in {item["claim_ref"] for item in context["facts"]}
+    result = await agent._review(context, draft, allow_repair=False, allow_split=False)
+    assert result["analyses"] == []
+    assert result["analysis_review"]["rejected"] == 1

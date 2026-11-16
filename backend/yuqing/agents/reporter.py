@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from difflib import SequenceMatcher
 from typing import Any
 
+from yuqing.core.event_chronology import explicit_event_date
 from yuqing.core.executive_summary import (
     BINDING_POLICY,
     NUMBER_POLICY,
@@ -1596,9 +1597,27 @@ class OpenAIReportAgent:
             "06": "history_insight",
             "07": "fact_investigator",
         }[section]
+        current_status = []
+        if section == "07":
+            facts = [fact for fact in facts if fact.get("origin_agent") != "history_insight"]
+            updates = [
+                (day, fact)
+                for fact in facts
+                if (day := explicit_event_date(fact.get("text") or ""))
+                and re.search(
+                    r"(?:通报|公告|公开|宣布|决定|公布|发布|作出).{0,35}"
+                    r"(?:撤销|撤回|维持|终止|召回|问责|处分|裁定|判决|结论|结果|处置|升级)",
+                    fact["text"],
+                )
+            ]
+            current_status = [
+                fact for _, fact in sorted(updates, key=lambda pair: pair[0], reverse=True)[:4]
+            ]
+        status_refs = {fact["claim_ref"] for fact in current_status}
         ranked = sorted(
             facts,
             key=lambda item: (
+                item.get("claim_ref") not in status_refs,
                 item.get("origin_agent") != preferred,
                 item.get("badge") != "verified",
                 item.get("verification_state") != "complete",
@@ -1644,7 +1663,12 @@ class OpenAIReportAgent:
             if section == "07"
             else context.get("audience", "公众读者与高校或机构决策者"),
             "facts": ordered,
-            "sources": sources,
+            "current_status": [
+                {k: fact[k] for k in ("claim_ref", "text", "badge") if k in fact}
+                for fact in current_status
+                if fact in ordered
+            ],
+            "sources": sources if section != "06" else [],
             "open_questions": [str(item)[:180] for item in context.get("open_questions", [])][
                 -2 if compact else -5 :
             ],
@@ -1686,6 +1710,7 @@ class OpenAIReportAgent:
             "06必须同时引用当前事件和历史案例的claim，写清相似机制、关键差异与适用边界；同一事件回顾不算历史对照。"
             "06围绕提供的一个历史案例和本案给出一条对照，集中说明最有借鉴价值的机制与边界。"
             "相似机制中的每个具体步骤必须同时见于两案依据；只发生于一案的暂停、调查、复核或处置只能作为差异，标题也须符合。"
+            "历史对照中每项事实前提必须见于所引陈述正文。计划备案、宣布召回或启动调查只说明对应动作已经发生，不能表述为处置已完成。"
             "历史案例的介绍由已获支持的陈述回填，不在解释中补写未引用的背景；背景不足的线索不能进入启示或建议。"
             "每条围绕一个不同的可回答问题，解释须包含依据、可能机制及解释边界。"
             "04回答谁发布了什么、发布框架如何变化、具体回应缺口是什么；不重写处分与裁判的制度建议。"
@@ -1695,6 +1720,8 @@ class OpenAIReportAgent:
             "07先写会改变读者判断的具体问题，最多三项。interpretation说明现有证据支持到哪一步，"
             "implication说明与读者的具体关系，uncertainty交代当前不能推导的结论。"
             "action写读者能核对的具体材料、渠道或范围，trigger写出现什么可核实的新证据才应更新判断。"
+            "07须先核对 current_status 中后续处置。若已经公开结果，行动须聚焦结果的范围、实施或待核事项，"
+            "不能以更早的调查通报为由再建议等待已经公布的结论。标题也不能把未发生的舆论效果写成事实。"
             "只有依据支持具体机构行动时才指定机构职能；其他情况owner写能采取该核对动作的读者或实际受影响对象。"
             "把没有获得的材料写成核查方向，不得用节选或未列入的材料证明原网页、公告或裁判文书没有该内容。"
             "不把整理时间线、准备宣传问答、维护统一口径作为读者建议。"
@@ -1894,8 +1921,12 @@ class OpenAIReportAgent:
                 "是否把提交材料时间当受理时间，是否无传播数据却断言议题降温路径，"
                 "历史对照是否确为不同事件且说明关键差异，建议是否对应真实决策问题。"
                 "历史对照宣称两案共有的具体步骤须分别有两案依据；只出现在一案的动作不能写成两案共有，标题也须核对。"
+                "历史对照中的事实前提须见于 facts_by_ref 的陈述正文，不能从节选补写未绑定细节。"
+                "已备案计划、发布召回公告、启动调查等仅能证明对应阶段，不代表实施完成。"
                 "已完成核验不能写成未经核验；单源支持可以保留互证不足说明。"
                 "不得把不同程序的结论直接等同，或推定原处分违法；已完成处置不能重复建议立即执行。"
+                "第07章应检查 current_status 中较晚的处置依据，已公布结果不能写成仍未公布；"
+                "这些事实也不能替代本条 claim_refs 所引依据。"
                 "核查本条有无问题、机制与影响的信息增量，是否只是复述事实或covered_analyses；"
                 "不确定性应明确具体竞争解释或能改变判断的证据，不用通用免责声明掩盖空泛分析。"
                 "必须同时审查title与正文的范围和确定程度：正文只说本次材料未见后续处理，"
@@ -1908,6 +1939,7 @@ class OpenAIReportAgent:
                 json.dumps(
                     {
                         "facts_by_ref": {fact["claim_ref"]: fact for fact in facts},
+                        "current_status": context.get("current_status", []),
                         "source_excerpts": context.get("sources", []),
                         "comment_insights": context.get("comment_insights", []),
                         "propagation_edges": context.get("propagation_edges", 0),
@@ -1975,6 +2007,7 @@ class OpenAIReportAgent:
                         + json.dumps(
                             {
                                 "facts": facts,
+                                "current_status": context.get("current_status", []),
                                 "rejected_analyses": rejected,
                                 "review_reasons": reasons,
                             },
