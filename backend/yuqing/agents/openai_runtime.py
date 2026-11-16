@@ -326,6 +326,7 @@ class OpenAIInvestigationAgent:
             for i in range(0, len(ordered), EVIDENCE_SUMMARY_BATCH_ITEMS)
         ][:EVIDENCE_SUMMARY_MAX_BATCHES]
         limit = max(1, 8 // max(1, len(batches)))
+        malformed = None
         for batch in batches:
             fingerprint = hashlib.sha256(
                 json.dumps(
@@ -358,6 +359,9 @@ class OpenAIInvestigationAgent:
                 self.summary_incomplete = upstream_diagnostic(
                     exc, stage="summarize", batch=fingerprint
                 )
+                if isinstance(exc, json.JSONDecodeError):
+                    malformed = exc
+                    continue
                 if isinstance(exc, LLMOutputTruncated):
                     continue
                 if isinstance(exc, LLMBudgetExhausted) or result:
@@ -379,6 +383,8 @@ class OpenAIInvestigationAgent:
                 for item in batch:
                     await save_processed(material_keys[item.local_id])
             result.extend(claims)
+        if not result and malformed is not None:
+            raise malformed
         if (
             not result
             and self.summary_incomplete

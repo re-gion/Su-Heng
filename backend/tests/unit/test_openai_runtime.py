@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -360,18 +361,24 @@ async def test_summarize_recovers_claims_when_large_inventory_returns_empty_obje
 
 
 @pytest.mark.asyncio
-async def test_summarize_keeps_other_batches_when_one_output_is_truncated():
-    class TruncatingGateway:
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_summarize_keeps_other_batches_when_one_output_is_invalid(malformed):
+    class UnreliableGateway:
         async def complete_json(self, _role, _system, prompt, **_kwargs):
             if "E001 |" in prompt:
+                if malformed:
+                    raise json.JSONDecodeError("invalid provider JSON", "{", 1)
                 raise LLMOutputTruncated("输出已截断")
             return {"claims": [{"text": "第二批的事实", "evidence_ids": ["E005"]}]}
 
-    agent = OpenAIInvestigationAgent(TruncatingGateway(), "system", role="analyst_a")
+    agent = OpenAIInvestigationAgent(UnreliableGateway(), "system", role="analyst_a")
 
     claims = await agent.summarize("测试事件", [_evidence(index) for index in range(1, 9)])
 
     assert [claim.text for claim in claims] == ["第二批的事实"]
+    assert agent.summary_incomplete["error_type"] == (
+        "JSONDecodeError" if malformed else "LLMOutputTruncated"
+    )
 
 
 @pytest.mark.asyncio
