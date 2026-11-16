@@ -524,21 +524,30 @@ class FullReportBuilder:
             if not (b["type"] in {"analysis", "action_plan", "metric_cards"} and not b.get("items"))
         ]
         quality = report.setdefault("quality", {})
-        for network in (b for b in report["blocks"] if b["type"] == "propagation_network"):
+        networks = [b for b in report["blocks"] if b["type"] == "propagation_network"]
+        has_reviewed_relation = False
+        for network in networks:
             node_refs = {node["evidence_id"] for node in network["nodes"]}
             network["edges"] = [
                 edge
                 for edge in network["edges"]
                 if {edge["from_evidence_id"], edge["to_evidence_id"]} <= node_refs
             ]
-            if not network["edges"]:
+            ready = any(
+                edge.get("review_status") == "accepted"
+                and edge["from_evidence_id"] != edge["to_evidence_id"]
+                for edge in network["edges"]
+            )
+            has_reviewed_relation |= ready
+            if not ready:
                 network["in_brief"] = False
                 network["fallback_text"] = (
                     "已保留通过范围审查的发布记录；当前没有可公开的已审传播连线。"
                 )
-                missing = quality.setdefault("release_gate_missing", [])
-                if "media_propagation" not in missing:
-                    missing.append("media_propagation")
+        if networks and not has_reviewed_relation:
+            missing = quality.setdefault("release_gate_missing", [])
+            if "media_propagation" not in missing:
+                missing.append("media_propagation")
         reconcile_history_completion(report)
         quality["analysis_items"] = sum(
             len(b.get("items", []))
@@ -573,7 +582,10 @@ class FullReportBuilder:
                 part - safe
                 for owner, item, part in units
                 if isinstance(owner, list)
-                and (id(owner) in core_lists or id(item) in connected_publications)
+                and (
+                    id(owner) in core_lists
+                    or (not has_reviewed_relation and id(item) in connected_publications)
+                )
             )
             if core_removed or not report["metrics"]["key_claims_rendered"]:
                 quality["release_label"] = (

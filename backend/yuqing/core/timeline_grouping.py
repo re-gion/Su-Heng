@@ -405,6 +405,11 @@ def publication_reading_parts(text: str) -> tuple[str, str, str, str] | None:
     if not match:
         return None
     actor = re.sub(r"^(?:汽车|科技|财经|体育)?(?:资讯|评测|测评)平台(?=.{2})", "", match["actor"])
+    if re.search(
+        r"(?:\d{1,2}月\d{1,2}日|近日|日前|当晚|当天|昨日|此前|早前|稍早)(?:晚间|晚|上午|下午)?$",
+        actor,
+    ):
+        return None
     if actor.startswith(("某", "据", "一段", "一则", "网传")) or actor in {
         "校方",
         "学校",

@@ -416,3 +416,20 @@ def test_same_article_wording_and_named_video_are_grouped_without_losing_sources
         ["C003", "C004"],
         ["C001", "C002"],
     ]
+
+
+def test_a_retrospective_report_keeps_its_date_without_misidentifying_the_publisher():
+    facts = [
+        fact("C001", "2025年9月17日，明川大学发布情况说明称已启动调查。", "E001"),
+        fact(
+            "C002",
+            "某报2025年9月20日报道称，明川大学9月17日发布情况说明，报道还披露了新的材料。",
+            "E002",
+        ),
+        fact("C003", "另报2025年9月20日报道称，明川大学近日发布情况说明称已启动调查。", "E003"),
+    ]
+    timeline = timeline_reading_groups(event_timeline(facts))
+
+    assert timeline[0]["publication_title"] == "明川大学回应"
+    assert [node["date"] for node in timeline] == ["2025-09-17", "2025-09-20", "2025-09-20"]
+    assert all(not node.get("publication_title") for node in timeline[1:])

@@ -209,9 +209,12 @@ async def test_scope_redaction_preserves_canonical_analysis_observation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("rejected_node,expected_edges", [("E003", 1), ("E002", 0)])
+@pytest.mark.parametrize(
+    "rejected_node,second_edge,expected_edges",
+    [("E003", False, 1), ("E002", False, 0), ("E002", True, 1)],
+)
 async def test_scope_rejection_affects_gate_only_for_reviewed_publication_edges(
-    analytical_report, runtime_dir, rejected_node, expected_edges
+    analytical_report, runtime_dir, rejected_node, second_edge, expected_edges
 ):
     report = copy.deepcopy(analytical_report[0])
     report["blocks"] = [b for b in report["blocks"] if b["type"] != "propagation_network"]
@@ -228,6 +231,10 @@ async def test_scope_rejection_affects_gate_only_for_reviewed_publication_edges(
             {"from_evidence_id": "E001", "to_evidence_id": "E002", "review_status": "accepted"}
         ],
     }
+    if second_edge:
+        network["edges"].append(
+            {"from_evidence_id": "E001", "to_evidence_id": "E003", "review_status": "accepted"}
+        )
     report["blocks"].append(network)
 
     class Reviewer:
@@ -253,6 +260,9 @@ async def test_scope_rejection_affects_gate_only_for_reviewed_publication_edges(
     assert rejected_node not in {node["evidence_id"] for node in network["nodes"]}
     assert len(network["edges"]) == expected_edges
     assert ("scope_content_rejected" in report["quality"]["release_gate_missing"]) is (
+        expected_edges == 0
+    )
+    assert ("media_propagation" in report["quality"]["release_gate_missing"]) is (
         expected_edges == 0
     )
 
