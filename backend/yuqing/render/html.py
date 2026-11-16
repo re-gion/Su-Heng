@@ -14,6 +14,7 @@ from yuqing.core.executive_summary import (
     summary_context,
 )
 from yuqing.core.history_cards import group_history_candidates
+from yuqing.core.publication_relations import relation_direction_reversed
 from yuqing.core.timeline_grouping import publication_reading_parts, same_publication_fact
 from yuqing.core.verification_presentation import (
     LABELS,
@@ -928,6 +929,17 @@ def _generic_block(block: dict[str, Any]) -> str:
     if block_type == "metric_cards":
         return _metric_cards(block)
     if block_type == "propagation_network":
+        by_id = {n.get("evidence_id"): n for n in block.get("nodes", [])}
+        original_edges = block.get("edges", [])
+        direction_checked = [
+            edge for edge in original_edges if not relation_direction_reversed(edge, by_id)
+        ]
+        if len(direction_checked) != len(original_edges):
+            block = {
+                **block,
+                "edges": direction_checked,
+                "fallback_text": "已省略与刊载时序冲突的连线，相关传播关系需重新审查。",
+            }
         graph, connected = publication_visual(block)
         node_labels = {
             "independent": "独立采编",
@@ -979,7 +991,7 @@ def _generic_block(block: dict[str, Any]) -> str:
                 if graph and nodes
                 else f'<div class="publication-grid">{nodes}</div>'
             )
-            + (f'<ol class="propagation-edges">{edges}</ol>' if not graph else "")
+            + (f'<ol class="propagation-edges">{edges}</ol>' if edges and not graph else "")
             + "</section>"
         )
     if block_type == "historical_facts":

@@ -55,6 +55,17 @@ def _target_precedes_source(original: dict, target: dict) -> bool:
     return b.date() < a.date()
 
 
+def relation_direction_reversed(edge: dict, by_id: dict) -> bool:
+    source, target = edge.get("from_evidence_id"), edge.get("to_evidence_id")
+    return (
+        isinstance(source, str)
+        and isinstance(target, str)
+        and source in by_id
+        and target in by_id
+        and _target_precedes_source(by_id[source], by_id[target])
+    )
+
+
 def inline_citation_passage(text: str, match: re.Match) -> str:
     passage = re.match(r"[^\n。；]{1,200}[。；]?", text[match.end() :])
     return passage.group() if passage else ""
@@ -130,6 +141,13 @@ def publication_identity(source, *, fallback_publisher=None) -> dict:
 
 def relation_type_codes(edge: dict, by_id: dict) -> list[str]:
     """Inline attribution proves a citation, never a whole-document repost by itself."""
+    relation = edge.get("relation")
+    if relation_direction_reversed(edge, by_id):
+        return [
+            "repost_precedes_original" if relation == "repost" else "relation_precedes_original"
+        ]
+    if edge.get("support_evidence_id") != edge.get("to_evidence_id"):
+        return ["relation_requires_target_quote"]
     original = by_id.get(edge.get("from_evidence_id"), {})
     target = by_id.get(edge.get("to_evidence_id"), {})
     quote = edge.get("quote")
@@ -163,8 +181,6 @@ def relation_type_codes(edge: dict, by_id: dict) -> list[str]:
             a["host"] and a["host"] == b["host"]
         ):
             return ["same_publication_carrier"]
-        if _target_precedes_source(a, b):
-            return ["repost_precedes_original"]
     inline_reference = bool(
         re.search(r"(?:另?据|引述|援引|引用).{1,80}(?:报道|消息|指出|表示)", quote)
     )

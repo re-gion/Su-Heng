@@ -86,6 +86,27 @@ def claim(case):
     return SimpleNamespace(analysis_data={"historical_case": case}, evidence_ids=["E001"])
 
 
+def test_changing_the_event_suffix_does_not_create_a_historical_case():
+    current = "示例Ｂ800刹车踏板支架断裂问题"
+    case = {
+        "name": "示例B800刹车踏板支架断裂事件",
+        "institution": "示例",
+        "independent": True,
+        "similarity": "制动调查机制",
+        "difference": "被误记为另一起事件",
+    }
+    item = claim(case)
+    item.text = "示例B800的刹车踏板支架断裂后，由主管部门调查。"
+    assert not independent_case_evidence(
+        item, {"E001": source(case["name"] + "。" + item.text)}, current, "2026-01-01"
+    )
+    case["name"] = "示例B700制动踏板无法回弹召回案"
+    item.text = "示例B700制动踏板无法回弹后启动召回。"
+    assert independent_case_evidence(
+        item, {"E001": source(case["name"] + "。" + item.text)}, current, "2026-01-01"
+    ) == {"E001"}
+
+
 def test_history_subject_must_belong_to_the_claim_not_another_entity_on_same_page():
     case = {
         "name": "中央食品办公室约谈明川大学事件",

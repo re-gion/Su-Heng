@@ -6,7 +6,7 @@ from html.parser import HTMLParser
 
 from yuqing.core.event_chronology import event_timeline
 from yuqing.core.history_cards import unique_history_cards
-from yuqing.core.timeline_grouping import group_timeline_events
+from yuqing.core.timeline_grouping import group_timeline_events, timeline_reading_groups
 from yuqing.render.history import history_chapter
 from yuqing.render.html import _fact_table, _history_chapter
 
@@ -272,6 +272,17 @@ def test_fact_table_folds_undated_media_attribution_to_same_official_publication
     rendered = _fact_table({"section": "03", "items": facts})
     assert re.findall(r'id="claim-(C\d+)"', rendered) == ["C001", "C002", "C003"]
     assert "展开" in rendered and 'href="#evidence-E002"' in rendered
+
+
+def test_dated_repost_of_processing_notice_reuses_the_same_timeline_node():
+    text = "明川大学学生工作部2023年10月13日发布处理通报称，已决定为受影响学生安排补考。"
+    retold = "地方晚报2023年10月13日报道明川大学学生工作部当日发布处理通报称，已决定为受影响学生安排补考。"
+    nodes = timeline_reading_groups(
+        event_timeline([fact("C001", text, "E001"), fact("C002", retold, "E002")])
+    )
+    assert len(nodes) == 1
+    assert nodes[0]["claim_refs"] == ["C001", "C002"]
+    assert nodes[0]["evidence_refs"] == ["E001", "E002"]
 
 
 def test_exact_named_case_keeps_each_stage_and_its_own_sources():

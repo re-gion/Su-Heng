@@ -492,6 +492,59 @@ async def test_official_notice_lookup_uses_its_heading_with_event_and_checks_dat
 
 
 @pytest.mark.asyncio
+async def test_history_recovery_skips_cross_language_current_event_and_undated_lead(runtime_dir):
+    db, task, runner, _, _ = await setup_recovery(runtime_dir)
+    try:
+        refs = []
+        for i, (title, provenance) in enumerate(
+            (
+                ("University reopens the same library case", "page_visible"),
+                ("Review of a different university case", "search_provider"),
+                ("Court publishes an earlier student disciplinary ruling", "page_visible"),
+            )
+        ):
+            record = await db.add_evidence(
+                EvidenceCreate(
+                    task_id=task.id,
+                    url=f"https://history{i}.example/ruling",
+                    title=title,
+                    lang="en",
+                    fetch_status="fetched",
+                    source_tier=2,
+                    published_at="2025-03-01",
+                    fetched_at="2025-09-20",
+                    content_text=title,
+                    snapshot_path=f"history{i}.html",
+                    content_sha256=f"history{i}",
+                    extra={"scope_status": "history", "date_provenance": provenance},
+                )
+            )
+            refs.append(record.local_id)
+
+        async def subject_alias(topic, source):
+            assert topic == task.event_query
+            return "University" if "same library case" in source.title else None
+
+        async def fetched(record, **_kwargs):
+            return record
+
+        gathered = []
+
+        class History:
+            async def summarize(self, _query, sources):
+                gathered.extend(s.local_id for s in sources)
+                return []
+
+        runner.search_planning.subject_alias = subject_alias
+        runner._fetch_once = fetched
+        runner.agents["history_insight"] = History()
+        await runner._repair_history_comparison(task.id, allow_new_case=True)
+        assert gathered == refs[2:]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sealed", [False, True])
 async def test_captured_source_date_can_be_recovered_without_refetch_or_claim_changes(
     runtime_dir, sealed

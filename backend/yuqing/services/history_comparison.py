@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
 from yuqing.core.history_cards import historical_identity_issue
+
+
+def same_investigation_event(event_query: str, case_name: str) -> bool:
+    def identity(label: str) -> str:
+        folded = unicodedata.normalize("NFKC", label).casefold()
+        compact = re.sub(r"[\W_]", "", folded)
+        return re.sub(r"(?:问题|事件|案件|舆情|争议)+$", "", compact)
+
+    topic, name = identity(event_query), identity(case_name)
+    return bool(topic) and (topic == name or len(topic) >= 6 and topic in name)
 
 
 def independent_case_evidence(
@@ -36,9 +48,8 @@ def independent_case_evidence(
     text = getattr(claim, "text", None)
     if isinstance(text, str) and historical_identity_issue(case, text):
         return set()
-    normal_query = "".join(event_query.lower().split())
     normal_name = "".join(name.lower().split())
-    if normal_name == normal_query or normal_query in normal_name:
+    if same_investigation_event(event_query, name):
         return set()
     case_type = case.get("case_type", "analogous")
     if case_type not in {"analogous", "related_prior"}:

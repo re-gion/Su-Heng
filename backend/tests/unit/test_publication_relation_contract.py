@@ -46,6 +46,29 @@ def edge(quote, relation):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("relation", ["follow_up", "response"])
+async def test_later_material_is_the_target_even_when_draft_reverses_edge(relation):
+    quote = "乙新闻网跟进甲新闻网6月4日的调查，公布对涉事食堂的回应。"
+    later = edge(quote, relation)
+    reversed_edge = {**later, "from_evidence_id": "E002", "to_evidence_id": "E001"}
+
+    class Gateway:
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier":
+                body = json.loads(prompt.split("\n", 1)[1])
+                assert body["edge"] == later
+                return {"accepted": True}
+            return {"edges": [reversed_edge]}
+
+    reporter = OpenAIReportAgent(Gateway(), "fixture")
+    pair = sources(quote)
+    assert reporter._relation_structure_codes(reversed_edge, {s["evidence_ref"]: s for s in pair})
+    [published] = await reporter.recover_relations(pair)
+    assert published["from_evidence_id"] == "E001"
+    assert published["to_evidence_id"] == published["support_evidence_id"] == "E002"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("different_carrier", [True, False])
 async def test_repost_review_checks_carrier_even_when_editorial_attribution_matches(
     different_carrier,

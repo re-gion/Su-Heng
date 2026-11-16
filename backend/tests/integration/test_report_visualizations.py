@@ -168,6 +168,20 @@ def test_protected_report_shows_reviewed_relationship_with_source_link_but_no_qu
     assert 'class="visual-relation"' not in render_html(report)
 
 
+def test_saved_follow_up_with_reversed_publication_dates_is_hidden_from_html():
+    report = visual_report()
+    network = report["blocks"][4]
+    network["nodes"][0]["published_at"] = "2025-11-08"
+    network["nodes"][1]["published_at"] = "2025-10-20"
+    network["edges"][0]["relation"] = "follow_up"
+    original = copy.deepcopy(report)
+    page = render_html(report)
+    assert report == original
+    assert 'class="visual-relation"' not in page
+    assert 'class="propagation-edges"' not in page
+    assert "已省略与刊载时序冲突的连线" in page
+
+
 def test_analysis_missing_qualified_material_uses_existing_text_fallback():
     block = visual_report()["blocks"][3]
     block["items"][0].pop("uncertainty")

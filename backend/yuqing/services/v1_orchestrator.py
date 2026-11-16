@@ -36,7 +36,7 @@ from yuqing.services.evidence_store import EvidenceStore
 from yuqing.services.forum import ForumBoard, ForumMessageCreate
 from yuqing.services.full_report import FullReportBuilder, ReportSectionAgent
 from yuqing.services.historical_data import HistoricalDataService
-from yuqing.services.history_comparison import independent_case_evidence
+from yuqing.services.history_comparison import independent_case_evidence, same_investigation_event
 from yuqing.services.institution_scope import (
     PROTECTED_SCOPES,
     PUBLIC_EVENT_INSTRUCTION,
@@ -1154,6 +1154,7 @@ class V1Orchestrator:
                 and item.published_at
                 and item.published_at[:10] <= task.created_at[:10]
                 and not title_matches_subject(topic, item.title, fallback_to_query=True)
+                and not same_investigation_event(topic, item.title)
             ]
             leads.sort(
                 key=lambda item: (
@@ -1163,10 +1164,25 @@ class V1Orchestrator:
                     item.source_tier,
                 )
             )
-            for lead in leads[:2]:
+            for lead in leads[:4]:
+                if len(sources) >= 2 or not self._llm_phase_has_room():
+                    break
                 current = await self.database.get_task(task_id)
                 if not current or current.status != "running":
                     break
+                if detect_text_language(lead.title, lead.lang) != detect_text_language(topic):
+                    result = SearchResult(
+                        url=lead.url,
+                        title=lead.title,
+                        snippet=lead.snippet or "",
+                        content_text=(lead.content_text or "")[:700],
+                        provider=lead.provider or "fetch",
+                        lang=lead.lang or "unknown",
+                    )
+                    if await self.search_planning.subject_alias(topic, result):
+                        # This translated page describes the current event. It
+                        # must not consume one of the independent case slots.
+                        continue
                 fetched = await self._fetch_once(
                     lead, scope=scope, agent="history_insight", phase="primary"
                 )
