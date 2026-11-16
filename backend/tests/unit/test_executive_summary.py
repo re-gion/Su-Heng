@@ -1621,3 +1621,74 @@ async def test_analysis_cannot_use_another_unreferenced_judgments_condition(summ
         context, sentence
     )
     assert result["supported"] is False
+
+
+@pytest.mark.asyncio
+async def test_global_focus_repair_keeps_paragraphs_the_reviewer_already_approved(summary_report):
+    class FocusGateway(Gateway):
+        drafts = 0
+        checks = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            value = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in value:
+                self.drafts += 1
+                if self.drafts > 1:
+                    value["paragraphs"][0]["sentences"][0]["text"] = "出现999份未经证实的记录。"
+                    value["paragraphs"][1]["sentences"][0]["text"] += " "
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.checks += 1
+                if self.checks == 1:
+                    value["paragraphs"]["dispute"]["focused"] = False
+                    value["non_redundant"] = False
+            return value
+
+    gateway = FocusGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+
+    assert gateway.drafts == gateway.checks == 2
+    assert result["paragraphs"][0] == paragraphs()[0]
+    assert review_accepted(result["narrative_review"], result["paragraphs"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coverage_passes", [True, False])
+async def test_multiple_unsupported_sentences_in_final_draft_require_complete_recheck(
+    summary_report, coverage_passes
+):
+    class FinalBindingsGateway(Gateway):
+        drafts = 0
+        coverage_checks = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            value = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in value:
+                self.drafts += 1
+                if self.drafts < 4:
+                    value["paragraphs"][0]["sentences"] = []
+                else:
+                    for index, unsupported in enumerate(
+                        ("各方已归档全部反馈。", "校方已为每位申请人提供帮助。"), 1
+                    ):
+                        value["paragraphs"][index]["sentences"].append(
+                            {
+                                "text": unsupported,
+                                "kind": "fact",
+                                "claim_refs": ["C001"],
+                                "analysis_refs": [],
+                                "limitation_refs": [],
+                            }
+                        )
+            if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+                sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                value["supported"] = not sentence["text"].startswith(("各方已归档", "校方已为每位"))
+            elif role == "verifier":
+                self.coverage_checks += 1
+                value["no_material_omission"] = coverage_passes
+            return value
+
+    gateway = FinalBindingsGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+
+    assert gateway.drafts == 4 and gateway.coverage_checks == 1
+    assert (result.get("paragraphs") == paragraphs()) is coverage_passes
