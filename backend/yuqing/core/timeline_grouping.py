@@ -42,6 +42,8 @@ def _profile(node: dict) -> dict:
             r"(.{2,60}?)(?=于|在|就|作出|成立|启动|发文|发帖|宣布|提交|提起)", without_date
         )
         actor = prefix[1] if prefix else ""
+    if timing:
+        actor = actor.removesuffix(timing[1])
     actor = re.sub(r"(?:相关账号|官方账号|账号|方面|官方网站|官网|网站)$", "", actor)
     actor = re.sub(r"在(?:社交平台|微信公众号|微博|网络平台)$", "", actor)
     actor = re.sub(r"(?<=大学)党委(?=.{2,12}(?:部|处|办公室)$)", "", actor)
@@ -74,7 +76,12 @@ def _profile(node: dict) -> dict:
         content = re.sub(r"疑(?=吃出|发现)", "疑似", content)
         body = content
     post_document = _POST_DOCUMENT.match(body)
-    if kind in {"发文", "发帖"} or (kind == "发布" and post_document):
+    if kind == "发文" and re.search(
+        r"(?:大学|学院|学校|公司|集团|医院|政府|委员会|工作部|工作组|办公室|管理局|监管局|法院|检察院|公安局)$",
+        actor,
+    ):
+        kind = "机构发文"
+    elif kind in {"发文", "发帖"} or (kind == "发布" and post_document):
         kind = "发帖"
         if post_document:
             content = body[post_document.end() :]
@@ -98,7 +105,8 @@ def _profile(node: dict) -> dict:
     topic = re.search(r"(?:针对|关于)([^，,。；;《》]{2,30}?)(?:的|问题|事件|事项)", body)
     # Normalize presentation fillers only. Numbers and negation are compared separately.
     normalized = _ROLE.sub("学生", content)
-    normalized = normalized.replace("受到", "遭").replace("遭到", "遭")
+    normalized = re.sub(r"受到|遭到|遭受", "遭", normalized)
+    normalized = normalized.replace("进行调查", "调查")
     normalized = (
         normalized.replace("疑似为", "疑似").replace("事发当日", "当日").replace("涉事", "")
     )
@@ -210,8 +218,16 @@ def _same_event(left: dict, right: dict, a: dict, b: dict) -> bool:
             or (a["actor"] in {"女生", "男生"} and b["actor"].endswith(a["actor"]))
             or (b["actor"] in {"女生", "男生"} and a["actor"].endswith(b["actor"]))
         )
-    if not a["actor"] or not actors_match or not a["kind"] or a["kind"] != b["kind"]:
+    if not a["actor"] or not actors_match or not a["kind"]:
         return False
+    if a["kind"] != b["kind"]:
+        return bool(
+            {a["kind"], b["kind"]} == {"机构发文", "情况说明"}
+            and a["actor"] == b["actor"]
+            and a["negative"] == b["negative"]
+            and a["numbers"] == b["numbers"]
+            and _similar(a["body"], b["body"])
+        )
     if (
         a["negative"] == b["negative"]
         and a["numbers"] == b["numbers"]

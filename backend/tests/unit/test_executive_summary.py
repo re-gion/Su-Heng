@@ -1441,6 +1441,35 @@ async def test_outline_draft_and_reviews_omit_duplicate_quotes_but_digest_full_b
 
 
 @pytest.mark.asyncio
+async def test_exact_duplicates_do_not_consume_a_draft_before_full_review(summary_report):
+    class RepeatedGateway(Gateway):
+        drafts = 0
+        coverage_checks = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            result = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in result:
+                self.drafts += 1
+                for paragraph in result["paragraphs"]:
+                    sentence = paragraph["sentences"][0]
+                    paragraph["sentences"].extend([copy.deepcopy(sentence) for _ in range(6)])
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.coverage_checks += 1
+                candidate = json.loads(prompt.split("\n", 1)[1])["paragraphs"]
+                assert sum(len(p["sentences"]) for p in candidate) == len(
+                    sentence_ids(paragraphs())
+                )
+            return result
+
+    gateway = RepeatedGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+
+    assert gateway.drafts == gateway.coverage_checks == 1
+    assert result["paragraphs"] == paragraphs()
+    assert review_accepted(result["narrative_review"], result["paragraphs"])
+
+
+@pytest.mark.asyncio
 async def test_long_draft_gets_exact_length_and_binding_feedback_in_one_repair(summary_report):
     class LongGateway(Gateway):
         drafts = 0

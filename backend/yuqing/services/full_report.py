@@ -19,6 +19,7 @@ from yuqing.core.history_cards import (
     background_complete,
     group_history_candidates,
     historical_identity_issue,
+    history_case_rank,
     partition_distinct_history_cards,
     reconcile_history_completion,
     unique_history_cards,
@@ -1568,16 +1569,6 @@ class FullReportBuilder:
                     if isinstance(case.get("background"), dict)
                     else {},
                     "outcome": case.get("outcome") or "截至调查时，本次材料未见最终处理结果",
-                    "comparison": (
-                        (
-                            f"可核查关联：{case.get('connection', '')}。"
-                            if case.get("case_type") == "related_prior"
-                            else ""
-                        )
-                        + f"相似机制：{case['similarity']}。"
-                        f"关键差异：{case['difference']}。"
-                        "该案例不能预测当前事件走向。"
-                    ),
                     "dimensions": {
                         "公开结果（来源记载）": case.get("outcome")
                         or "截至调查时，本次材料未见最终处理结果",
@@ -1815,6 +1806,12 @@ class FullReportBuilder:
                 context["comment_observations"] = comment_insight.get("observations", [])
                 context["comment_coverage"] = comment_insight.get("coverage", {})
                 context["propagation_edges"] = propagation_edges
+                if local_cards:
+                    topic = task.resolved_event_query or task.event_query
+                    featured_history = max(
+                        local_cards, key=lambda card: history_case_rank(topic, card)
+                    )
+                    context["history_case_refs"] = featured_history.get("claim_refs", [])
                 if hasattr(self.reporter, "bind"):
                     self.reporter.bind(self.database, task_id)
                 enrichment = await self.reporter.enrich(context)
@@ -2101,6 +2098,7 @@ class FullReportBuilder:
                             for m in b["items"]
                             if item["evidence_ref"] in m["evidence_refs"]
                         ]
+        reconcile_history_completion(report)
         await attach_executive_summary(
             report,
             None if diagnostic_only or defer_summary else self.reporter,

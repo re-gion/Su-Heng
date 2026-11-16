@@ -720,11 +720,16 @@ def _history_case(card: dict[str, Any]) -> str:
         else ""
     )
     analyses = "".join(_history_analysis(block) for block in card.get("analyses", []))
-    comparison = (
-        _optional_field("与本案的对照（条件性分析）", card.get("comparison"), "comparison")
-        if not analyses and card.get("comparison") != card.get("summary")
-        else ""
-    )
+    comparison = ""
+    if not analyses and not card.get("has_joint_analysis"):
+        if card.get("background_status") == "complete":
+            comparison = (
+                '<p class="source-boundary">案例经过可回查，与本案的对照判断尚未通过审查。</p>'
+            )
+        elif card.get("comparison") != card.get("summary"):
+            comparison = _optional_field(
+                "与本案的对照（条件性分析）", card.get("comparison"), "comparison"
+            )
     outcome = card.get("outcome") or (card.get("dimensions") or {}).get("公开结果（来源记载）")
     outcome = outcome or (card.get("dimensions") or {}).get("最终结局")
     dimensions = "".join(

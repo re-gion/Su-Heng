@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from yuqing.core.event_chronology import event_timeline
 from yuqing.core.history_cards import unique_history_cards
 from yuqing.core.timeline_grouping import group_timeline_events, timeline_reading_groups
+from yuqing.core.verification_presentation import fact_event_groups
 from yuqing.render.history import history_chapter
 from yuqing.render.html import _fact_table, _history_chapter
 
@@ -347,3 +348,24 @@ def test_near_named_unconfirmed_history_leads_share_a_card_without_asserting_ide
     assert all(card["summary"] in html for card in references)
     assert all(f'href="#evidence-E00{i}"' in html for i in (1, 2, 3))
     assert blocks == original
+
+
+def test_institutional_post_and_named_response_share_one_timeline_and_fact_group():
+    response = "明川大学党委学生工作部2023年10月11日晚发布情况说明称，学校关注到有学生举报遭受骚扰的网络信息，已成立工作组对整个事件进行调查。"
+    restatement = "明川大学学生工作部2023年10月11日晚发文称，学校关注到有学生举报遭骚扰的网络信息，已成立工作组调查整个事件。"
+    separate = (
+        "明川大学学生工作部2023年10月11日晚发文称，学校已经为有相关投诉的学生开通专项受理渠道。"
+    )
+    facts = [
+        fact("C001", response, "E001"),
+        fact("C002", restatement, "E002"),
+        fact("C003", separate, "E003"),
+    ]
+
+    timeline = timeline_reading_groups(event_timeline(facts))
+    assert [node["claim_refs"] for node in timeline] == [["C001", "C002"], ["C003"]]
+    assert timeline[0]["evidence_refs"] == ["E001", "E002"]
+    assert [[item["claim_ref"] for item in group] for group in fact_event_groups(facts)] == [
+        ["C001", "C002"],
+        ["C003"],
+    ]

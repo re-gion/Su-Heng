@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from yuqing.core.history_cards import history_relevance, unique_history_cards
+from yuqing.core.history_cards import history_case_rank, unique_history_cards
 
 
 def history_chapter(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -28,7 +28,12 @@ def history_chapter(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
         [card for block in source for card in block.get("cards", [])], merge_reviewed_aliases=True
     )
     references = unique_history_cards(
-        [card for block in source for card in block.get("reference_candidates", [])]
+        [
+            member
+            for block in source
+            for card in block.get("reference_candidates", [])
+            for member in card.get("related_candidates", [card])
+        ]
     )
     identified_refs = {ref for card in [*cards, *references] for ref in card.get("claim_refs", [])}
     for ref, fact in facts.items():
@@ -85,6 +90,8 @@ def history_chapter(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
             if len(matches) == 1:
                 matches[0]["analyses"].append(analysis)
             else:
+                for card in matches:
+                    card["has_joint_analysis"] = True
                 joint.append(analysis)
     return {
         "type": "history_chapter",
@@ -109,14 +116,8 @@ def arrange_history(blocks: list[dict[str, Any]], topic: str = "") -> list[dict[
         return blocks
     chapter["cards"].sort(
         key=lambda card: (
-            history_relevance(
-                topic,
-                " ".join(
-                    str(card.get(field) or "") for field in ("event_name", "summary", "comparison")
-                ),
-            ),
-            bool(card.get("analyses")),
-            len(card.get("evidence_refs", [])),
+            bool(card.get("analyses")) or bool(card.get("has_joint_analysis")),
+            *history_case_rank(topic, card),
         ),
         reverse=True,
     )

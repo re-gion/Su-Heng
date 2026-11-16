@@ -139,6 +139,19 @@ def test_missing_background_is_a_lead_and_does_not_keep_comparison_or_joint_advi
     assert "甲公司车型出现踏板断裂风险" in page
 
 
+def test_current_history_background_does_not_publish_unreviewed_comparison():
+    report = report_fixture()
+    report["blocks"].pop(0)
+    report["blocks"][1]["cards"][0]["comparison"] = "未经审查的机制与本案相同"
+
+    page = render_html(report, view="full")
+
+    assert "未经审查的机制与本案相同" not in page
+    assert "甲公司车型出现踏板断裂风险" in page
+    assert "与本案的对照判断尚未通过审查" in page
+    assert 'href="#evidence-E101"' in page
+
+
 def test_legacy_background_is_displayed_with_boundary_without_inventing_dates_or_results():
     report = report_fixture()
     for card in report["blocks"][2]["cards"]:

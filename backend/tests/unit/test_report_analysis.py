@@ -661,3 +661,19 @@ def test_event_timeline_reads_dated_institution_action_after_actor_name():
         "2025-09-17",
         "2025-09-20",
     ]
+
+
+def test_chapter_06_context_keeps_the_selected_case_and_current_event():
+    context = {
+        "task": {"event_query": "公开事故调查"},
+        "facts": [
+            {"claim_ref": "C001", "origin_agent": "fact_investigator"},
+            {"claim_ref": "C101", "origin_agent": "history_insight"},
+            {"claim_ref": "C102", "origin_agent": "history_insight"},
+        ],
+        "history_case_refs": ["C102"],
+    }
+
+    result = OpenAIReportAgent._chapter_context(context, "06", compact=True)
+
+    assert [fact["claim_ref"] for fact in result["facts"]] == ["C102", "C001"]

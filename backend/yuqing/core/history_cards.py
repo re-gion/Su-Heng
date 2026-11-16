@@ -60,6 +60,11 @@ def history_relevance(topic: str, text: str) -> int:
     return len(terms(topic) & terms(text))
 
 
+def history_case_rank(topic: str, card: dict[str, Any]) -> tuple[int, int]:
+    title_and_background = " ".join(str(card.get(k) or "") for k in ("event_name", "summary"))
+    return history_relevance(topic, title_and_background), len(card.get("evidence_refs", []))
+
+
 def _ambiguous_case_identity(left: dict, right: dict) -> bool:
     a = re.search(r"20\d{2}-\d{2}", str(left.get("event_time") or ""))
     b = re.search(r"20\d{2}-\d{2}", str(right.get("event_time") or ""))
@@ -154,13 +159,33 @@ def reconcile_history_card_identity(report: dict[str, Any]) -> None:
 
 
 def reconcile_history_completion(report: dict[str, Any]) -> None:
-    """A removed comparison chapter cannot retain its earlier completion claim."""
+    """Describe the case background and the comparison that survive report review."""
     status = report.get("quality", {}).get("chapter_status", {}).get("history")
-    if not isinstance(status, dict) or status.get("status") != "complete":
+    if not isinstance(status, dict) or status.get("status") not in {"complete", "partial"}:
         return
-    if any(b.get("type") == "history_compare" and b.get("cards") for b in report.get("blocks", [])):
+    blocks = report.get("blocks", [])
+    cards = [c for b in blocks if b.get("type") == "history_compare" for c in b.get("cards", [])]
+    if not cards:
+        status.update(status="missing", message="最终报告未保留通过内容审查的独立对照案例")
         return
-    status.update(status="missing", message="最终报告未保留通过内容审查的独立对照案例")
+    if not all(c.get("background_status") == "complete" for c in cards):
+        return
+    history_refs = {ref for c in cards for ref in c.get("claim_refs", [])}
+    current_refs = {
+        item.get("claim_ref")
+        for b in blocks
+        if b.get("type") == "fact_check_table"
+        for item in b.get("items", [])
+    }
+    compared = any(
+        refs & history_refs and refs & current_refs
+        for b in blocks
+        if b.get("type") == "analysis" and b.get("section") == "06"
+        for i in b.get("items", [])
+        if (refs := set(i.get("claim_refs", [])))
+    )
+    if not compared:
+        status.update(status="partial", message="独立案例经过可回查，与本案的对照判断尚未通过审查")
 
 
 def background_complete(card: dict[str, Any]) -> bool:
@@ -290,6 +315,10 @@ def unique_history_cards(
             if field == "claim_refs" and raw.get("claim_ref"):
                 values.append(raw["claim_ref"])
             current[field] = list(dict.fromkeys(values))
+        if len(current["claim_refs"]) > 1:
+            # Aggregate citations are bound to all claims on the case. Each stage
+            # keeps its own singular claim and only that claim's citations.
+            current.pop("claim_ref", None)
         for label, value in (raw.get("dimensions") or {}).items():
             if value and not (current.get("dimensions") or {}).get(label):
                 current.setdefault("dimensions", {})[label] = value
@@ -347,6 +376,10 @@ def group_history_candidates(cards: list[dict[str, Any]]) -> list[dict[str, Any]
     for group in groups:
         card = deepcopy(group[0])
         if len(group) > 1:
+            # An unconfirmed group is only a container. Its original claims and
+            # sources are bound within each distinct candidate, not to its label.
+            for field in ("claim_ref", "claim_refs", "origin_claim_ref"):
+                card.pop(field, None)
             card["related_candidates"] = deepcopy(group)
             card["identity_status"] = "unconfirmed"
             card["evidence_refs"] = list(

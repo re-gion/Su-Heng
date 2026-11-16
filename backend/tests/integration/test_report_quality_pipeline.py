@@ -12,7 +12,7 @@ async def add_fact(db, task, text, *, history=False, date="2025-09-20", scope_st
     evidence = await db.add_evidence(
         EvidenceCreate(
             task_id=task.id,
-            url="https://example.edu/" + ("history" if history else f"notice-{date}"),
+            url="https://example.edu/" + (f"history-{date}" if history else f"notice-{date}"),
             title=text,
             snippet=text,
             source_name="机构通报",
@@ -400,6 +400,41 @@ async def test_low_tier_supported_history_stays_unverified_but_available_for_com
         assert comparison["cards"][0]["claim_ref"] == historical.local_id
         assert comparison["cards"][0]["evidence_refs"] == ["E002"]
         assert "独立核实不足" in comparison["cards"][0]["summary"]
-        assert "相似机制" in comparison["cards"][0]["comparison"]
+        assert "comparison" not in comparison["cards"][0]
+        assert report["quality"]["chapter_status"]["history"]["status"] == "partial"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_history_case_with_separate_sources_passes_citation_validation(runtime_dir):
+    db = Database(runtime_dir / "multi-source-history.db")
+    await db.initialize()
+    try:
+        task = await db.create_task(TaskCreate(event_query="甲校公开复核"))
+        await add_fact(db, task, "甲校通报称已撤销原处分。")
+        first = await add_fact(
+            db, task, "乙校在复核后公开更正先前处理决定。", history=True, date="2023-06-01"
+        )
+        second = await add_fact(
+            db,
+            task,
+            "乙校公开更正先前处理决定后，向当事人寄送书面复核答复。",
+            history=True,
+            date="2023-07-01",
+        )
+
+        _, report, _ = await FullReportBuilder(db, runtime_dir / "reports").build(task.id)
+
+        history = next(b for b in report["blocks"] if b["type"] == "history_compare")
+        assert len(history["cards"]) == 1
+        card = history["cards"][0]
+        assert "claim_ref" not in card
+        assert set(card["claim_refs"]) == {first.local_id, second.local_id}
+        assert set(card["evidence_refs"]) == {*first.evidence_ids, *second.evidence_ids}
+        assert {fact["claim_ref"]: fact["evidence_refs"] for fact in card["background_facts"]} == {
+            first.local_id: first.evidence_ids,
+            second.local_id: second.evidence_ids,
+        }
     finally:
         await db.close()

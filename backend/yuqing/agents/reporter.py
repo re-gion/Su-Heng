@@ -106,6 +106,24 @@ class OpenAIReportAgent:
         return candidate
 
     @staticmethod
+    def _remove_exact_summary_duplicates(
+        paragraphs: list[dict], context: dict
+    ) -> list[dict] | None:
+        candidate = []
+        for paragraph in paragraphs:
+            seen = set()
+            sentences = []
+            for sentence in paragraph["sentences"]:
+                key = digest(sentence)
+                if key not in seen:
+                    sentences.append(sentence)
+                    seen.add(key)
+            candidate.append({**paragraph, "sentences": sentences})
+        if check_paragraphs(candidate, context, require_headings=True, number_policy=NUMBER_POLICY):
+            return None
+        return candidate
+
+    @staticmethod
     def _remove_located_invalid_sentences(paragraphs: list[dict], context: dict, errors: list[str]):
         allowed = {"unsupported_number", "internal_process_leak", "duplicate_sentence"}
         if not errors or not set(errors) <= allowed:
@@ -275,6 +293,20 @@ class OpenAIReportAgent:
                 errors = check_paragraphs(
                     paragraphs, context, require_headings=True, number_policy=NUMBER_POLICY
                 )
+                if "duplicate_sentence" in errors and set(errors) <= {
+                    "duplicate_sentence",
+                    "summary_too_long",
+                }:
+                    pruned = self._remove_exact_summary_duplicates(paragraphs, context)
+                    if pruned is not None:
+                        diagnostics.append(
+                            {
+                                "attempt": attempt + 1,
+                                "stage": "structure",
+                                "codes": [*errors, "invalid_candidate_sentence_removed"],
+                            }
+                        )
+                        paragraphs, errors = pruned, []
                 if attempt > 0 and errors == ["unsupported_number"]:
                     issues = paragraph_issues(
                         paragraphs, context, require_headings=True, number_policy=NUMBER_POLICY
@@ -1557,6 +1589,10 @@ class OpenAIReportAgent:
             ),
         )
         limit = 6 if compact else (24 if context.get("task", {}).get("depth") == "deep" else 14)
+        if section == "06" and (case_refs := set(context.get("history_case_refs", []))):
+            history = [item for item in ranked if item.get("claim_ref") in case_refs]
+            current = [item for item in ranked if item.get("origin_agent") != "history_insight"]
+            ranked = history[: limit // 2] + current
         groups: dict[str, list[dict]] = {}
         for item in ranked:
             citations = item.get("citations", [])
@@ -1632,7 +1668,7 @@ class OpenAIReportAgent:
             "comment_insights 是已审评论样本主题，只能用来辨认待回应问题，不能据此认定事件事实或总体立场；"
             "07优先回应已识别的争议与证据缺口，不能只写加强关注、统一口径等通用建议。"
             "06必须同时引用当前事件和历史案例的claim，写清相似机制、关键差异与适用边界；同一事件回顾不算历史对照。"
-            "06优先逐案例作分析，一条分析只关联一个历史案例及本案；确需综合多个案例时，明确点出各案例名称。"
+            "06围绕提供的一个历史案例和本案给出一条对照，集中说明最有借鉴价值的机制与边界。"
             "历史案例的介绍由已获支持的陈述回填，不在解释中补写未引用的背景；背景不足的线索不能进入启示或建议。"
             "每条围绕一个不同的可回答问题，解释须包含依据、可能机制及解释边界。"
             "04回答谁发布了什么、发布框架如何变化、具体回应缺口是什么；不重写处分与裁判的制度建议。"
