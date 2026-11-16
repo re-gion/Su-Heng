@@ -93,6 +93,36 @@ async def test_scope_review_serializes_near_budget_boundary():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_failure", [False, True])
+async def test_report_scope_recovers_only_unfinished_decisions(second_failure):
+    class InterruptedGateway:
+        batches = []
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            items = json.loads(prompt.split("\n", 1)[1])
+            texts = [item["text"] for item in items]
+            self.batches.append(texts)
+            if len(self.batches) == 2 or (len(self.batches) == 3 and second_failure):
+                raise ConnectionError("temporary upstream failure")
+            return {
+                "items": [
+                    {"id": item["id"], "allowed": "拒绝" not in item["text"]} for item in items
+                ]
+            }
+
+    gateway = InterruptedGateway()
+    texts = ["明确拒绝的材料", *[f"机构公开回应第{i}条" for i in range(51)]]
+    decisions = await InstitutionScopeReviewer(gateway).review(texts, kind="report_text")
+
+    assert gateway.batches == [texts[:24], texts[24:48], texts[24:48]] + (
+        [] if second_failure else [texts[48:]]
+    )
+    assert decisions[0].status == "rejected"
+    assert all(d.allowed for d in decisions[1:24])
+    assert [d.allowed for d in decisions[24:]] == [not second_failure] * (len(texts) - 24)
+
+
+@pytest.mark.asyncio
 async def test_parallel_reviews_keep_one_alias_even_when_second_batch_finishes_first():
     class Database:
         aliases = {}
@@ -485,7 +515,7 @@ async def test_two_invalid_scope_responses_remain_incomplete_and_bounded(invalid
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["budget", "network", "policy", "identifier"])
-async def test_scope_retry_does_not_repeat_budget_network_policy_or_identifiers(failure):
+async def test_scope_retry_only_repeats_transient_upstream_failure(failure):
     from yuqing.core.llm.gateway import LLMBudgetExhausted
 
     class Gateway:
@@ -503,4 +533,4 @@ async def test_scope_retry_does_not_repeat_budget_network_policy_or_identifiers(
     text = "联系人手机号：13800138000。" if failure == "identifier" else "公开回应。"
     decision = (await InstitutionScopeReviewer(gateway).review([text], kind="report_text"))[0]
     assert not decision.allowed
-    assert gateway.calls == (0 if failure == "identifier" else 1)
+    assert gateway.calls == {"identifier": 0, "network": 2}.get(failure, 1)

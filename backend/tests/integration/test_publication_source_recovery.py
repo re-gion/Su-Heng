@@ -439,10 +439,54 @@ async def test_source_lookup_uses_article_title_and_ignores_platform_credit(runt
         await runner._recover_publication_sources(task, await db.list_evidence(task.id))
         assert len(search.calls) == 1
         query = search.calls[0].query
-        assert title in query
+        assert task.event_query in query
+        assert "情况通报" in query
         assert "甲乙大学" in query
         assert "澎湃Logo" not in query and "澎湃号" not in query
         assert "报道平台" not in query
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_official_notice_lookup_uses_its_heading_with_event_and_checks_dated_copy(
+    runtime_dir,
+):
+    db, task, runner, search, fetcher = await setup_recovery(runtime_dir)
+    try:
+        for i, title in enumerate(("【栏目】复核结果全文", "刚刚，学校回应了", "该校发布最新消息")):
+            await db.add_evidence(
+                EvidenceCreate(
+                    task_id=task.id,
+                    url=f"https://mirror{i}.example/news/42",
+                    title=title,
+                    source_name=f"媒体{i}",
+                    fetch_status="fetched",
+                    published_at="2025-09-20",
+                    fetched_at="2025-09-20",
+                    content_text=f"媒体{i}报道\n" + NOTICE_BODY,
+                    snapshot_path=f"mirror{i}.html",
+                    content_sha256=f"mirror{i}",
+                    extra={"scope_status": "main", "page_source_credits": ["来源/甲乙大学官网"]},
+                )
+            )
+        original_search = search.search
+
+        async def search_by_heading(params):
+            if "情况通报" not in params.query or '"' in params.query:
+                search.calls.append(params)
+                return []
+            return await original_search(params)
+
+        search.search = search_by_heading
+        await runner._recover_publication_sources(task, await db.list_evidence(task.id))
+
+        assert len(search.calls) == 1
+        assert task.event_query in search.calls[0].query
+        assert fetcher.calls == ["https://school.example.edu/notice/42"]
+        original = next(e for e in await db.list_evidence(task.id) if e.url in fetcher.calls)
+        assert original.extra["scope_status"] == "main"
+        assert original.extra["publication_identity"]["credited_evidence_id"] == "E001"
     finally:
         await db.close()
 

@@ -574,6 +574,7 @@ class V1Orchestrator:
                     issuer = issuer.strip("（）()，,：:")
                     if re.search(r"(?:号|平台)[·•].*(?:媒体|政务|资讯|机构)$", issuer):
                         continue
+                    official_site = issuer.endswith(("官方网站", "官网"))
                     issuer = re.sub(r"(?:官方网站|官网|微信公众号|新闻客户端)$", "", issuer)
                     if len(issuer) < 3 or issuer in {
                         "互联网",
@@ -583,7 +584,7 @@ class V1Orchestrator:
                         "微信公众号",
                     }:
                         continue
-                    yield issuer
+                    yield issuer, official_site
 
         targets = {}
         for item in evidence:
@@ -599,30 +600,69 @@ class V1Orchestrator:
             title = article_title(item)
             if not title:
                 continue
-            for issuer in credited_issuers(text):
+            for issuer, official_site in credited_issuers(text):
                 # Several mirrors of the same release produce one source lookup.
                 date = str(item.published_at)[:10]
                 body_id = fingerprint(re.sub(r"\s+", "", item.content_text or "")[:500])
                 target_key = (issuer, date, body_id)
                 previous = targets.get(target_key)
-                if previous is None or len(
-                    (item.extra or {}).get("page_source_credits", [])
-                ) == 1 < len((previous[1].extra or {}).get("page_source_credits", [])):
-                    targets[target_key] = (title, item)
-        ordered = sorted(
+                priority = (
+                    not official_site,
+                    len((item.extra or {}).get("page_source_credits", [])),
+                )
+                if previous is None or priority < (
+                    not previous[2],
+                    len((previous[1].extra or {}).get("page_source_credits", [])),
+                ):
+                    targets[target_key] = (title, item, official_site)
+        lookups = {}
+        for (issuer, date, _), (title, item, official_site) in sorted(
             targets.items(),
             key=lambda entry: (
-                entry[0][0] not in (task.resolved_event_query or task.event_query),
+                entry[0][0] not in scope.event_query,
+                not entry[1][2],
                 len((entry[1][1].extra or {}).get("page_source_credits", [])) != 1,
             ),
-        )[:3]
-        for (issuer, date, body_id), (title, credited_source) in ordered:
-            key = "report:source_recovery:" + fingerprint([issuer, date, title, body_id])
+        ):
+            heading = next(
+                (
+                    line.strip()
+                    for line in (item.content_text or "").splitlines()[:8]
+                    if re.fullmatch(
+                        r"(?:关于[^。；！？]{1,45})?(?:情况通报|情况说明|调查通报|处理通报|声明|公告|通告)",
+                        line.strip(),
+                    )
+                ),
+                None,
+            )
+            if official_site and heading:
+                topic = (
+                    scope.event_query
+                    if issuer in scope.event_query
+                    else f"{issuer} {scope.event_query}"
+                )
+                query = f"{topic} {date} {heading} 官方原文"[:200]
+            else:
+                query = f'{issuer} "{title}" {date} 官方原文'[:200]
+            lookups.setdefault((issuer, date, query), []).append(item)
+        for (issuer, date, query), crediting_pages in list(lookups.items())[:3]:
+            key = "report:source_recovery:" + fingerprint([issuer, date, query])
             if await self.database.checkpoint(task.id, key):
                 continue
             current = await self.database.get_task(task.id)
             if not current or current.status != "running" or not self._llm_phase_has_room():
                 break
+            credit_domains = {item.source_domain for item in crediting_pages}
+
+            async def confirm(original, pages=crediting_pages[:3], issuer=issuer):
+                for item in pages:
+                    confirmed = await self.evidence.confirm_credited_publication(
+                        original, item, issuer, scope
+                    )
+                    if (confirmed.extra or {}).get("main_eligible"):
+                        return confirmed
+                return original
+
             captured = [
                 item
                 for item in evidence
@@ -632,9 +672,7 @@ class V1Orchestrator:
                 and issuer in (item.publisher_entity, item.source_name)
             ]
             for original in captured[:2]:
-                restored = await self.evidence.confirm_credited_publication(
-                    original, credited_source, issuer, scope
-                )
+                restored = await confirm(original)
                 if (restored.extra or {}).get("main_eligible"):
                     await self.database.save_checkpoint(
                         task.id,
@@ -644,19 +682,16 @@ class V1Orchestrator:
                     break
             if await self.database.checkpoint(task.id, key):
                 continue
-            query = f'{issuer} "{title}" {date} 官方原文'[:200]
             await self.database.save_checkpoint(
                 task.id, key, {"phase": "verified", "status": "attempted", "query": query}
             )
 
-            def accepts(
-                result, issuer=issuer, credit_domain=credited_source.source_domain, query=query
-            ):
+            def accepts(result, issuer=issuer, credit_domains=credit_domains, query=query):
                 publisher_matches = issuer in (result.source_name or "") or re.search(
                     rf"[-_|｜]\s*{re.escape(issuer)}(?:官网|官方网站|新闻网)?\s*$", result.title
                 )
                 # Do not spend this lookup on another mirror of the crediting page.
-                if (urlsplit(result.url).hostname or "") == credit_domain or not publisher_matches:
+                if (urlsplit(result.url).hostname or "") in credit_domains or not publisher_matches:
                     return False, ("credited_source_mismatch",)
                 decision = scope.classify_result(
                     result, agent="media_propagation", search_query=query
@@ -733,9 +768,7 @@ class V1Orchestrator:
                     if updated is None:
                         break
                     if updated.fetch_status == "fetched":
-                        updated = await self.evidence.confirm_credited_publication(
-                            updated, credited_source, issuer, scope
-                        )
+                        updated = await confirm(updated)
                         fetched.append(updated.local_id)
                     await self.events.emit(
                         task.id,

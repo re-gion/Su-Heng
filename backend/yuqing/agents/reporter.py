@@ -47,7 +47,7 @@ from yuqing.core.publication_relations import (
 
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "reader-decision-v5"
-    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v14"
+    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v15"
     RELATION_VERSION = "source-identity-v11"
 
     @staticmethod
@@ -324,6 +324,32 @@ class OpenAIReportAgent:
                     )
                 stage = "semantic"
                 review = await self._summary_review(writing_context, paragraphs, approved_bindings)
+                rejections = review.get("binding_rejections", [])
+                if attempt + 1 == SUMMARY_LIMITS["max_draft_attempts"] and len(rejections) == 1:
+                    ref = rejections[0]["id"]
+                    if review.get("basis_sentences", {}).get(ref) is False:
+                        ids = iter(sentence_ids(paragraphs))
+                        candidate = [
+                            {**p, "sentences": [s for s in p["sentences"] if next(ids) != ref]}
+                            for p in paragraphs
+                        ]
+                        if not check_paragraphs(
+                            candidate, context, require_headings=True, number_policy=NUMBER_POLICY
+                        ):
+                            diagnostics.append(
+                                {
+                                    "attempt": attempt + 1,
+                                    "stage": stage,
+                                    "codes": ["sentence_not_supported"],
+                                    "issues": review_issues(review, paragraphs),
+                                }
+                            )
+                            # The remaining sentences already passed binding review.
+                            # The complete shortened draft must still pass coverage.
+                            paragraphs = candidate
+                            review = await self._summary_review(
+                                writing_context, paragraphs, approved_bindings
+                            )
                 if review_accepted(review, paragraphs):
                     result = {
                         "paragraphs": paragraphs,

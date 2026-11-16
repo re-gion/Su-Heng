@@ -251,6 +251,29 @@ def test_fact_table_folds_same_event_and_status_without_hiding_other_badges():
     assert block == saved
 
 
+def test_fact_table_folds_undated_media_attribution_to_same_official_publication():
+    basis = "明川大学2025年8月1日发布情况通报称，已组建专家组对设备质量开展全面复核。"
+    quoted = (
+        "地方新闻报道，明川大学2025年8月1日在官网发布情况通报称，"
+        "已组建专家组对设备质量开展全面复核。"
+    )
+    late = "地方新闻2025年9月20日报道，" + basis
+    facts = [
+        fact("C001", basis, "E001"),
+        fact("C002", quoted, "E002"),
+        fact("C003", late, "E003"),
+    ]
+    nodes = event_timeline(facts)
+    assert [(n["claim_ref"], n["date"]) for n in nodes] == [
+        ("C001", "2025-08-01"),
+        ("C002", "2025-08-01"),
+        ("C003", "2025-09-20"),
+    ]
+    rendered = _fact_table({"section": "03", "items": facts})
+    assert re.findall(r'id="claim-(C\d+)"', rendered) == ["C001", "C002", "C003"]
+    assert "展开" in rendered and 'href="#evidence-E002"' in rendered
+
+
 def test_exact_named_case_keeps_each_stage_and_its_own_sources():
     cards = [
         {

@@ -6,12 +6,15 @@ import copy
 import re
 from datetime import date
 
-from yuqing.core.timeline_grouping import group_timeline_events
+from yuqing.core.timeline_grouping import group_timeline_events, publication_reading_parts
 
 DATE = re.compile(r"(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 _NESTED_OR_CUTOFF_DATE = re.compile(
     r"(?:通报|报道|声明|公告)(?:称|指出|认定)|表示|指出|认定|判定|确认|"
     r"(?:针对|关于|截至|涉及|就|对)\s*$"
+)
+_UNDATED_NEWS_ATTRIBUTION = re.compile(
+    r"^(?:据)?[^，,。；;！？\n]{2,32}?报道(?:称|指出|显示)?[，,]\s*"
 )
 DISCLOSURE = re.compile(
     r"发帖|发文|发布.{0,12}(?:测试视频|评测|测评|帖文|文章)|首次.{0,8}(?:公开|曝光|披露)"
@@ -33,6 +36,11 @@ def explicit_event_date(text: str) -> str | None:
     The prefix may name an actor (including model numbers) or attribute a record.
     Time-of-day modifiers do not change the day. Invalid and uncertain days stay out.
     """
+    attribution = _UNDATED_NEWS_ATTRIBUTION.match(text)
+    if attribution and not DATE.search(attribution[0]) and publication_reading_parts(text):
+        # The press attribution has no date of its own. Keep the explicitly
+        # dated publication in the supported statement as the action.
+        text = text[attribution.end() :]
     match = DATE.search(text)
     if not match:
         return None

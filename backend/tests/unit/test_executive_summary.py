@@ -188,6 +188,47 @@ async def test_type_reference_repair_explains_the_failed_sentence_contract(summa
     assert result.get("status") not in {"unavailable", "rejected"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("omission", [False, True])
+async def test_final_binding_failure_can_remove_one_sentence_and_still_requires_full_review(
+    summary_report, omission
+):
+    unsupported = "相关机构已宣布下一轮调查结束。"
+
+    class SingleUnsupportedSentence(Gateway):
+        full_reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            value = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in value:
+                value["paragraphs"][2]["sentences"].append(
+                    {
+                        "text": unsupported,
+                        "kind": "fact",
+                        "claim_refs": ["C001"],
+                        "analysis_refs": [],
+                        "limitation_refs": [],
+                    }
+                )
+            if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+                sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                if sentence["text"] == unsupported:
+                    value.update(supported=False, reason="当前依据不支持已结束。")
+            elif role == "verifier":
+                self.full_reviews += 1
+                assert unsupported not in prompt
+                value["no_material_omission"] = not omission
+            return value
+
+    gateway = SingleUnsupportedSentence()
+    await attach_executive_summary(summary_report, OpenAIReportAgent(gateway, "fixture"))
+    summary = next(b for b in summary_report["blocks"] if b["type"] == "executive_summary")
+    assert gateway.full_reviews == 1
+    assert summary["summary_mode"] == ("fact_brief" if omission else "narrative")
+    if not omission:
+        assert summary["paragraphs"] == paragraphs()
+
+
 async def attach(report, **options):
     gateway = Gateway(**options)
     await attach_executive_summary(report, OpenAIReportAgent(gateway, "fixture"))
