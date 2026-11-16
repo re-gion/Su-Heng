@@ -1197,6 +1197,55 @@ async def test_summary_only_removes_located_redundancy_and_reviews_coverage_agai
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("dispute_unfocused", [False, True])
+async def test_summary_repairs_repeat_without_erasing_a_paragraph(
+    summary_report, dispute_unfocused
+):
+    baseline = paragraphs()
+    draft = copy.deepcopy(baseline)
+    draft[-1]["sentences"] = [
+        {**draft[0]["sentences"][0], "text": "学校公开说明称，已受理该诉求。"}
+    ]
+
+    class CrossParagraphRepeat(Gateway):
+        drafts = 0
+        reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter" and "阶段：四段摘要规划。" not in prompt:
+                self.drafts += 1
+                if self.drafts == 1:
+                    return {"paragraphs": copy.deepcopy(draft)}
+                feedback = json.loads(prompt.split("\n", 1)[1])["repair_feedback"]
+                assert feedback["repair_roles"] == (
+                    ["dispute", "limits"] if dispute_unfocused else ["limits"]
+                )
+                revised = copy.deepcopy(baseline)
+                revised[0]["sentences"][0]["text"] = "重写了已经通过的事件段。"
+                return {"paragraphs": revised}
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                self.reviews += 1
+                current = json.loads(prompt.split("\n", 1)[1])["paragraphs"]
+                result = approval(current)
+                if current[-1]["sentences"][0]["text"] == draft[-1]["sentences"][0]["text"]:
+                    result.update(
+                        non_redundant=False, duplicate_pairs=[{"keep": "S01", "remove": "S04"}]
+                    )
+                    result["paragraphs"]["dispute"]["focused"] = not dispute_unfocused
+                return result
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    gateway = CrossParagraphRepeat()
+    summary_report["quality"]["release_gate_missing"] = ["executive_summary"]
+    await attach_executive_summary(summary_report, OpenAIReportAgent(gateway, "fixture"))
+
+    assert summary_report["quality"]["executive_summary"]["status"] == "complete"
+    assert summary_report["quality"]["release_label"] == "full_report"
+    assert summary_report["blocks"][1]["paragraphs"] == baseline
+    assert gateway.drafts == 2 and gateway.reviews == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("coverage_passes", [True, False])
 async def test_last_draft_removes_reviewed_redundancy_without_another_draft(
     summary_report, coverage_passes
