@@ -209,6 +209,55 @@ async def test_scope_redaction_preserves_canonical_analysis_observation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rejected_node,expected_edges", [("E003", 1), ("E002", 0)])
+async def test_scope_rejection_affects_gate_only_for_reviewed_publication_edges(
+    analytical_report, runtime_dir, rejected_node, expected_edges
+):
+    report = copy.deepcopy(analytical_report[0])
+    report["blocks"] = [b for b in report["blocks"] if b["type"] != "propagation_network"]
+    report["quality"]["release_gate_missing"] = []
+    network = {
+        "block_id": "network-test",
+        "type": "propagation_network",
+        "section": "04",
+        "nodes": [
+            {"evidence_id": ref, "framing": "隐私待审" if ref == rejected_node else "已审发布"}
+            for ref in ("E001", "E002", "E003")
+        ],
+        "edges": [
+            {"from_evidence_id": "E001", "to_evidence_id": "E002", "review_status": "accepted"}
+        ],
+    }
+    report["blocks"].append(network)
+
+    class Reviewer:
+        def bind(self, *_args):
+            pass
+
+        async def review(self, texts, **_kwargs):
+            return [
+                SimpleNamespace(
+                    allowed=text != "隐私待审",
+                    status="rejected" if text == "隐私待审" else "accepted",
+                    text=text,
+                    diagnostic=None,
+                )
+                for text in texts
+            ]
+
+    builder = FullReportBuilder(None, runtime_dir, scope_reviewer=Reviewer())
+    await builder._retain_reviewed_blocks(
+        report, SimpleNamespace(id="fixture", investigation_scope="public_event")
+    )
+
+    assert rejected_node not in {node["evidence_id"] for node in network["nodes"]}
+    assert len(network["edges"]) == expected_edges
+    assert ("scope_content_rejected" in report["quality"]["release_gate_missing"]) is (
+        expected_edges == 0
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("has_safe_case", [False, True])
 async def test_history_review_keeps_only_approved_cards(
     analytical_report, runtime_dir, has_safe_case

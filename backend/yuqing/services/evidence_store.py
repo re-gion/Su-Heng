@@ -161,6 +161,17 @@ def extract_page_published_at(
     markup.feed(raw_html)
     markup.close()
     decoded = html.unescape("".join(markup.parts))
+    # Prefer an explicit article-header publication date over machine metadata,
+    # which may reflect when an existing notice was indexed or stored.
+    visible_header = re.search(
+        r"^\s*(?:发布时间|发布日期)\s*[：:]\s*"
+        r"(20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[ \t]+\d{1,2}:\d{2}(?::\d{2})?)?)"
+        r"[ \t]*$\n[ \t]*(?:信息来源|文章来源|来源)\s*[：:]",
+        "\n".join(content_text.splitlines()[:10]),
+        re.MULTILINE,
+    )
+    if visible_header and (normalized := _normalize_page_date(visible_header[1])):
+        return normalized, "page_visible"
     structured_patterns = (
         r'<meta[^>]+(?:property|name|itemprop)=["\'](?:article:published_time|datePublished|pubdate|publishdate|publish_time)["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name|itemprop)=["\'](?:article:published_time|datePublished|pubdate|publishdate|publish_time)["\']',

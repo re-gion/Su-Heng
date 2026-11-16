@@ -47,8 +47,8 @@ from yuqing.core.publication_relations import (
 
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "reader-decision-v5"
-    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v13"
-    RELATION_VERSION = "source-identity-v10"
+    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v14"
+    RELATION_VERSION = "source-identity-v11"
 
     @staticmethod
     def _analysis_limit(context: dict[str, Any]) -> int:
@@ -249,7 +249,7 @@ class OpenAIReportAgent:
                             "issues": issues,
                         }
                     )
-                    if binding_only:
+                    if binding_only and not feedback.get("invalid_replacement"):
                         feedback["invalid_replacement"] = {
                             "paragraphs": paragraphs,
                             "issues": issues,
@@ -517,6 +517,8 @@ class OpenAIReportAgent:
             "核对相关正文和原引用，去掉当前依据不支持的成分，必要时换成确实支持的现有引用。"
             "无法忠实概括时，优先采用一条原陈述或一项已审判断的完整要点，保留说话方、条件、否定及证据强度。"
             "具体证据缺口若来自已审分析的uncertainty，用analysis并绑定该项，不能用通用抓取局限代替。"
+            "fact必须给claim_refs且analysis_refs为空；analysis必须给analysis_refs；limitation必须给limitation_refs且analysis_refs为空。"
+            "limits段可以有analysis句，按句义选择类型，不要因段落名字改为limitation。"
             "如有invalid_replacement，按标注修正数字、格式或长度。完整日期和数值沿用真正引用依据中的形式。"
             "每项替换保留同一个id、只写一个简明要点。不要重写其他句子、改变句数、增加内部过程或自填审查结论。"
             '输出 {"replacements":[{"id":"S01","text":"一句正文","kind":"fact|analysis|limitation",'
@@ -1104,6 +1106,9 @@ class OpenAIReportAgent:
             "共同引用另一个未在节点中的通报，不代表两家媒体互相转载；来源名称与网页主体不能混淆。"
             "核对来源署名是否指向from的实际发布主体，再结合标题、日期、网址及identity_passage识别具体原稿。"
             "联合署名的正式通报若被明确点名某一签发单位，并实际引述同一份通报，可判为对该通报的引述，不能据此判定整篇转载或推断各载体最先发布时间。"
+            "官方网站若在本页署名中明确列出机构发布渠道，目标页点名该渠道并逐字引述这份同日通报，"
+            "可判定为引述该机构通报，来源节点用于回查该通报的官网留档。"
+            "这一判定不表示目标页链接到官网地址，也不认定不同渠道的首发顺序；如署名、日期或正文指向另一份稿件则拒绝。"
             "identity_passage为两篇材料逐字共有的连续片段；正文相同本身不能证明引用，仍需明确来源署名或链接。"
             "必须审查edge.relation本身：repost须证明整篇稿源/转载，不能仅凭正文‘据某媒体报道’放行；"
             "follow_up须证明后续报道具体引述或跟进原稿，纯来源标签不能一证两用。"

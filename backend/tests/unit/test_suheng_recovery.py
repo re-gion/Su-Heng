@@ -197,6 +197,15 @@ def test_key_fact_corroboration_only_selects_dated_independent_original():
     assert [(item.local_id, candidate.local_id) for _, item, candidate in candidates] == [
         ("C001", "E003")
     ]
+    attributed = SimpleNamespace(
+        **{
+            **vars(claim),
+            "local_id": "C002",
+            "text": "媒体报道称，学校于2025年7月25日公布复核结果。",
+        }
+    )
+    candidates = V1Orchestrator._corroboration_candidates([attributed, claim], evidence, 6)
+    assert [candidate[1].local_id for candidate in candidates] == ["C001", "C002"]
 
 
 @pytest.mark.asyncio

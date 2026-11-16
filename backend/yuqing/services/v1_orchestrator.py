@@ -394,7 +394,20 @@ class V1Orchestrator:
                 score = sum(fragment in material for fragment in fragments)
                 if score >= 4:
                     candidates.append((score, claim, source))
-        candidates.sort(key=lambda item: (-item[0], item[2].source_tier, item[1].local_id))
+
+        def priority(candidate):
+            score, claim, source = candidate
+            media_attribution = bool(
+                re.search(r"报道称|报道指出|转述.{0,12}称|据.{2,18}报道", claim.text[:48])
+            )
+            return (
+                media_attribution,
+                -score / max(1, len(claim.text) - 4),
+                source.source_tier,
+                claim.local_id,
+            )
+
+        candidates.sort(key=priority)
         return candidates
 
     async def _corroborate_key_fact(self, task_id: str, depth: str) -> None:
@@ -3870,13 +3883,15 @@ class V1Orchestrator:
                 for k in (
                     "institution_scope_report_review",
                     "scope_review_incomplete",
-                    "scope_content_rejected",
                 )
             ):
                 end_reason = "review_incomplete"
                 self._limitations.append(
                     "范围或隐私审查尚未完成，保留已经通过审查的内容；该故障不触发新取证或整份报告重建。"
                 )
+                break
+            if set(missing) == {"scope_content_rejected"}:
+                end_reason = "review_incomplete"
                 break
             if not missing:
                 end_reason = "core_complete"

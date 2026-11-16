@@ -118,6 +118,13 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(
             calls = 0
             agent = None
 
+            def __init__(self):
+                self.gateway = self
+                self.waits = []
+
+            async def wait_for_recovery(self, role):
+                self.waits.append(role)
+
             async def enrich(self, _context):
                 return {}
 
@@ -206,6 +213,7 @@ async def test_full_builder_generates_summary_from_final_screened_blocks(
             report = await builder.finalize_summary(task.id, report)
             assert await builder.finalize_summary(task.id, resumed, cached_only=True) == report
         assert reporter.calls == 1
+        assert reporter.waits == (["reporter", "reporter"] if defer_summary else ["reporter"])
         summary = next(b for b in report["blocks"] if b["type"] == "executive_summary")
         assert summary["summary_mode"] == "narrative"
         assert report["quality"]["executive_summary"]["status"] == "complete"

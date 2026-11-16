@@ -344,6 +344,7 @@ class FullReportBuilder:
         }
         units = []
         publication_units = set()
+        connected_publications = set()
         for block in report["blocks"]:
             if block["type"] in protected_types:
                 continue
@@ -353,6 +354,23 @@ class FullReportBuilder:
                     if block["type"] == "propagation_network"
                     else ("cards", "reference_candidates", "excluded_candidates")
                 )
+                if block["type"] == "propagation_network":
+                    accepted_edges = [
+                        edge
+                        for edge in block.get("edges", [])
+                        if edge.get("review_status") == "accepted"
+                    ]
+                    endpoints = {
+                        edge.get(key)
+                        for edge in accepted_edges
+                        for key in ("from_evidence_id", "to_evidence_id")
+                    }
+                    connected_publications.update(id(edge) for edge in accepted_edges)
+                    connected_publications.update(
+                        id(node)
+                        for node in block.get("nodes", [])
+                        if node.get("evidence_id") in endpoints
+                    )
                 for field in fields:
                     entries = block.get(field, [])
                     if block["type"] == "propagation_network":
@@ -553,7 +571,8 @@ class FullReportBuilder:
             ) or any(
                 part - safe
                 for owner, item, part in units
-                if isinstance(owner, list) and id(owner) in core_lists | publication_units
+                if isinstance(owner, list)
+                and (id(owner) in core_lists or id(item) in connected_publications)
             )
             if core_removed or not report["metrics"]["key_claims_rendered"]:
                 quality["release_label"] = (
@@ -874,6 +893,11 @@ class FullReportBuilder:
             used = gateway.tokens_used
             gateway.token_limit = used + max(0, cap - used) * 3 // 4
         try:
+            wait_for_reporter = getattr(
+                getattr(self.reporter, "gateway", None), "wait_for_recovery", None
+            )
+            if not diagnostic_only and wait_for_reporter is not None:
+                await wait_for_reporter("reporter")
             return await self._build(
                 task_id,
                 forum=forum,
@@ -2096,6 +2120,11 @@ class FullReportBuilder:
         scope_required = task.investigation_scope in PROTECTED_SCOPES
         if scope_required and self.scope_reviewer is not None:
             self.scope_reviewer.bind(self.database, task_id, task.investigation_scope)
+        wait_for_reporter = getattr(
+            getattr(self.reporter, "gateway", None), "wait_for_recovery", None
+        )
+        if not cached_only and wait_for_reporter is not None:
+            await wait_for_reporter("reporter")
         await attach_executive_summary(
             report,
             self.reporter,
@@ -2356,6 +2385,9 @@ class FullReportBuilder:
                 # Joint signatories of a notice can be cited individually.
                 # These terms only nominate an original for independent review.
                 names.update(re.split(r"[、，,]", identity["publisher"] or ""))
+                for credit in (item.extra or {}).get("page_source_credits", []):
+                    _, _, credited = credit.replace("：", ":", 1).partition(":")
+                    names.update(part.strip() for part in re.split(r"[、，,]", credited))
             # Aliases expand candidate recall only. The relation still needs a
             # literal credit, matching publication and independent review below.
             domain = (urlsplit(item.url).hostname or "").lower()
@@ -2542,6 +2574,7 @@ class FullReportBuilder:
                     "source_name": identity["publisher"],
                     "publisher_entity": identity["publisher"],
                     "candidate_publisher_names": sorted(publisher_terms(item)),
+                    "source_role": getattr(item, "source_role", None),
                     "article_body_sha256": hashlib.sha256(body.encode()).hexdigest()
                     if len(body) >= 240
                     else None,

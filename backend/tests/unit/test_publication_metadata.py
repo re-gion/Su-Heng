@@ -3,6 +3,13 @@ import pytest
 from yuqing.services.evidence_store import extract_page_published_at
 
 
+def test_explicit_article_header_date_wins_over_later_index_metadata():
+    html = '<meta property="article:published_time" content="2026-10-16T09:08:00">'
+    content = "首页\n新闻发布\n部门联合核查公告\n发布时间：2026-10-15 22:04\n来源：办公厅、官方账号\n公告正文"
+
+    assert extract_page_published_at(html, content) == ("2026-10-15T22:04:00", "page_visible")
+
+
 @pytest.mark.parametrize(
     "metadata, expected, provenance",
     [
