@@ -44,7 +44,7 @@ from yuqing.services.executive_summary import (
 )
 from yuqing.services.forum import ForumMessage
 from yuqing.services.historical_data import HistoricalDataService, HotSnapshotPoint
-from yuqing.services.history_comparison import independent_case_evidence
+from yuqing.services.history_comparison import independent_case_evidence, same_investigation_event
 from yuqing.services.institution_scope import PROTECTED_SCOPES, InstitutionScopeReviewer
 from yuqing.services.investigation_scope import (
     InvestigationScope,
@@ -1620,6 +1620,10 @@ class FullReportBuilder:
                 continue
             case = (claim.analysis_data or {}).get("historical_case")
             case = case if isinstance(case, dict) else {}
+            if same_investigation_event(
+                task.resolved_event_query or task.event_query, str(case.get("name") or "")
+            ):
+                continue
             issue = historical_identity_issue(case, item["text"])
             if issue:
                 refs = [

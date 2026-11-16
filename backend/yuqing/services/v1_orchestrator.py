@@ -884,6 +884,7 @@ class V1Orchestrator:
         *,
         recovery_round: int = 0,
         missing: Sequence[str] = (),
+        history_only: bool = False,
     ) -> None:
         """One persisted, bounded recovery per deficient investigation chapter."""
         task = await self.database.get_task(task_id)
@@ -908,13 +909,17 @@ class V1Orchestrator:
             and c.independent_sources >= 1
             and set(c.evidence_ids) & main
         ]
-        if len(usable) < 2 or set(missing) & {
-            "main_evidence",
-            "verifiable_key_claim",
-            "event_timeline",
-            "event_chronology",
-            "in_window_timeline",
-        }:
+        if not history_only and (
+            len(usable) < 2
+            or set(missing)
+            & {
+                "main_evidence",
+                "verifiable_key_claim",
+                "event_timeline",
+                "event_chronology",
+                "in_window_timeline",
+            }
+        ):
             goals["fact_investigator"] = (
                 "补齐本事件从起点到当前进展的事实链：先找首次公开披露、原始测试或发帖，"
                 "再找首轮回应、调查或诉讼启动、关键转折及最新处置。"
@@ -932,7 +937,7 @@ class V1Orchestrator:
                     )
                 )
         relation_state = await self.database.checkpoint(task_id, "report:relations") or {}
-        if "media_propagation" in missing or not relation_state.get("edges"):
+        if not history_only and ("media_propagation" in missing or not relation_state.get("edges")):
             await self._recover_publication_sources(task, evidence)
             credits = list(
                 dict.fromkeys(
@@ -979,6 +984,8 @@ class V1Orchestrator:
                 "不能改成本事件旧报道。只使用本次任务创建前已公开的材料；旧陈述若有新来源，"
                 "仍须输出带新证据编号的陈述以重新核验。"
             )
+        if history_only and not goals:
+            return
         for name, goal in goals.items():
             if name not in self.agents:
                 continue
@@ -2725,6 +2732,19 @@ class V1Orchestrator:
                     raise _ClaimBudgetReached
                 evidence_by_id = {item.local_id: item for item in inventory}
                 agent_budget = self.budget_for(self._budget_depth)
+                if agent_name == "history_insight":
+                    generated = [
+                        item
+                        for item in generated
+                        if not (
+                            isinstance(
+                                case := (item.analysis_data or {}).get("historical_case"), dict
+                            )
+                            and same_investigation_event(
+                                scope.event_query, str(case.get("name") or "")
+                            )
+                        )
+                    ]
                 generated, review_incomplete = await self._review_generated(task_id, generated)
                 accepted_claims = [True] * len(generated)
                 for item, scope_allowed in zip(generated, accepted_claims, strict=True):
@@ -3846,6 +3866,19 @@ class V1Orchestrator:
                 {item.local_id: item for item in await self.database.list_evidence(task_id)},
             )
             await self._repair_history_comparison(task_id, allow_new_case=True)
+            if (
+                "history_insight" in self.agents
+                and int(getattr(self.usage, "tokens_used", 0)) < token_limit * 9 // 10 - 30_000
+            ):
+                # Try one focused lookup before assembling the report, even if
+                # the main sections no longer need evidence recovery.
+                await self._recover_report_gaps(
+                    task_id,
+                    investigation_query,
+                    board,
+                    recovery_round=1,
+                    history_only=True,
+                )
             await self._emit_budget(task_id, task.depth)
         current_task = await self.database.get_task(task_id)
         evidence = await self.database.list_evidence(task_id)

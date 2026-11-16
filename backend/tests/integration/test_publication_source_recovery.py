@@ -545,6 +545,34 @@ async def test_history_recovery_skips_cross_language_current_event_and_undated_l
 
 
 @pytest.mark.asyncio
+async def test_missing_history_can_recover_once_before_assembling_the_report(runtime_dir):
+    db, task, runner, search, _ = await setup_recovery(runtime_dir)
+    try:
+        runner.agents.update(
+            {
+                agent: SimpleNamespace()
+                for agent in ("fact_investigator", "media_propagation", "history_insight")
+            }
+        )
+        calls = []
+
+        async def run_agent(**kwargs):
+            calls.append((kwargs["agent_name"], kwargs["summary_phase"], kwargs["inner_limit"]))
+
+        runner._run_agent = run_agent
+        board = await ForumBoard.restore(db, task.id)
+        for _ in range(2):
+            await runner._recover_report_gaps(
+                task.id, task.event_query, board, recovery_round=1, history_only=True
+            )
+
+        assert calls == [("history_insight", "quality_recovery", 1)]
+        assert not search.calls
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sealed", [False, True])
 async def test_captured_source_date_can_be_recovered_without_refetch_or_claim_changes(
     runtime_dir, sealed
