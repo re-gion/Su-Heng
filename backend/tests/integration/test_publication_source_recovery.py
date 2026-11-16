@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from yuqing.agents.reporter import OpenAIReportAgent
+from yuqing.agents.runtime import GeneratedClaim
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchResult
 from yuqing.core.search.base import SearchResult
@@ -12,7 +13,7 @@ from yuqing.services.full_report import FullReportBuilder
 from yuqing.services.investigation_scope import ReportReleaseAssessment
 from yuqing.services.v1_orchestrator import V1Orchestrator
 from yuqing.storage.db import Database
-from yuqing.storage.models import EvidenceCreate, TaskCreate
+from yuqing.storage.models import ClaimCreate, EvidenceCreate, TaskCreate
 from yuqing.storage.snapshots import SnapshotStore
 
 NOTICE_BODY = "情况通报\n甲乙大学公布复核程序与处理结果。" + "\n".join(
@@ -567,6 +568,80 @@ async def test_missing_history_can_recover_once_before_assembling_the_report(run
             )
 
         assert calls == [("history_insight", "quality_recovery", 1)]
+        assert not search.calls
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_core_chronology_uses_existing_disclosure_before_optional_history(runtime_dir):
+    db, task, runner, search, _ = await setup_recovery(runtime_dir)
+    try:
+        disclosure = "2025年6月1日，一名学生发帖称曾向甲乙大学反映图书馆管理问题。"
+        source = await db.add_evidence(
+            EvidenceCreate(
+                task_id=task.id,
+                url="https://news.example/library-first-disclosure",
+                title="甲乙大学图书馆事件经过",
+                fetch_status="fetched",
+                fetched_at="2025-06-10",
+                content_text=disclosure,
+                snapshot_path="first-disclosure.html",
+                content_sha256="first-disclosure",
+                extra={"scope_status": "main"},
+            )
+        )
+        budget = runner.budget_for(task.depth)
+        for index in range(budget.max_claims - 2):
+            claim = await db.add_claim(
+                ClaimCreate(
+                    task_id=task.id,
+                    text=f"2025年6月1日，甲乙大学成立第{index + 1}个工作组。",
+                    agent="fact_investigator",
+                    evidence_ids=[source.local_id],
+                ),
+                max_claims=budget.max_claims,
+                max_evidence_per_claim=budget.max_evidence_per_claim,
+            )
+            await db.set_claim_verification(
+                claim.pk,
+                badge="unverified",
+                verdict="support",
+                reason="测试材料",
+                state="complete",
+                independent_sources=1,
+                max_source_tier=2,
+                verifier_model="fixture",
+            )
+
+        class FactAgent:
+            async def summarize(self, query, sources):
+                assert "2025-06-01" in query
+                assert [item.local_id for item in sources] == [source.local_id]
+                return [GeneratedClaim(text=disclosure, evidence_ids=[source.local_id])]
+
+        async def unexpected(*_args, **_kwargs):
+            pytest.fail("核心首帖有已抓取来源，无需先调用历史席或重新规划搜索")
+
+        checked = []
+
+        async def verify_claim(claim, **_kwargs):
+            checked.append(claim.text)
+
+        runner.agents.update(fact_investigator=FactAgent(), history_insight=SimpleNamespace())
+        runner._repair_history_comparison = unexpected
+        runner._run_agent = unexpected
+        runner.verification.verify_claim = verify_claim
+        await db.save_checkpoint(task.id, "report:relations", {"edges": [{"approved": True}]})
+        board = await ForumBoard.restore(db, task.id)
+
+        await runner._prepare_report_history(task, task.event_query, board, token_limit=1_400_000)
+        await runner._recover_report_gaps(
+            task.id, task.event_query, board, recovery_round=1, missing=["event_chronology"]
+        )
+
+        assert checked == [disclosure]
+        assert len(await db.list_claims(task.id)) == budget.max_claims - 1
         assert not search.calls
     finally:
         await db.close()

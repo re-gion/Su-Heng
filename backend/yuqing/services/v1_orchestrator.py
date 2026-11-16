@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
+from itertools import zip_longest
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,7 +15,7 @@ from openai import RateLimitError
 
 from yuqing.agents.comment_observations import fingerprint
 from yuqing.agents.runtime import GeneratedClaim, InvestigationAgent, Reflection, SearchQuery
-from yuqing.core.event_chronology import earlier_event_candidates
+from yuqing.core.event_chronology import DISCLOSURE, dated_action, earlier_event_candidates
 from yuqing.core.events import EventBus
 from yuqing.core.fetch.base import FetchProvider
 from yuqing.core.history_cards import history_relevance
@@ -408,7 +409,15 @@ class V1Orchestrator:
             )
 
         candidates.sort(key=priority)
-        return candidates
+        by_claim = {}
+        for candidate in candidates:
+            by_claim.setdefault(candidate[1].local_id, []).append(candidate)
+        return [
+            candidate
+            for group in zip_longest(*by_claim.values())
+            for candidate in group
+            if candidate is not None
+        ]
 
     async def _corroborate_key_fact(self, task_id: str, depth: str) -> None:
         """Verify at most three additional relations; never infer support from overlap."""
@@ -882,6 +891,96 @@ class V1Orchestrator:
             ):
                 break
 
+    async def _prepare_report_history(self, task, event_query, board, *, token_limit) -> None:
+        claims = await self.database.list_claims(task.id)
+        evidence = await self.database.list_evidence(task.id)
+        if earlier_event_candidates(self._chronology_facts(claims), evidence):
+            return
+        if len(claims) >= self.budget_for(task.depth).max_claims - 2 and not any(
+            c.agent != "history_insight"
+            and c.verification_state == "complete"
+            and c.badge in {"verified", "disputed", "refuted"}
+            for c in claims
+        ):
+            return
+        await self._fetch_history_case_leads(
+            task, claims, {item.local_id: item for item in evidence}
+        )
+        await self._repair_history_comparison(task.id, allow_new_case=True)
+        if (
+            "history_insight" in self.agents
+            and int(getattr(self.usage, "tokens_used", 0)) < token_limit * 9 // 10 - 30_000
+        ):
+            await self._recover_report_gaps(
+                task.id, event_query, board, recovery_round=1, history_only=True
+            )
+
+    async def _recover_chronology_from_sources(
+        self, task, event_query, claims, evidence, candidates
+    ) -> bool:
+        """Prefer one cited missing action from sources already fetched and admitted."""
+        agent = self.agents.get("fact_investigator")
+        if not candidates or agent is None:
+            return False
+        date = candidates[0]["date"]
+        refs = {item["evidence_ref"] for item in candidates if item["date"] == date}
+        sources = sorted(
+            (item for item in evidence if item.local_id in refs),
+            key=lambda item: (item.source_tier, item.local_id),
+        )[:4]
+        refs = {item.local_id for item in sources}
+        already_dated = any(
+            claim.agent != "history_insight" and dated_action(claim.text) == date
+            for claim in claims
+        )
+        query = (
+            f"{event_query}\n【事件时间线定点补查】只提取已有原文明确记载的 {date} 的一个最早公开动作，"
+            "以完整中文年月日开头，只引用一份能逐字回溯的本事件来源。"
+            "若是当事方发文或发帖，写成某匿名角色在该日发帖称，保留说法归属；不把指控当成事实，"
+            "不写当事方姓名、身份线索或指控中的个人细节。"
+            "同日已有机构回应时，只提取更早的公开披露，不能用回应替代首帖。"
+            "日期须来自正文明确写出的动作日期，不能采用当前文章的网页发布日期。无合格材料时返回空列表。"
+        )
+        generated = await agent.summarize(query, sources)
+        reviewed, _ = await self._review_generated(task.id, generated)
+        existing_texts = {claim.text for claim in claims}
+        budget = self.budget_for(task.depth)
+        for item in reviewed:
+            if (
+                item.statement_kind != "fact"
+                or len(item.evidence_ids) != 1
+                or item.evidence_ids[0] not in refs
+                or item.text in existing_texts
+                or dated_action(item.text) != date
+                or already_dated
+                and not DISCLOSURE.search(item.text)
+            ):
+                continue
+            claim = await self.database.add_claim(
+                ClaimCreate(
+                    task_id=task.id,
+                    text=item.text,
+                    agent="fact_investigator",
+                    round=budget.outer_rounds + 1,
+                    section="fact_check",
+                    evidence_ids=item.evidence_ids,
+                ),
+                max_claims=budget.max_claims,
+                max_evidence_per_claim=budget.max_evidence_per_claim,
+            )
+            await self.events.emit(
+                task.id,
+                "claim.added",
+                {
+                    "claim_id": claim.local_id,
+                    "text": claim.text,
+                    "evidence_ids": claim.evidence_ids,
+                    "agent": "fact_investigator",
+                },
+            )
+            return True
+        return False
+
     async def _recover_report_gaps(
         self,
         task_id: str,
@@ -906,6 +1005,13 @@ class V1Orchestrator:
             in {"main", "foreign_supplement", "event_context"}
         }
         goals = {}
+        missing_chronology = not history_only and "event_chronology" in missing
+        defer_history = missing_chronology or "verifiable_key_claim" in missing
+        chronology_candidates = (
+            earlier_event_candidates(self._chronology_facts(claims), evidence)
+            if missing_chronology
+            else []
+        )
         usable = [
             c
             for c in claims
@@ -934,13 +1040,19 @@ class V1Orchestrator:
                 "分别说明谁发布什么结论、何时作出什么处置；"
                 "不能重复只谈取证工作量或把单方说法改成已证实事实。"
             )
-            if "event_chronology" in missing:
-                candidates = earlier_event_candidates(self._chronology_facts(claims), evidence)
+            if chronology_candidates:
                 goals["fact_investigator"] += (
                     "待核对的既有正文线索（不是已证实事实）："
                     + "、".join(
-                        f"{item['evidence_ref']} 的 {item['date']} 时点" for item in candidates[:8]
+                        f"{item['evidence_ref']} 的 {item['date']} 时点"
+                        for item in chronology_candidates[:8]
                     )
+                )
+            if "verifiable_key_claim" in missing:
+                goals["fact_investigator"] += (
+                    "优先补齐能由原发布机构正文直接证实、或由两个相互独立的采编主体完整支持的"
+                    "一条本事件关键动作。先核对不同公开处理决定，不把同源转载当独立互证，"
+                    "也不要重复已有首帖说法。"
                 )
         relation_state = await self.database.checkpoint(task_id, "report:relations") or {}
         if not history_only and ("media_propagation" in missing or not relation_state.get("edges")):
@@ -971,15 +1083,22 @@ class V1Orchestrator:
                 )
             )
         evidence_by_id = {item.local_id: item for item in evidence}
-        if recovery_round <= 1 and not any(
-            c.agent == "history_insight"
-            and c.verification_state == "complete"
-            and c.verdict == "support"
-            and c.independent_sources >= 1
-            and independent_case_evidence(
-                c, evidence_by_id, task.resolved_event_query or task.event_query, task.created_at
+        if (
+            not defer_history
+            and recovery_round <= 1
+            and not any(
+                c.agent == "history_insight"
+                and c.verification_state == "complete"
+                and c.verdict == "support"
+                and c.independent_sources >= 1
+                and independent_case_evidence(
+                    c,
+                    evidence_by_id,
+                    task.resolved_event_query or task.event_query,
+                    task.created_at,
+                )
+                for c in claims
             )
-            for c in claims
         ):
             await self._fetch_history_case_leads(task, claims, evidence_by_id)
             goals["history_insight"] = (
@@ -1020,6 +1139,10 @@ class V1Orchestrator:
                 {"agent": name, "phase": "quality_recovery", "inner_round": 1},
             )
             try:
+                if name == "fact_investigator" and await self._recover_chronology_from_sources(
+                    task, event_query, claims, evidence, chronology_candidates
+                ):
+                    continue
                 if name == "history_insight":
                     wait = getattr(self.usage, "wait_for_recovery", None)
                     if wait is not None:
@@ -1122,7 +1245,8 @@ class V1Orchestrator:
                 await self.database.list_claims(task_id),
                 {item.local_id: item for item in await self.database.list_evidence(task_id)},
             )
-        await self._repair_history_comparison(task_id)
+        if not defer_history:
+            await self._repair_history_comparison(task_id)
 
     async def _repair_history_comparison(self, task_id: str, *, allow_new_case=False) -> None:
         """Retry a case fact against its own fetched source after a partial verdict."""
@@ -3863,7 +3987,7 @@ class V1Orchestrator:
                 )
             await self.database.save_checkpoint(task_id, "verify:complete", {"phase": "verified"})
 
-        if not stop_requested:
+        if not stop_requested and task.depth == "quick":
             self._set_llm_phase_limit(token_limit, "verification")
             await self._corroborate_key_fact(task_id, task.depth)
         self._set_llm_phase_limit(token_limit, "final")
@@ -3878,25 +4002,14 @@ class V1Orchestrator:
             await self._recover_publication_sources(
                 task, await self.database.list_evidence(task_id)
             )
-            await self._fetch_history_case_leads(
-                task,
-                await self.database.list_claims(task_id),
-                {item.local_id: item for item in await self.database.list_evidence(task_id)},
+            self._set_llm_phase_limit(token_limit, "verification")
+            try:
+                await self._corroborate_key_fact(task_id, task.depth)
+            finally:
+                self._set_llm_phase_limit(token_limit, "final")
+            await self._prepare_report_history(
+                task, investigation_query, board, token_limit=token_limit
             )
-            await self._repair_history_comparison(task_id, allow_new_case=True)
-            if (
-                "history_insight" in self.agents
-                and int(getattr(self.usage, "tokens_used", 0)) < token_limit * 9 // 10 - 30_000
-            ):
-                # Try one focused lookup before assembling the report, even if
-                # the main sections no longer need evidence recovery.
-                await self._recover_report_gaps(
-                    task_id,
-                    investigation_query,
-                    board,
-                    recovery_round=1,
-                    history_only=True,
-                )
             await self._emit_budget(task_id, task.depth)
         current_task = await self.database.get_task(task_id)
         evidence = await self.database.list_evidence(task_id)
@@ -4161,7 +4274,9 @@ class V1Orchestrator:
                     break
                 progress["summary_round"] = attempt + 1
                 await self.database.save_checkpoint(task_id, "report:quality_recovery", progress)
-                report = await self.reports.finalize_summary(task_id, report)
+                report = await self.reports.finalize_summary(
+                    task_id, report, recovery_draft=attempt > 0
+                )
                 current = await self.database.get_task(task_id)
                 if not current or current.status != "running":
                     break

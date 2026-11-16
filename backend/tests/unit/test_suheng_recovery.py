@@ -206,6 +206,10 @@ def test_key_fact_corroboration_only_selects_dated_independent_original():
     )
     candidates = V1Orchestrator._corroboration_candidates([attributed, claim], evidence, 6)
     assert [candidate[1].local_id for candidate in candidates] == ["C001", "C002"]
+    candidates = V1Orchestrator._corroboration_candidates(
+        [attributed, claim], [*evidence, source("E006", "third.example")], 6
+    )
+    assert [candidate[1].local_id for candidate in candidates[:2]] == ["C001", "C002"]
 
 
 @pytest.mark.asyncio

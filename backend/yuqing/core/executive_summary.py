@@ -24,6 +24,7 @@ PARAGRAPH_REVIEW_FIELDS = ("role_match", "focused", "gap_disclosed")
 COVERAGE_FIELDS = ("event", "current_state", "dispute", "findings", "boundaries", "follow_up")
 SUMMARY_LIMITS = {
     "max_draft_attempts": 4,
+    "max_recovery_attempts": 7,
     "max_paragraphs": 4,
     "max_sentences_per_paragraph": 10,
     "max_sentence_characters": 400,

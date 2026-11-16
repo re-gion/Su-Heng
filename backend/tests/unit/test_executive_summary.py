@@ -236,6 +236,166 @@ async def attach(report, **options):
 
 
 @pytest.mark.asyncio
+async def test_final_summary_recovery_derives_sentence_kind_from_evidence(summary_report):
+    baseline = paragraphs()
+    basis_fields = {
+        "fact": "claim_refs",
+        "analysis": "analysis_refs",
+        "limitation": "limitation_refs",
+    }
+
+    class EvidenceFirstGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "reporter" and "阶段：四段摘要规划。" not in prompt:
+                if "阶段：从已审材料选择摘要原句。" in prompt:
+                    candidates = json.loads(prompt.split("\n", 1)[1])["candidates"]
+                    return {
+                        "paragraphs": [
+                            {
+                                "role": p["role"],
+                                "units": [
+                                    next(
+                                        ref
+                                        for ref, item in candidates.items()
+                                        if item["basis_ref"] in s[basis_fields[s["kind"]]]
+                                    )
+                                    for s in p["sentences"]
+                                ],
+                            }
+                            for p in baseline
+                        ]
+                    }
+                result = copy.deepcopy(baseline)
+                # Reproduces the repeated claim/analysis kind mismatch in the limits paragraph.
+                result[-1]["sentences"][0]["kind"] = "analysis"
+                return {"paragraphs": result}
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    gateway = EvidenceFirstGateway()
+    reporter = OpenAIReportAgent(gateway, "fixture")
+    summary_report["quality"]["release_gate_missing"] = ["executive_summary"]
+    await attach_executive_summary(summary_report, reporter)
+    assert summary_report["quality"]["executive_summary"]["status"] == "fact_brief"
+
+    await attach_executive_summary(summary_report, reporter, recovery_draft=True)
+
+    assert summary_report["quality"]["release_label"] == "full_report"
+    result = summary_report["blocks"][1]["paragraphs"]
+    assert [p["role"] for p in result] == list(SUMMARY_ROLES)
+    for actual, expected in zip(result, baseline, strict=True):
+        sentence = actual["sentences"][0]
+        original = expected["sentences"][0]
+        assert sentence["kind"] == original["kind"]
+        assert sentence[basis_fields[sentence["kind"]]] == original[basis_fields[original["kind"]]]
+    assert (
+        result[0]["sentences"][0]["text"]
+        == summary_context(summary_report)["facts"]["C001"]["text"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "review_passes, multiple_roles", [(True, False), (False, False), (True, True)]
+)
+async def test_dispute_coverage_recovery_preserves_other_reviewed_paragraphs(
+    summary_report, review_passes, multiple_roles
+):
+    first = paragraphs()
+    revised = copy.deepcopy(first[1]["sentences"][0])
+    revised["text"] = "现有校方通报没有提供诉求者的完整公开表述，无法归纳分歧。"
+    boundary = copy.deepcopy(first[3]["sentences"][0])
+    boundary["text"] = "只取得校方通报，全部处理结果仍无法判断。"
+
+    class DisputeGateway(Gateway):
+        repairs = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if "阶段：定点修订摘要指定段落。" in prompt:
+                self.repairs += 1
+                selected = json.loads(prompt.split("\n", 1)[1])["roles"]
+                assert selected == (["dispute", "limits"] if multiple_roles else ["dispute"])
+                returned = [
+                    {
+                        "role": "dispute",
+                        "sentences": [{"text": revised["text"], "basis_ref": "L02"}],
+                    }
+                ]
+                if multiple_roles:
+                    returned.append(
+                        {
+                            "role": "limits",
+                            "sentences": [{"text": boundary["text"], "basis_ref": "L01"}],
+                        }
+                    )
+                return {"paragraphs": returned}
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                current = json.loads(prompt.split("\n", 1)[1])["paragraphs"]
+                result = approval(current)
+                if not review_passes or current[1]["sentences"][0]["text"] != revised["text"]:
+                    result["coverage"]["dispute"] = False
+                    result["paragraphs"]["dispute"]["role_match"] = False
+                    result["no_material_omission"] = False
+                if multiple_roles and current[-1]["sentences"][0]["text"] != boundary["text"]:
+                    result["coverage"]["boundaries"] = False
+                    result["paragraphs"]["limits"]["gap_disclosed"] = False
+                return result
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    gateway = DisputeGateway()
+    reporter = OpenAIReportAgent(gateway, "fixture")
+
+    async def extract(_context, _feedback):
+        return {"paragraphs": copy.deepcopy(first)}
+
+    reporter._extractive_summary_draft = extract
+    result = await reporter.recover_summary(summary_context(summary_report))
+
+    assert gateway.repairs >= 1
+    if review_passes:
+        expected = copy.deepcopy(first)
+        expected[1]["sentences"] = [revised]
+        if multiple_roles:
+            expected[3]["sentences"] = [boundary]
+        assert result["paragraphs"] == expected
+    else:
+        assert result["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_only_recovery_preserves_reviewed_limits(summary_report):
+    baseline = paragraphs()
+    context = summary_context(summary_report)
+    trigger = "取得正式核查结果后，应更新对处置进度的判断。"
+    context["analyses"]["analysis:0"]["trigger"] = trigger
+
+    class FollowUpGateway(Gateway):
+        async def complete_json(self, role, system, prompt, **kwargs):
+            if role == "verifier" and "阶段：逐句绑定依据审查。" not in prompt:
+                current = json.loads(prompt.split("\n", 1)[1])["paragraphs"]
+                result = approval(current)
+                result["coverage"]["follow_up"] = any(
+                    s["text"] == trigger for s in current[-1]["sentences"]
+                )
+                result["no_material_omission"] = result["coverage"]["follow_up"]
+                return result
+            return await super().complete_json(role, system, prompt, **kwargs)
+
+    reporter = OpenAIReportAgent(FollowUpGateway(), "fixture")
+
+    async def extract(_context, _feedback):
+        return {"paragraphs": copy.deepcopy(baseline)}
+
+    reporter._extractive_summary_draft = extract
+    result = await reporter.recover_summary(context)
+
+    revised = result["paragraphs"]
+    assert revised[:-1] == baseline[:-1]
+    assert revised[-1]["sentences"][:-1] == baseline[-1]["sentences"]
+    assert revised[-1]["sentences"][-1]["text"] == trigger
+    assert revised[-1]["sentences"][-1]["analysis_refs"] == ["analysis:0"]
+
+
+@pytest.mark.asyncio
 async def test_narrative_runs_after_whole_report_and_keeps_authoritative_facts(summary_report):
     before = copy.deepcopy(summary_report["blocks"][2])
     gateway, block = await attach(summary_report)

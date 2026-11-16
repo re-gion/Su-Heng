@@ -2127,7 +2127,9 @@ class FullReportBuilder:
         )
         return report_id, validated, path
 
-    async def finalize_summary(self, task_id: str, report: dict, *, cached_only=False) -> dict:
+    async def finalize_summary(
+        self, task_id: str, report: dict, *, cached_only=False, recovery_draft=False
+    ) -> dict:
         task = await self.database.get_task(task_id)
         if task is None:
             return report
@@ -2145,6 +2147,7 @@ class FullReportBuilder:
             scope_reviewer=self.scope_reviewer if scope_required else None,
             scope_required=scope_required,
             cached_only=cached_only,
+            recovery_draft=recovery_draft,
         )
         prune_citation_backlinks(report)
         return validate_report(report).report

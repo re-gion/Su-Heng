@@ -46,7 +46,7 @@ def safe_summary_diagnostics(value) -> list[dict]:
         record = {"stage": item["stage"], "codes": list(dict.fromkeys(codes))}
         if (
             type(item.get("attempt")) is int
-            and 0 <= item["attempt"] <= SUMMARY_LIMITS["max_draft_attempts"]
+            and 0 <= item["attempt"] <= SUMMARY_LIMITS["max_recovery_attempts"]
         ):
             record["attempt"] = item["attempt"]
         issues = []
@@ -120,7 +120,13 @@ def refresh_summary_release(report: dict) -> None:
 
 
 async def attach_executive_summary(
-    report: dict, reporter, *, scope_reviewer=None, scope_required=False, cached_only=False
+    report: dict,
+    reporter,
+    *,
+    scope_reviewer=None,
+    scope_required=False,
+    cached_only=False,
+    recovery_draft=False,
 ) -> None:
     block = next((b for b in report["blocks"] if b.get("type") == "executive_summary"), None)
     if block is None:
@@ -146,6 +152,8 @@ async def attach_executive_summary(
             limits["items"].append({"id": "LS01", "category": "摘要审查独立性", "text": notice})
     context = summary_context(report)
     summarize = getattr(reporter, "cached_summary" if cached_only else "summarize", None)
+    if recovery_draft and not cached_only:
+        summarize = getattr(reporter, "recover_summary", summarize)
     retry_scope = getattr(reporter, "retry_scoped_summary", None) if scope_retry else None
     if not context["facts"] or summarize is None or (scope_required and scope_reviewer is None):
         refresh_summary_release(report)
