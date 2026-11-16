@@ -94,6 +94,36 @@ class Gateway:
 
 
 @pytest.mark.asyncio
+async def test_repeated_wrong_number_in_event_opening_preserves_reviewed_fact(summary_report):
+    fact = next(b for b in summary_report["blocks"] if b["type"] == "fact_check_table")["items"][0]
+    fact["verdict"] = "support"
+
+    class WrongNumberGateway(Gateway):
+        drafts = 0
+        opening_reviews = 0
+
+        async def complete_json(self, role, system, prompt, **kwargs):
+            response = await super().complete_json(role, system, prompt, **kwargs)
+            if role == "reporter" and "paragraphs" in response:
+                self.drafts += 1
+                response["paragraphs"][0]["sentences"][0]["text"] = fact["text"].replace(
+                    "120", "999"
+                )
+            if role == "verifier" and "阶段：逐句绑定依据审查。" in prompt:
+                sentence = json.loads(prompt.split("\n", 1)[1])["sentence"]
+                if sentence["id"] == "S01":
+                    assert sentence["text"] == fact["text"]
+                    self.opening_reviews += 1
+            return response
+
+    gateway = WrongNumberGateway()
+    result = await OpenAIReportAgent(gateway, "fixture").summarize(summary_context(summary_report))
+    assert gateway.drafts == 2 and gateway.opening_reviews == 1
+    assert result["paragraphs"][0]["sentences"][0]["text"] == fact["text"]
+    assert review_accepted(result["narrative_review"], result["paragraphs"])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("omission", [False, True])
 async def test_remove_only_located_unsupported_sentence_then_require_fresh_full_review(
     summary_report, omission

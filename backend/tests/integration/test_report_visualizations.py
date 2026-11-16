@@ -153,6 +153,21 @@ def test_relationship_map_never_connects_unreviewed_unknown_or_unbound_edges():
         assert publication_visual(invalid) == ("", set())
 
 
+def test_protected_report_shows_reviewed_relationship_with_source_link_but_no_quote():
+    report = visual_report()
+    network = report["blocks"][4]
+    network["data_basis"] = "typed_claim_and_reviewed_relation_evidence"
+    network["edges"][0].update(quote=None, support_evidence_id="E002")
+    assert 'class="visual-relation"' not in render_html(report)
+    report["task"]["investigation_scope"] = "public_event"
+    page = render_html(report)
+    assert 'class="visual-relation"' in page
+    assert "原文引句已隐去" in page
+    assert 'href="#evidence-E002"' in page
+    network["edges"][0]["support_evidence_id"] = "E003"
+    assert 'class="visual-relation"' not in render_html(report)
+
+
 def test_analysis_missing_qualified_material_uses_existing_text_fallback():
     block = visual_report()["blocks"][3]
     block["items"][0].pop("uncertainty")

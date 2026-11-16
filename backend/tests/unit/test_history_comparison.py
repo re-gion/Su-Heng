@@ -31,6 +31,57 @@ def test_repeated_claims_about_one_case_make_one_card_with_all_refs():
     assert result[0]["claim_refs"] == ["C011", "C012"]
 
 
+def test_history_aliases_can_share_a_dated_decision_without_discarding_its_later_stages():
+    def card(name, published, *facts):
+        return {
+            "event_name": name,
+            "institution": "示例大学",
+            "event_time": f"资料发布：{published}",
+            "background_status": "complete",
+            "claim_refs": [ref for ref, _ in facts],
+            "background_facts": [{"claim_ref": ref, "text": text} for ref, text in facts],
+        }
+
+    cards = [
+        card(
+            "示例大学考生因处分起诉案",
+            "2023-06-30",
+            (
+                "C001",
+                "示例大学对涉事学生作出开除决定，甲区人民法院2022年7月5日以作出处分前未告知事实理由并听取陈述申辩属程序违法为由撤销决定。",
+            ),
+        ),
+        card(
+            "示例大学考试纪律处理争议",
+            "2023-07-01",
+            ("C002", "2021年11月15日示例大学认定一名基础医学院学生在闭卷考试中使用通讯设备作弊。"),
+            (
+                "C003",
+                "2022年7月5日甲区人民法院判决认定示例大学作出处分前未告知事实理由并听取陈述申辩属程序违法。",
+            ),
+        ),
+        card(
+            "示例大学学生被认定作弊案",
+            "2023-07-01",
+            ("C004", "示例大学2021年11月15日认定一名基础医学院学生在闭卷考试时使用通讯设备作弊。"),
+        ),
+        card(
+            "示例大学纪律处分行政复核案",
+            "2023-08-01",
+            (
+                "C005",
+                "2022年8月5日甲区人民法院判决认定示例大学作出处分前未告知事实理由并听取陈述申辩属程序违法。",
+            ),
+        ),
+    ]
+
+    result = unique_history_cards(cards, merge_reviewed_aliases=True)
+
+    assert len(result) == 2
+    assert set(result[0]["claim_refs"]) == {"C001", "C002", "C003", "C004"}
+    assert result[1]["claim_refs"] == ["C005"]
+
+
 def claim(case):
     return SimpleNamespace(analysis_data={"historical_case": case}, evidence_ids=["E001"])
 

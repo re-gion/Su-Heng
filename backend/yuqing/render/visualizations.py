@@ -286,6 +286,14 @@ def publication_visual(block: dict) -> tuple[str, set[str]]:
     for edge in block.get("edges", []):
         source, target = edge.get("from_evidence_id"), edge.get("to_evidence_id")
         key = (source, target, edge.get("relation"))
+        support = edge.get("support_evidence_id")
+        quote_withheld = (
+            block.get("quotes_withheld_for_privacy")
+            and "quote" in edge
+            and edge["quote"] is None
+            and support in {source, target}
+            and support in (edge.get("evidence_refs") or [])
+        )
         if (
             source not in nodes
             or target not in nodes
@@ -294,7 +302,7 @@ def publication_visual(block: dict) -> tuple[str, set[str]]:
             or edge.get("relation") not in {"repost", "response", "follow_up"}
             or edge.get("review_status") != "accepted"
             or not edge.get("evidence_refs")
-            or not edge.get("quote")
+            or not (edge.get("quote") or quote_withheld)
         ):
             continue
         groups[source].append(edge)
@@ -331,14 +339,18 @@ def publication_visual(block: dict) -> tuple[str, set[str]]:
             label = {"repost": "转载", "response": "回应", "follow_up": "引述/跟进"}[
                 edge["relation"]
             ]
+            quotation = (
+                f"<blockquote><p>{_escape(edge['quote'])}</p></blockquote>"
+                if edge.get("quote")
+                else "<p>原文引句已隐去，可通过证据编号回查公开来源。</p>"
+            )
             targets.append(
                 '<div class="visual-relation"><div class="visual-relation-arrow"><span>'
                 + label
                 + '</span><span aria-hidden="true">→</span></div><div>'
                 + node_card(nodes[target])
-                + '<details class="visual-detail visual-relation-basis"><summary>查看连线依据</summary><blockquote><p>'
-                + _escape(edge["quote"])
-                + "</p></blockquote>"
+                + '<details class="visual-detail visual-relation-basis"><summary>查看连线依据</summary>'
+                + quotation
                 + _refs(edge)
                 + "</details></div></div>"
             )

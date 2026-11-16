@@ -47,7 +47,7 @@ from yuqing.core.publication_relations import (
 
 class OpenAIReportAgent:
     EDITORIAL_VERSION = "reader-decision-v5"
-    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v12"
+    SUMMARY_DRAFT_VERSION = "four-stage-targeted-v13"
     RELATION_VERSION = "source-identity-v10"
 
     @staticmethod
@@ -76,6 +76,33 @@ class OpenAIReportAgent:
             except ValueError:
                 pass
         return None
+
+    @staticmethod
+    def _replace_number_errors_with_cited_facts(paragraphs, context, issues):
+        """Keep the cause or turning point when its single cited assertion has the exact wording."""
+        candidate = [{**p, "sentences": [dict(s) for s in p["sentences"]]} for p in paragraphs]
+        for issue in issues:
+            match = re.fullmatch(r"paragraphs\[(\d+)\]\.sentences\[(\d+)\]", issue["path"])
+            if match is None or issue["codes"] != ["unsupported_number"]:
+                return None
+            paragraph, sentence = map(int, match.groups())
+            if candidate[paragraph]["role"] != "event":
+                return None
+            item = candidate[paragraph]["sentences"][sentence]
+            refs = item.get("claim_refs", [])
+            if item.get("kind") != "fact" or len(refs) != 1:
+                return None
+            fact = context["facts"].get(refs[0], {})
+            if fact.get("verification_state") != "complete" or fact.get("verdict") != "support":
+                return None
+            original = fact.get("text") or ""
+            phrases = [re.sub(r"[\W_\d]", "", text) for text in (original, item["text"])]
+            if SequenceMatcher(None, *phrases, autojunk=False).ratio() < 0.65:
+                return None
+            item["text"] = original
+        if check_paragraphs(candidate, context, require_headings=True, number_policy=NUMBER_POLICY):
+            return None
+        return candidate
 
     @staticmethod
     def _remove_located_invalid_sentences(paragraphs: list[dict], context: dict, errors: list[str]):
@@ -193,6 +220,23 @@ class OpenAIReportAgent:
                 errors = check_paragraphs(
                     paragraphs, context, require_headings=True, number_policy=NUMBER_POLICY
                 )
+                if attempt > 0 and errors == ["unsupported_number"]:
+                    issues = paragraph_issues(
+                        paragraphs, context, require_headings=True, number_policy=NUMBER_POLICY
+                    )
+                    repaired = self._replace_number_errors_with_cited_facts(
+                        paragraphs, context, issues
+                    )
+                    if repaired is not None:
+                        diagnostics.append(
+                            {
+                                "attempt": attempt + 1,
+                                "stage": "structure",
+                                "codes": ["unsupported_number"],
+                                "issues": issues,
+                            }
+                        )
+                        paragraphs, errors = repaired, []
                 if errors:
                     issues = paragraph_issues(
                         paragraphs, context, require_headings=True, number_policy=NUMBER_POLICY

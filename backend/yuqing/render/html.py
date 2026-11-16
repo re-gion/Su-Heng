@@ -1416,6 +1416,15 @@ def render_html(report: dict[str, Any], *, view: Literal["brief", "full"] = "bri
     for block in arrange_history(blocks, str(report.get("task", {}).get("event_query") or "")):
         if block.get("type") == "report_header":
             continue
+        if block.get("type") == "propagation_network":
+            block = {
+                **block,
+                "quotes_withheld_for_privacy": (
+                    report.get("task", {}).get("investigation_scope")
+                    in {"institution", "public_event"}
+                    and block.get("data_basis") == "typed_claim_and_reviewed_relation_evidence"
+                ),
+            }
         rendered = _render_block(block, claim_badges, analysis_targets)
         if block.get("type") == "executive_summary" and not block.get("summary_mode"):
             decisions = [

@@ -185,12 +185,82 @@ def background_complete(card: dict[str, Any]) -> bool:
     )
 
 
-def unique_history_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _dated_history_passages(card: dict) -> list[tuple[tuple[int, ...], str]]:
+    passages = []
+    full_date = re.compile(r"(?<!\d)(\d{4})(?:\s*年\s*|-)(\d{1,2})(?:\s*月\s*|-)(\d{1,2})(?:日|\b)")
+    for fact in card.get("background_facts", []):
+        text = str(fact.get("text") or "")
+        dates = list(full_date.finditer(text))
+        for index, match in enumerate(dates):
+            end = dates[index + 1].start() if index + 1 < len(dates) else len(text)
+            passage = re.sub(r"[\W_]", "", text[match.end() : end]).casefold()
+            passages.append((tuple(map(int, match.groups())), passage))
+    return passages
+
+
+def _reviewed_history_alias(left: dict, right: dict) -> bool:
+    institution = left.get("institution")
+    if (
+        not institution
+        or institution != right.get("institution")
+        or any(
+            card.get("background_status") != "complete"
+            or re.search(r"另一起|另一宗|另案", str(card.get("event_name") or ""))
+            for card in (left, right)
+        )
+    ):
+        return False
+    if (left.get("case_type") or "analogous") != (right.get("case_type") or "analogous"):
+        return False
+    meaning = re.compile(r"\d+(?:\.\d+)?|没有|未|不予|不构成|不属于")
+    for date, passage in _dated_history_passages(left):
+        for other_date, other in _dated_history_passages(right):
+            shorter = min(len(passage), len(other))
+            if (
+                date != other_date
+                or shorter < 24
+                or meaning.findall(passage) != meaning.findall(other)
+            ):
+                continue
+            match = SequenceMatcher(None, passage, other, autojunk=False)
+            longest = match.find_longest_match().size
+            if match.ratio() >= 0.86 or (
+                longest >= max(20, shorter * 0.65) and match.ratio() >= 0.58
+            ):
+                return True
+    return False
+
+
+def _reviewed_case_names(cards: list[dict]) -> dict[int, str]:
+    groups: list[list[int]] = []
+    for index, card in enumerate(cards):
+        matching = [
+            group for group in groups if any(_reviewed_history_alias(card, cards[i]) for i in group)
+        ]
+        if not matching:
+            groups.append([index])
+            continue
+        matching[0].append(index)
+        for group in matching[1:]:
+            matching[0].extend(group)
+            groups.remove(group)
+    return {
+        index: "".join(str(cards[min(group)].get("event_name") or "").casefold().split())
+        for group in groups
+        if len(group) > 1
+        for index in group
+    }
+
+
+def unique_history_cards(
+    cards: list[dict[str, Any]], *, merge_reviewed_aliases: bool = False
+) -> list[dict[str, Any]]:
     """Keep one card per named case while retaining every cited source."""
 
     merged: dict[tuple[str, str], dict[str, Any]] = {}
+    aliases = _reviewed_case_names(cards) if merge_reviewed_aliases else {}
     for index, raw in enumerate(cards):
-        name = "".join(str(raw.get("event_name") or "").casefold().split())
+        name = aliases.get(index) or "".join(str(raw.get("event_name") or "").casefold().split())
         # An unnamed legacy card has no reliable case identity.
         key = (str(raw.get("case_type") or "analogous"), name or f"__unnamed_{index}")
         if key not in merged:

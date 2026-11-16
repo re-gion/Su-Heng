@@ -24,7 +24,9 @@ def history_chapter(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
         for item in block.get("items", [])
         if item.get("claim_ref")
     }
-    cards = unique_history_cards([card for block in source for card in block.get("cards", [])])
+    cards = unique_history_cards(
+        [card for block in source for card in block.get("cards", [])], merge_reviewed_aliases=True
+    )
     references = unique_history_cards(
         [card for block in source for card in block.get("reference_candidates", [])]
     )
