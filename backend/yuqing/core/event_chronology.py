@@ -14,7 +14,12 @@ _NESTED_OR_CUTOFF_DATE = re.compile(
     r"(?:针对|关于|截至|涉及|就|对)\s*$"
 )
 _UNDATED_NEWS_ATTRIBUTION = re.compile(
-    r"^(?:据)?[^，,。；;！？\n]{2,32}?报道(?:称|指出|显示)?[，,]\s*"
+    r"^(?:据)?[^，,。；;！？\n]{2,32}?(?:报道(?:称|指出|显示)?|转述(?:称)?|回顾(?:称)?)[，,]\s*"
+)
+_ATTRIBUTED_DISCLOSURE = re.compile(
+    rf"^{DATE.pattern}(?:凌晨|上午|中午|下午|晚间|夜间|晚)?[，,\s]*"
+    r"(?!的|起|以来|前后|左右)[^，,。；;！？\n]{2,65}?"
+    r"(?:发帖|发文|发布(?:了)?(?:公开)?(?:自述|帖子|帖文|文章|测试视频))"
 )
 DISCLOSURE = re.compile(
     r"发帖|发文|发布.{0,12}(?:测试视频|评测|测评|帖文|文章)|首次.{0,8}(?:公开|曝光|披露)"
@@ -37,10 +42,12 @@ def explicit_event_date(text: str) -> str | None:
     Time-of-day modifiers do not change the day. Invalid and uncertain days stay out.
     """
     attribution = _UNDATED_NEWS_ATTRIBUTION.match(text)
-    if attribution and not DATE.search(attribution[0]) and publication_reading_parts(text):
-        # The press attribution has no date of its own. Keep the explicitly
-        # dated publication in the supported statement as the action.
-        text = text[attribution.end() :]
+    if attribution and not DATE.search(attribution[0]):
+        attributed_text = text[attribution.end() :]
+        if publication_reading_parts(text) or _ATTRIBUTED_DISCLOSURE.match(attributed_text):
+            # The undated reporting credit does not replace the explicitly
+            # dated act of publishing a statement or first-person account.
+            text = attributed_text
     match = DATE.search(text)
     if not match:
         return None

@@ -1491,6 +1491,20 @@ class OpenAIReportAgent:
                     for item in output["analyses"]
                     if isinstance(item, dict) and item.get("section") == section
                 ][: self._analysis_limit(context)]
+                if section == "06" and not output["analyses"] and context.get("history_case_refs"):
+                    local = {
+                        **self._chapter_context(context, section, compact=True),
+                        "repair_instruction": (
+                            "仅尝试一个有两案陈述共同支持的可比机制，并交代会限制借鉴的关键差异。"
+                            "如果两案只共享主题而无可比程序，保留空列表。"
+                        ),
+                    }
+                    output = await self._draft(local, section)
+                    output["analyses"] = [
+                        item
+                        for item in output["analyses"]
+                        if isinstance(item, dict) and item.get("section") == "06"
+                    ][:1]
                 reviewed = await self._review(local, output)
                 if (
                     self.database

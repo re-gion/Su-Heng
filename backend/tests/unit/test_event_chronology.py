@@ -37,6 +37,32 @@ def test_explicitly_dated_statement_keeps_its_date_when_recounting_earlier_incid
     assert nodes[0]["date"] == "2023-06-17"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "澄河新闻网报道称，2023年10月11日一名学生发帖称此前在图书馆遭到骚扰。",
+        "据地方日报报道，2023年10月11日，当事人甲通过公开账号发文披露此事。",
+        "据甲报、乙报回顾，2023年10月11日下午一名学生在社交平台发帖。",
+    ],
+)
+def test_an_undated_press_attribution_does_not_hide_the_dated_disclosure(text):
+    from types import SimpleNamespace
+
+    from yuqing.core.event_chronology import earlier_event_candidates
+
+    facts = [fact("C001", text)]
+    source = SimpleNamespace(
+        local_id="E002",
+        fetch_status="fetched",
+        extra={"scope_status": "main"},
+        content_text="2023年10月11日，当事人发帖披露此事。",
+    )
+
+    timeline = event_timeline(facts)
+    assert [(node["date"], node["text"]) for node in timeline] == [("2023-10-11", text)]
+    assert earlier_event_candidates(facts, [source]) == []
+
+
 def test_initial_publication_survives_two_responses_on_the_same_day():
     facts = [
         fact("C001", "2026年10月8日，懂车帝相关账号发布测试视频，称车辆测试中踏板支架断裂。"),

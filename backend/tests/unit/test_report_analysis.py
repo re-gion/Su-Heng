@@ -677,3 +677,39 @@ def test_chapter_06_context_keeps_the_selected_case_and_current_event():
     result = OpenAIReportAgent._chapter_context(context, "06", compact=True)
 
     assert [fact["claim_ref"] for fact in result["facts"]] == ["C102", "C001"]
+
+
+@pytest.mark.asyncio
+async def test_empty_history_draft_can_retry_one_grounded_comparison():
+    facts, sources, draft = inputs()
+    facts.append(
+        {
+            **facts[0],
+            "claim_ref": "C102",
+            "text": "另一机构公布了调查处理结果。",
+            "origin_agent": "history_insight",
+        }
+    )
+    comparison = {**draft["analyses"][0], "section": "06", "claim_refs": ["C001", "C102"]}
+    context = {**report_context({}, facts, sources, []), "history_case_refs": ["C102"]}
+
+    class Gateway:
+        history_drafts = 0
+        reviews = 0
+
+        async def complete_json(self, role, _system, user, **_kwargs):
+            if role == "verifier":
+                self.reviews += 1
+                return {"accepted_indexes": [0], "rejections": []}
+            if "第06章" in user:
+                self.history_drafts += 1
+                if self.history_drafts == 2:
+                    assert "只共享主题而无可比程序" in user
+                    return {**draft, "analyses": [comparison]}
+            return {"analyses": [], "summary_claim_refs": [], "measurements": []}
+
+    gateway = Gateway()
+    result = await OpenAIReportAgent(gateway, "system").enrich(context)
+
+    assert gateway.history_drafts == 2 and gateway.reviews == 1
+    assert result["analyses"] == [comparison]
